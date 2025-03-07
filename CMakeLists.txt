@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(legged_template_controller)
+project(motion_tracking_controller)
 
 add_compile_options(-Wall -Wextra -Wpedantic)
 
@@ -17,7 +17,7 @@ ament_auto_add_library(
 
 # prevent pluginlib from using boost
 target_compile_definitions(${PROJECT_NAME} PUBLIC "PLUGINLIB__DISABLE_BOOST_FUNCTIONS")
-pluginlib_export_plugin_description_file(controller_interface legged_template_controller.xml)
+pluginlib_export_plugin_description_file(controller_interface motion_tracking_controller.xml)
 
 target_include_directories(
         ${PROJECT_NAME} PUBLIC ${EIGEN3_INCLUDE_DIRS})
