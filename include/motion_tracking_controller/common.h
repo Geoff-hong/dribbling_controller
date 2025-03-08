@@ -1,0 +1,26 @@
+//
+// Created by qiayuanl on 3/7/25.
+//
+
+#pragma once
+
+#include <legged_model/common.h>
+#include <string>
+#include <vector>
+
+namespace legged {
+
+struct MotionCommandCfg {
+  std::string path, referenceBody;
+  std::vector<std::string> jointNames;
+  std::vector<std::string> bodyNames;
+};
+
+inline vector_t quaternionToVectorWxyz(const quaternion_t& ori) {
+  vector_t vec(4);
+  vec(0) = ori.w();
+  vec.segment(1, 3) = ori.coeffs().head(3);
+  return vec;
+}
+
+}  // namespace legged
