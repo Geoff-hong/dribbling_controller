@@ -9,6 +9,10 @@ namespace legged {
 vector_t MotionCommandTerm::getValue() {
   vector_t value(getSize());
 
+  if (motionIndex_ < referencePosition_.size() - 1) {
+    motionIndex_++;
+  }
+
   const auto& data = model_->getPinData();
   const auto& refPoseReal = data.oMf[referenceBodyIndex_];
 
@@ -17,7 +21,7 @@ vector_t MotionCommandTerm::getValue() {
   const auto& refJointPos = jointPosition_[motionIndex_];
   const auto& refJointVel = jointVelocity_[motionIndex_];
   const auto& refBodyPositions = bodyPositions_[motionIndex_];
-  const auto ori = quaternion_t(refPoseReal.rotation()).conjugate() * refOri;
+  const auto ori = quaternion_t(refPoseReal.rotation()).inverse() * refOri;
 
   value.head(3) = refPoseReal.actInv(refPos);
   value.segment(3, 4) = quaternionToVectorWxyz(ori);
