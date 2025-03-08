@@ -21,7 +21,7 @@ vector_t MotionObservation::evaluate() {
   const auto& refPoseReal = data.oMf[referenceBodyIndex_];
   auto ori = quaternion_t(refPoseReal.rotation());
   // Reference orientation
-  value.segment(0, 4) = quaternionToVectorWxyz(ori);
+  value.head(4) = quaternionToVectorWxyz(ori);
 
   for (size_t i = 0; i < cfg_.bodyNames.size(); ++i) {
     const auto& bodyPose = data.oMf[bodyIndices_[i]];
@@ -36,7 +36,7 @@ vector_t MotionObservation::evaluate() {
 }
 
 size_t MotionObservation::getSize() const {
-  return 3 + 3 * cfg_.bodyNames.size() + 4 * cfg_.bodyNames.size();
+  return 4 + 3 * cfg_.bodyNames.size() + 4 * cfg_.bodyNames.size();
 }
 
 }  // namespace legged

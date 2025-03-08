@@ -54,7 +54,6 @@ bool MotionCommandTerm::loadMotionFile() {
         return false;
       }
     }
-
     if (!rowValues.empty()) {
       size_t bodyIndex = 0;
       vector3_t pos;
@@ -76,11 +75,11 @@ bool MotionCommandTerm::loadMotionFile() {
         } else if (i < 7 + cfg_.bodyNames.size() * 3 + 2 * cfg_.jointNames.size()) {
           joint[i - 7 - cfg_.bodyNames.size() * 3 - cfg_.jointNames.size()] = rowValues[i];
         }
-        if (i == 2) {
+        if (i == 3 - 1) {
           referencePosition_.push_back(pos);
         } else if (i == 7 - 1) {
           referenceOrientation_.push_back(ori);
-        } else if (i == 7 + cfg_.bodyNames.size() * 3 - 1) {
+        } else if (i == 7 + (bodyIndex + 1) * 3 - 1 && bodyIndex < cfg_.bodyNames.size()) {
           bodyPositions_.back()[bodyIndex] = pos;
           bodyIndex++;
         } else if (i == 7 + cfg_.bodyNames.size() * 3 + cfg_.jointNames.size() - 1) {
