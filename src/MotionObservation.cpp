@@ -12,6 +12,9 @@ MotionObservation::MotionObservation(const std::shared_ptr<LeggedModel>& leggedM
   referenceBodyIndex_ = pinModel.getFrameId(cfg_.referenceBody);
   for (const auto& bodyName : cfg_.bodyNames) {
     bodyIndices_.push_back(pinModel.getFrameId(bodyName));
+    if (bodyIndices_.back() >= pinModel.nframes) {
+      throw std::runtime_error("Frame " + bodyName + " not found.");
+    }
   }
 }
 
@@ -19,9 +22,8 @@ vector_t MotionObservation::evaluate() {
   vector_t value(getSize());
   const auto& data = model_->getPinData();
   const auto& refPoseReal = data.oMf[referenceBodyIndex_];
-  auto ori = quaternion_t(refPoseReal.rotation());
   // Reference orientation
-  value.head(4) = quaternionToVectorWxyz(ori);
+  value.head(4) = rotationToVectorWxyz(refPoseReal.rotation());
 
   for (size_t i = 0; i < cfg_.bodyNames.size(); ++i) {
     const auto& bodyPose = data.oMf[bodyIndices_[i]];
@@ -29,7 +31,7 @@ vector_t MotionObservation::evaluate() {
     // Body local position
     value.segment(4 + i * 3, 3) = bodyPoseLocal.translation();
     // Body local orientation
-    value.segment(4 + 3 * cfg_.bodyNames.size() + i * 4, 4) = quaternionToVectorWxyz(quaternion_t(bodyPoseLocal.rotation()));
+    value.segment(4 + 3 * cfg_.bodyNames.size() + i * 4, 4) = rotationToVectorWxyz(bodyPoseLocal.rotation());
   }
 
   return value;

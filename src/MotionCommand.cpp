@@ -21,10 +21,9 @@ vector_t MotionCommandTerm::getValue() {
   const auto& refJointPos = jointPosition_[motionIndex_];
   const auto& refJointVel = jointVelocity_[motionIndex_];
   const auto& refBodyPositions = bodyPositions_[motionIndex_];
-  const auto ori = quaternion_t(refPoseReal.rotation()).inverse() * refOri;
 
   value.head(3) = refPoseReal.actInv(refPos);
-  value.segment(3, 4) = quaternionToVectorWxyz(ori);
+  value.segment(3, 4) = rotationToVectorWxyz(quaternion_t(refPoseReal.rotation().inverse()) * refOri);
   for (size_t i = 0; i < cfg_.bodyNames.size(); ++i) {
     value.segment(7 + i * 3, 3) = refPoseReal.actInv(refBodyPositions[i]);
   }
