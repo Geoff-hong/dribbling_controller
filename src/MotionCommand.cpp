@@ -77,6 +77,9 @@ bool MotionCommandTerm::loadMotionFile() {
           joint[i - 7 - cfg_.bodyNames.size() * 3] = rowValues[i];
         } else if (i < 7 + cfg_.bodyNames.size() * 3 + 2 * cfg_.jointNames.size()) {
           joint[i - 7 - cfg_.bodyNames.size() * 3 - cfg_.jointNames.size()] = rowValues[i];
+        } else {
+          std::cerr << "Too many values in CSV" << std::endl;
+          return false;
         }
         if (i == 3 - 1) {
           referencePosition_.push_back(pos);
