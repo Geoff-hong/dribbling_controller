@@ -16,8 +16,8 @@ standby_controller:
                         0.0, 0.0, 0.073,
                         0.2, 1.57, 0.0, 1.57, 0.0, 0.0, 0.0,
                         0.2, -1.57, 0.0, 1.57, 0.0, 0.0, 0.0 ]
-    kp: [ 350.0, 200.0, 200.0, 300.0, 200.0, 150.0,
-          350.0, 200.0, 200.0, 300.0, 200.0, 150.0,
+    kp: [ 350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
+          350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
           200.0, 200.0, 200.0,
           40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0,
           40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0 ]
@@ -37,13 +37,13 @@ walking_controller:
                         0.0, 0.0, 0.073,
                         0.2, 0.2, 0.0, 0.6, 0.0, 0.0, 0.0,
                         0.2, -0.2, 0.0, 0.6, 0.0, 0.0, 0.0 ]
-    kp: [ 75.0, 75.0, 75.0, 75.0, 20.0, 2.0,
-          75.0, 75.0, 75.0, 75.0, 20.0, 2.0,
+    kp: [ 75.0, 75.0, 75.0, 75.0, 20.0, 20.0,
+          75.0, 75.0, 75.0, 75.0, 20.0, 20.0,
           75.0, 75.0, 75.0,
           75.0, 75.0, 75.0, 75.0, 2.0, 2.0, 2.0,
           75.0, 75.0, 75.0, 75.0, 2.0, 2.0, 2.0 ]
-    kd: [ 2.0, 2.0, 2.0, 2.0, 1.0, 0.2,
-          2.0, 2.0, 2.0, 2.0, 1.0, 0.2,
+    kd: [ 2.0, 2.0, 2.0, 2.0, 2.0, 2.0,
+          2.0, 2.0, 2.0, 2.0, 2.0, 2.0,
           2.0, 2.0, 2.0,
           2.0, 2.0, 2.0, 2.0, 0.2, 0.2, 0.2,
           2.0, 2.0, 2.0, 2.0, 0.2, 0.2, 0.2 ]
@@ -65,7 +65,10 @@ walking_controller:
           'left_shoulder_yaw_joint', 'right_shoulder_yaw_joint', 'left_elbow_joint', 'right_elbow_joint',
           'left_wrist_roll_joint', 'right_wrist_roll_joint',
           'left_wrist_pitch_joint', 'right_wrist_pitch_joint', 'left_wrist_yaw_joint', 'right_wrist_yaw_joint' ]
-      path: "config/g1/dance.onnx"
+      #      path: "config/g1/dance_external_ft.onnx"
+      #      path: "config/g1/dance_default_pos.onnx"
+      #      path: "config/g1/dance_rand_reset.onnx"
+      path: "config/g1/dance_lin_vel_0.5.onnx"
       observations:
         - "command"
         - "motion"
