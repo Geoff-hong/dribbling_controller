@@ -12,7 +12,7 @@ namespace legged {
 
 class MotionCommandTerm : public CommandTerm {
  public:
-  MotionCommandTerm(const std::shared_ptr<LeggedModel>& leggedModel, const MotionCommandCfg& cfg)
+  MotionCommandTerm(const LeggedModel::SharedPtr& leggedModel, const MotionCommandCfg& cfg)
       : CommandTerm(leggedModel), cfg_(cfg), motionIndex_(0), referenceBodyIndex_(0) {}
   bool loadMotionFile();
 
