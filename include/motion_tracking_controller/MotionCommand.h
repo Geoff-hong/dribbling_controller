@@ -25,6 +25,8 @@ class MotionCommandTerm : public CommandTerm {
   MotionCommandCfg cfg_;
 
   size_t motionIndex_, referenceBodyIndex_;
+  vector3_t positionOffset_;
+
   std::vector<vector3_t> referencePosition_;
   std::vector<quaternion_t> referenceOrientation_;
   std::vector<vector_t> jointPosition_;

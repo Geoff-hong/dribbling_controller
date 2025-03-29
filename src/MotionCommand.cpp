@@ -22,13 +22,29 @@ vector_t MotionCommandTerm::getValue() {
   const auto& refJointVel = jointVelocity_[motionIndex_];
   const auto& refBodyPositions = bodyPositions_[motionIndex_];
 
-  value.head(3) = refPoseReal.actInv(refPos);
-  value.segment(3, 4) = rotationToVectorWxyz(quaternion_t(refPoseReal.rotation().inverse()) * refOri);
-  for (size_t i = 0; i < cfg_.bodyNames.size(); ++i) {
-    value.segment(7 + i * 3, 3) = refPoseReal.actInv(refBodyPositions[i]);
-  }
-  value.segment(7 + cfg_.bodyNames.size() * 3, cfg_.jointNames.size()) = refJointPos;
-  value.tail(cfg_.jointNames.size()) = refJointVel;
+  // Ref position and orientation + body positition + joint position and velocity
+  // value.head(3) = refPoseReal.actInv(refPos);
+  // value.segment(3, 4) = rotationToVectorWxyz(quaternion_t(refPoseReal.rotation().inverse()) * refOri);
+  // for (size_t i = 0; i < cfg_.bodyNames.size(); ++i) {
+  //   value.segment(7 + i * 3, 3) = refPoseReal.actInv(refBodyPositions[i]);
+  // }
+  // value.segment(7 + cfg_.bodyNames.size() * 3, cfg_.jointNames.size()) = refJointPos;
+  // value.tail(cfg_.jointNames.size()) = refJointVel;
+
+  //  joint position and velocity + position
+  value.head(cfg_.jointNames.size()) = refJointPos;
+  value.segment(cfg_.jointNames.size(), cfg_.jointNames.size()) = refJointVel;
+  value.tail(3) = refPoseReal.actInv(vector3_t(refPos + positionOffset_));
+
+  // Ref position and orientation + joint position and velocity
+  // value.head(3) = refPoseReal.actInv(vector3_t(refPos + positionOffset_));
+  // value.segment(3, 4) = rotationToVectorWxyz(quaternion_t(refPoseReal.rotation().inverse()) * refOri);
+  // value.segment(7, cfg_.jointNames.size()) = refJointPos;
+  // value.segment(7 + cfg_.jointNames.size(), cfg_.jointNames.size()) = refJointVel;
+
+  // Joint position and velocity only
+  // value.head(cfg_.jointNames.size()) = refJointPos;
+  // value.tail(cfg_.jointNames.size()) = refJointVel;
   return value;
 }
 
@@ -116,10 +132,15 @@ bool MotionCommandTerm::loadMotionFile() {
 
 void MotionCommandTerm::reset() {
   motionIndex_ = 0;
+  positionOffset_ = vector3_t::Zero();
+  positionOffset_.head(2) = -referencePosition_[motionIndex_].head(2);
 }
 
 size_t MotionCommandTerm::getSize() const {
-  return 3 + 4 + 3 * cfg_.bodyNames.size() + 2 * cfg_.jointNames.size();
+  // return 3 + 4 + 3 * cfg_.bodyNames.size() + 2 * cfg_.jointNames.size();
+  // return 3 + 4 + 2 * cfg_.jointNames.size();
+  return 2 * cfg_.jointNames.size() + 3;
+  // return 2 * cfg_.jointNames.size();
 }
 
 }  // namespace legged

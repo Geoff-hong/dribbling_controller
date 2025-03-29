@@ -72,11 +72,11 @@ def setup_controllers(context):
 
     active_list = [
         "joint_state_broadcaster",
-        "standby_controller",
+        "walking_controller",
     ]
 
     inactive_list = [
-        "walking_controller",
+        # "walking_controller",
     ]
     active_spawner = control_spawner(active_list)
     inactive_spawner = control_spawner(inactive_list, inactive=True)
