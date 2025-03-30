@@ -4,6 +4,7 @@
 
 #include "motion_tracking_controller/DataLogger.h"
 #include "motion_tracking_controller/common.h"
+#include "motion_tracking_controller/MotionCommand.h"
 
 namespace legged {
 class MotionTrackingController : public OnnxController {
@@ -19,6 +20,7 @@ class MotionTrackingController : public OnnxController {
   bool parserObservation(const std::string& name) override;
 
   MotionCommandCfg cfg_;
+  MotionCommandTerm::SharedPtr commandTerm_;
   DataLogger::SharedPtr dataLogger_;
 };
 

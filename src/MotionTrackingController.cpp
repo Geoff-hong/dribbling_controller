@@ -25,7 +25,6 @@ controller_interface::CallbackReturn MotionTrackingController::on_configure(cons
   }
 
   dataLogger_ = std::make_shared<DataLogger>(leggedModel_->getLeggedModel(), onnxPolicy_);
-
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -44,9 +43,9 @@ bool MotionTrackingController::parserCommand(const std::string& name) {
     return true;
   }
   if (name == "motion") {
-    const auto term = std::make_shared<MotionCommandTerm>(leggedModel_->getLeggedModel(), cfg_);
-    commandManager_->addTerm(term);
-    return term->loadMotionFile();
+    commandTerm_ = std::make_shared<MotionCommandTerm>(leggedModel_->getLeggedModel(), cfg_);
+    commandManager_->addTerm(commandTerm_);
+    return commandTerm_->loadMotionFile();
   }
   return false;
 }
@@ -55,8 +54,23 @@ bool MotionTrackingController::parserObservation(const std::string& name) {
   if (OnnxController::parserObservation(name)) {
     return true;
   }
-  if (name == "motion") {
-    const auto term = std::make_shared<MotionObservation>(leggedModel_->getLeggedModel(), cfg_);
+  if (name == "motion_ref_pos_b") {
+    const auto term = std::make_shared<MotionReferencePosition>(leggedModel_->getLeggedModel(), commandTerm_);
+    observationManager_->addTerm(term);
+    return true;
+  }
+  if (name == "robot_ref_ori_w") {
+    const auto term = std::make_shared<RobotReferenceOrientation>(leggedModel_->getLeggedModel(), cfg_);
+    observationManager_->addTerm(term);
+    return true;
+  }
+  if (name == "robot_body_pos") {
+    const auto term = std::make_shared<RobotBodyPosition>(leggedModel_->getLeggedModel(), cfg_);
+    observationManager_->addTerm(term);
+    return true;
+  }
+  if (name == "robot_body_ori") {
+    const auto term = std::make_shared<RobotBodyOrientation>(leggedModel_->getLeggedModel(), cfg_);
     observationManager_->addTerm(term);
     return true;
   }

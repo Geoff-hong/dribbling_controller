@@ -13,38 +13,11 @@ vector_t MotionCommandTerm::getValue() {
     motionIndex_++;
   }
 
-  const auto& data = model_->getPinData();
-  const auto& refPoseReal = data.oMf[referenceBodyIndex_];
-
-  const auto& refPos = referencePosition_[motionIndex_];
-  const auto& refOri = referenceOrientation_[motionIndex_];
   const auto& refJointPos = jointPosition_[motionIndex_];
   const auto& refJointVel = jointVelocity_[motionIndex_];
-  const auto& refBodyPositions = bodyPositions_[motionIndex_];
 
-  // Ref position and orientation + body positition + joint position and velocity
-  // value.head(3) = refPoseReal.actInv(refPos);
-  // value.segment(3, 4) = rotationToVectorWxyz(quaternion_t(refPoseReal.rotation().inverse()) * refOri);
-  // for (size_t i = 0; i < cfg_.bodyNames.size(); ++i) {
-  //   value.segment(7 + i * 3, 3) = refPoseReal.actInv(refBodyPositions[i]);
-  // }
-  // value.segment(7 + cfg_.bodyNames.size() * 3, cfg_.jointNames.size()) = refJointPos;
-  // value.tail(cfg_.jointNames.size()) = refJointVel;
-
-  //  joint position and velocity + position
   value.head(cfg_.jointNames.size()) = refJointPos;
-  value.segment(cfg_.jointNames.size(), cfg_.jointNames.size()) = refJointVel;
-  value.tail(3) = refPoseReal.actInv(vector3_t(refPos + positionOffset_));
-
-  // Ref position and orientation + joint position and velocity
-  // value.head(3) = refPoseReal.actInv(vector3_t(refPos + positionOffset_));
-  // value.segment(3, 4) = rotationToVectorWxyz(quaternion_t(refPoseReal.rotation().inverse()) * refOri);
-  // value.segment(7, cfg_.jointNames.size()) = refJointPos;
-  // value.segment(7 + cfg_.jointNames.size(), cfg_.jointNames.size()) = refJointVel;
-
-  // Joint position and velocity only
-  // value.head(cfg_.jointNames.size()) = refJointPos;
-  // value.tail(cfg_.jointNames.size()) = refJointVel;
+  value.tail(cfg_.jointNames.size()) = refJointVel;
   return value;
 }
 
@@ -136,11 +109,12 @@ void MotionCommandTerm::reset() {
   positionOffset_.head(2) = -referencePosition_[motionIndex_].head(2);
 }
 
-size_t MotionCommandTerm::getSize() const {
-  // return 3 + 4 + 3 * cfg_.bodyNames.size() + 2 * cfg_.jointNames.size();
-  // return 3 + 4 + 2 * cfg_.jointNames.size();
-  return 2 * cfg_.jointNames.size() + 3;
-  // return 2 * cfg_.jointNames.size();
+vector3_t MotionCommandTerm::getReferencePositionLocal() {
+  const auto& data = model_->getPinData();
+  const auto& refPoseReal = data.oMf[referenceBodyIndex_];
+
+  const auto& refPos = referencePosition_[motionIndex_];
+  return refPoseReal.actInv(vector3_t(refPos + positionOffset_));
 }
 
 }  // namespace legged

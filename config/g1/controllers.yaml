@@ -71,7 +71,10 @@ walking_controller:
       path: "config/g1/dance_lin_vel_0.5.onnx"
       observations:
         - "command"
-        - "motion"
+        - "motion_ref_pos_b"
+        - "robot_ref_ori_w"
+        - "robot_body_pos"
+        - "robot_body_ori"
         - "base_lin_vel"
         - "base_ang_vel"
         - "joint_positions"

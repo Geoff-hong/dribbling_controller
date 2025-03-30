@@ -5,8 +5,8 @@
 
 namespace legged {
 
-MotionObservation::MotionObservation(const std::shared_ptr<LeggedModel>& leggedModel, const MotionCommandCfg& cfg)
-    : ObservationTerm(leggedModel), cfg_(cfg) {
+RobotReferenceObservation::RobotReferenceObservation(LeggedModel::SharedPtr leggedModel, MotionCommandCfg cfg)
+    : ObservationTerm(std::move(leggedModel)), cfg_(std::move(cfg)) {
   const auto& pinModel = model_->getPinModel();
 
   referenceBodyIndex_ = pinModel.getFrameId(cfg_.referenceBody);
@@ -18,27 +18,38 @@ MotionObservation::MotionObservation(const std::shared_ptr<LeggedModel>& leggedM
   }
 }
 
-vector_t MotionObservation::evaluate() {
-  vector_t value(getSize());
+vector_t RobotReferenceOrientation::evaluate() {
+  const auto& refPoseReal = model_->getPinData().oMf[referenceBodyIndex_];
+  return rotationToVectorWxyz(refPoseReal.rotation());
+}
+
+vector_t RobotBodyPosition::evaluate() {
   const auto& data = model_->getPinData();
   const auto& refPoseReal = data.oMf[referenceBodyIndex_];
-  // Reference orientation
-  value.head(4) = rotationToVectorWxyz(refPoseReal.rotation());
-
+  vector_t value(getSize());
   for (size_t i = 0; i < cfg_.bodyNames.size(); ++i) {
-    const auto& bodyPose = data.oMf[bodyIndices_[i]];
-    const auto& bodyPoseLocal = refPoseReal.actInv(bodyPose);
-    // Body local position
-    value.segment(4 + i * 3, 3) = bodyPoseLocal.translation();
-    // Body local orientation
-    value.segment(4 + 3 * cfg_.bodyNames.size() + i * 4, 4) = rotationToVectorWxyz(bodyPoseLocal.rotation());
+    const auto& bodyPoseLocal = refPoseReal.actInv(data.oMf[bodyIndices_[i]]);
+    value.segment(3 * i, 3) = bodyPoseLocal.translation();
   }
-
   return value;
 }
 
-size_t MotionObservation::getSize() const {
-  return 4 + 3 * cfg_.bodyNames.size() + 4 * cfg_.bodyNames.size();
+vector_t RobotBodyOrientation::evaluate() {
+  const auto& data = model_->getPinData();
+  const auto& refPoseReal = data.oMf[referenceBodyIndex_];
+  vector_t value(getSize());
+  for (size_t i = 0; i < cfg_.bodyNames.size(); ++i) {
+    const auto& bodyPoseLocal = refPoseReal.actInv(data.oMf[bodyIndices_[i]]);
+    value.segment(i * 4, 4) = rotationToVectorWxyz(bodyPoseLocal.rotation());
+  }
+  return value;
+}
+
+MotionReferencePosition::MotionReferencePosition(LeggedModel::SharedPtr model, MotionCommandTerm::SharedPtr commandTerm)
+    : ObservationTerm(std::move(model)), commandTerm_(commandTerm) {}
+
+vector_t MotionReferencePosition::evaluate() {
+  return commandTerm_->getReferencePositionLocal();
 }
 
 }  // namespace legged
