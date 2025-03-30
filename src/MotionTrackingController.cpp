@@ -55,26 +55,17 @@ bool MotionTrackingController::parserObservation(const std::string& name) {
     return true;
   }
   if (name == "motion_ref_pos_b") {
-    const auto term = std::make_shared<MotionReferencePosition>(leggedModel_->getLeggedModel(), commandTerm_);
-    observationManager_->addTerm(term);
-    return true;
+    observationManager_->addTerm(std::make_shared<MotionReferencePosition>(leggedModel_->getLeggedModel(), commandTerm_));
+  } else if (name == "robot_ref_ori_w") {
+    observationManager_->addTerm(std::make_shared<RobotReferenceOrientation>(leggedModel_->getLeggedModel(), cfg_));
+  } else if (name == "robot_body_pos") {
+    observationManager_->addTerm(std::make_shared<RobotBodyPosition>(leggedModel_->getLeggedModel(), cfg_));
+  } else if (name == "robot_body_ori") {
+    observationManager_->addTerm(std::make_shared<RobotBodyOrientation>(leggedModel_->getLeggedModel(), cfg_));
+  } else {
+    return false;
   }
-  if (name == "robot_ref_ori_w") {
-    const auto term = std::make_shared<RobotReferenceOrientation>(leggedModel_->getLeggedModel(), cfg_);
-    observationManager_->addTerm(term);
-    return true;
-  }
-  if (name == "robot_body_pos") {
-    const auto term = std::make_shared<RobotBodyPosition>(leggedModel_->getLeggedModel(), cfg_);
-    observationManager_->addTerm(term);
-    return true;
-  }
-  if (name == "robot_body_ori") {
-    const auto term = std::make_shared<RobotBodyOrientation>(leggedModel_->getLeggedModel(), cfg_);
-    observationManager_->addTerm(term);
-    return true;
-  }
-  return false;
+  return true;
 }
 
 }  // namespace legged
