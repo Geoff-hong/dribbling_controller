@@ -7,7 +7,7 @@
 #include "motion_tracking_controller/DataLogger.h"
 
 namespace legged {
-DataLogger::DataLogger(LeggedModel::SharedPtr model, OnnxPolicy::SharedPtr policy, scalar_t frequency, size_t maxBufferSize)
+DataLogger::DataLogger(LeggedModel::SharedPtr model, Policy::SharedPtr policy, scalar_t frequency, size_t maxBufferSize)
     : model_(std::move(model)), policy_(std::move(policy)), lastUpdate_(0, 0, RCL_ROS_TIME), period_(1. / frequency) {
   buffer.reserve(maxBufferSize);
 }

@@ -24,7 +24,7 @@ controller_interface::CallbackReturn MotionTrackingController::on_configure(cons
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  dataLogger_ = std::make_shared<DataLogger>(leggedModel_->getLeggedModel(), onnxPolicy_);
+  dataLogger_ = std::make_shared<DataLogger>(leggedModel_->getLeggedModel(), policy_);
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
