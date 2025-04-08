@@ -126,7 +126,8 @@ def generate_launch_description():
              },
             robot_description,
             LaunchConfiguration('controllers_yaml'),
-        ])
+        ],
+        output='screen')
 
     controllers_opaque_func = OpaqueFunction(
         function=setup_controllers
