@@ -116,22 +116,17 @@ def generate_launch_description():
         }],
     )
 
-    mujoco_model_path = PathJoinSubstitution([
-        FindPackageShare("unitree_description"),
-        "mjcf",
-        PythonExpression(["'", robot_type, ".xml'"])
-    ])
-
-    node_mujoco_ros2_control = Node(
-        package='mujoco_ros2_control',
-        executable='mujoco_ros2_control',
-        output='screen',
+    mujoco_simulator = Node(
+        package='mujoco_sim_ros2',
+        executable='mujoco_sim',
         parameters=[
+            {"model_package": "unitree_description",
+             "model_file": PythonExpression(["'/mjcf/", robot_type, ".xml'"]),
+             "physics_plugins": ["mujoco_ros2_control::MujocoRos2ControlPlugin"],
+             },
             robot_description,
             LaunchConfiguration('controllers_yaml'),
-            {'mujoco_model_path': mujoco_model_path}
-        ]
-    )
+        ])
 
     controllers_opaque_func = OpaqueFunction(
         function=setup_controllers
@@ -146,7 +141,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('robot_type', default_value='g1'),
         controllers_opaque_func,
-        node_mujoco_ros2_control,
+        mujoco_simulator,
         node_robot_state_publisher,
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(teleop)
