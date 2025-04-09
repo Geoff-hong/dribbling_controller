@@ -136,7 +136,7 @@ def generate_launch_description():
     )
 
     teleop = PathJoinSubstitution([
-        FindPackageShare('unitree_description'),
+        FindPackageShare('unitree_bringup'),
         'launch',
         'teleop.launch.py'
     ])
