@@ -13,12 +13,14 @@ namespace legged {
 
 class RobotReferenceObservation : public ObservationTerm {
  public:
-  RobotReferenceObservation(LeggedModel::SharedPtr leggedModel, MotionCommandCfg cfg);
+  explicit RobotReferenceObservation(MotionCommandCfg cfg) : cfg_(std::move(cfg)) {}
+
+  void setModel(const LeggedModel::SharedPtr& model) override;
 
  protected:
   MotionCommandCfg cfg_;
-  size_t referenceBodyIndex_;
-  std::vector<size_t> bodyIndices_;
+  size_t referenceBodyIndex_{};
+  std::vector<size_t> bodyIndices_{};
 };
 
 class RobotReferenceOrientation final : public RobotReferenceObservation {
@@ -50,7 +52,7 @@ class RobotBodyOrientation final : public RobotReferenceObservation {
 
 class MotionReferencePosition final : public ObservationTerm {
  public:
-  MotionReferencePosition(LeggedModel::SharedPtr model, MotionCommandTerm::SharedPtr commandTerm);
+  explicit MotionReferencePosition(const MotionCommandTerm::SharedPtr& commandTerm);
   size_t getSize() const override { return 3; }
 
  protected:

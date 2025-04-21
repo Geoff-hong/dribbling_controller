@@ -5,8 +5,8 @@
 
 namespace legged {
 
-RobotReferenceObservation::RobotReferenceObservation(LeggedModel::SharedPtr leggedModel, MotionCommandCfg cfg)
-    : ObservationTerm(std::move(leggedModel)), cfg_(std::move(cfg)) {
+void RobotReferenceObservation::setModel(const LeggedModel::SharedPtr& model) {
+  ObservationTerm::setModel(model);
   const auto& pinModel = model_->getPinModel();
 
   referenceBodyIndex_ = pinModel.getFrameId(cfg_.referenceBody);
@@ -45,8 +45,7 @@ vector_t RobotBodyOrientation::evaluate() {
   return value;
 }
 
-MotionReferencePosition::MotionReferencePosition(LeggedModel::SharedPtr model, MotionCommandTerm::SharedPtr commandTerm)
-    : ObservationTerm(std::move(model)), commandTerm_(commandTerm) {}
+MotionReferencePosition::MotionReferencePosition(const MotionCommandTerm::SharedPtr& commandTerm) : commandTerm_(commandTerm) {}
 
 vector_t MotionReferencePosition::evaluate() {
   return commandTerm_->getReferencePositionLocal();

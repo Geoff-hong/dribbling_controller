@@ -14,8 +14,7 @@ class MotionCommandTerm : public CommandTerm {
  public:
   using SharedPtr = std::shared_ptr<MotionCommandTerm>;
 
-  MotionCommandTerm(const LeggedModel::SharedPtr& leggedModel, const MotionCommandCfg& cfg)
-      : CommandTerm(leggedModel), cfg_(cfg), motionIndex_(0), referenceBodyIndex_(0) {}
+  explicit MotionCommandTerm(const MotionCommandCfg& cfg) : cfg_(cfg), motionIndex_(0), referenceBodyIndex_(0) {}
   bool loadMotionFile();
 
   vector_t getValue() override;
@@ -24,7 +23,7 @@ class MotionCommandTerm : public CommandTerm {
   vector3_t getReferencePositionLocal();
 
  protected:
-  size_t getSize() const { return 2 * cfg_.jointNames.size(); }
+  size_t getSize() const override { return 2 * cfg_.jointNames.size(); }
 
   MotionCommandCfg cfg_;
 

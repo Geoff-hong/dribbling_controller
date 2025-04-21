@@ -24,7 +24,16 @@ controller_interface::CallbackReturn MotionTrackingController::on_configure(cons
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  dataLogger_ = std::make_shared<DataLogger>(leggedModel_->getLeggedModel(), policy_);
+  return controller_interface::CallbackReturn::SUCCESS;
+}
+
+controller_interface::CallbackReturn MotionTrackingController::on_activate(const rclcpp_lifecycle::State& previous_state) {
+  if (OnnxController::on_activate(previous_state) != controller_interface::CallbackReturn::SUCCESS) {
+    return controller_interface::CallbackReturn::ERROR;
+  }
+
+  dataLogger_ = std::make_shared<DataLogger>(leggedModel(), policy_);
+
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
@@ -43,7 +52,7 @@ bool MotionTrackingController::parserCommand(const std::string& name) {
     return true;
   }
   if (name == "motion") {
-    commandTerm_ = std::make_shared<MotionCommandTerm>(leggedModel_->getLeggedModel(), cfg_);
+    commandTerm_ = std::make_shared<MotionCommandTerm>(cfg_);
     commandManager_->addTerm(commandTerm_);
     return commandTerm_->loadMotionFile();
   }
@@ -55,13 +64,13 @@ bool MotionTrackingController::parserObservation(const std::string& name) {
     return true;
   }
   if (name == "motion_ref_pos_b") {
-    observationManager_->addTerm(std::make_shared<MotionReferencePosition>(leggedModel_->getLeggedModel(), commandTerm_));
+    observationManager_->addTerm(std::make_shared<MotionReferencePosition>(commandTerm_));
   } else if (name == "robot_ref_ori_w") {
-    observationManager_->addTerm(std::make_shared<RobotReferenceOrientation>(leggedModel_->getLeggedModel(), cfg_));
+    observationManager_->addTerm(std::make_shared<RobotReferenceOrientation>(cfg_));
   } else if (name == "robot_body_pos") {
-    observationManager_->addTerm(std::make_shared<RobotBodyPosition>(leggedModel_->getLeggedModel(), cfg_));
+    observationManager_->addTerm(std::make_shared<RobotBodyPosition>(cfg_));
   } else if (name == "robot_body_ori") {
-    observationManager_->addTerm(std::make_shared<RobotBodyOrientation>(leggedModel_->getLeggedModel(), cfg_));
+    observationManager_->addTerm(std::make_shared<RobotBodyOrientation>(cfg_));
   } else {
     return false;
   }
