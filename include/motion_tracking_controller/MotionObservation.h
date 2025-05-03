@@ -11,53 +11,48 @@
 
 namespace legged {
 
-class RobotReferenceObservation : public ObservationTerm {
+class MotionObservation : public ObservationTerm {
  public:
-  explicit RobotReferenceObservation(MotionCommandCfg cfg) : cfg_(std::move(cfg)) {}
-
-  void setModel(const LeggedModel::SharedPtr& model) override;
+  explicit MotionObservation(const MotionCommandTerm::SharedPtr& commandTerm) : commandTerm_(commandTerm) {}
 
  protected:
-  MotionCommandCfg cfg_;
-  size_t referenceBodyIndex_{};
-  std::vector<size_t> bodyIndices_{};
+  MotionCommandTerm::SharedPtr commandTerm_;
 };
 
-class RobotReferenceOrientation final : public RobotReferenceObservation {
+class MotionReferencePosition final : public MotionObservation {
  public:
-  using RobotReferenceObservation::RobotReferenceObservation;
-  size_t getSize() const override { return 4; }
-
- protected:
-  vector_t evaluate() override;
-};
-
-class RobotBodyPosition final : public RobotReferenceObservation {
- public:
-  using RobotReferenceObservation::RobotReferenceObservation;
-  size_t getSize() const override { return 3 * bodyIndices_.size(); }
-
- protected:
-  vector_t evaluate() override;
-};
-
-class RobotBodyOrientation final : public RobotReferenceObservation {
- public:
-  using RobotReferenceObservation::RobotReferenceObservation;
-  size_t getSize() const override { return 4 * bodyIndices_.size(); }
-
- protected:
-  vector_t evaluate() override;
-};
-
-class MotionReferencePosition final : public ObservationTerm {
- public:
-  explicit MotionReferencePosition(const MotionCommandTerm::SharedPtr& commandTerm);
+  using MotionObservation::MotionObservation;
   size_t getSize() const override { return 3; }
 
  protected:
-  vector_t evaluate() override;
-  MotionCommandTerm::SharedPtr commandTerm_;
+  vector_t evaluate() override { return commandTerm_->getReferencePositionLocal(); }
+};
+
+class RobotReferenceOrientation final : public MotionObservation {
+ public:
+  using MotionObservation::MotionObservation;
+  size_t getSize() const override { return 4; }
+
+ protected:
+  vector_t evaluate() override { return commandTerm_->getReferenceOrientationGlobal(); }
+};
+
+class RobotBodyPosition final : public MotionObservation {
+ public:
+  using MotionObservation::MotionObservation;
+  size_t getSize() const override { return 3 * commandTerm_->getCfg().bodyNames.size(); }
+
+ protected:
+  vector_t evaluate() override { return commandTerm_->getRobotBodyPositionLocal(); }
+};
+
+class RobotBodyOrientation final : public MotionObservation {
+ public:
+  using MotionObservation::MotionObservation;
+  size_t getSize() const override { return 4 * commandTerm_->getCfg().bodyNames.size(); }
+
+ protected:
+  vector_t evaluate() override { return commandTerm_->getRobotBodyOrientationLocal(); }
 };
 
 }  // namespace legged

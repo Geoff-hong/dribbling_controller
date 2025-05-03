@@ -66,11 +66,11 @@ bool MotionTrackingController::parserObservation(const std::string& name) {
   if (name == "motion_ref_pos_b") {
     observationManager_->addTerm(std::make_shared<MotionReferencePosition>(commandTerm_));
   } else if (name == "robot_ref_ori_w") {
-    observationManager_->addTerm(std::make_shared<RobotReferenceOrientation>(cfg_));
+    observationManager_->addTerm(std::make_shared<RobotReferenceOrientation>(commandTerm_));
   } else if (name == "robot_body_pos") {
-    observationManager_->addTerm(std::make_shared<RobotBodyPosition>(cfg_));
+    observationManager_->addTerm(std::make_shared<RobotBodyPosition>(commandTerm_));
   } else if (name == "robot_body_ori") {
-    observationManager_->addTerm(std::make_shared<RobotBodyOrientation>(cfg_));
+    observationManager_->addTerm(std::make_shared<RobotBodyOrientation>(commandTerm_));
   } else {
     return false;
   }

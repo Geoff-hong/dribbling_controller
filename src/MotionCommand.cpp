@@ -99,22 +99,56 @@ bool MotionCommandTerm::loadMotionFile() {
     std::cerr << "Frame " + cfg_.referenceBody + " not found." << std::endl;
     return false;
   }
-
+  for (const auto& bodyName : cfg_.bodyNames) {
+    bodyIndices_.push_back(pinModel.getFrameId(bodyName));
+    if (bodyIndices_.back() >= pinModel.nframes) {
+      throw std::runtime_error("Frame " + bodyName + " not found.");
+    }
+  }
   return true;
 }
 
 void MotionCommandTerm::reset() {
   motionIndex_ = 0;
-  positionOffset_ = vector3_t::Zero();
-  positionOffset_.head(2) = -referencePosition_[motionIndex_].head(2);
+  const pinocchio::SE3 initToRef(referenceOrientation_[motionIndex_], referencePosition_[motionIndex_]);
+  const pinocchio::SE3 worldToRef = model_->getPinData().oMf[referenceBodyIndex_];
+  worldToInit_ = worldToRef * initToRef.inverse();
+  worldToInit_.rotation() = yawQuaternion(quaternion_t(worldToInit_.rotation()));
 }
 
-vector3_t MotionCommandTerm::getReferencePositionLocal() {
+vector3_t MotionCommandTerm::getReferencePositionLocal() const {
   const auto& data = model_->getPinData();
   const auto& refPoseReal = data.oMf[referenceBodyIndex_];
 
   const auto& refPos = referencePosition_[motionIndex_];
-  return refPoseReal.actInv(vector3_t(refPos + positionOffset_));
+  return refPoseReal.actInv(worldToInit_.act(refPos));
+}
+
+vector_t MotionCommandTerm::getReferenceOrientationGlobal() const {
+  const auto& refPoseReal = model_->getPinData().oMf[referenceBodyIndex_];
+  return rotationToVectorWxyz(worldToInit_.actInv(refPoseReal).rotation());
+}
+
+vector_t MotionCommandTerm::getRobotBodyPositionLocal() const {
+  const auto& data = model_->getPinData();
+  const auto& refPoseReal = data.oMf[referenceBodyIndex_];
+  vector_t value(getSize());
+  for (size_t i = 0; i < cfg_.bodyNames.size(); ++i) {
+    const auto& bodyPoseLocal = refPoseReal.actInv(data.oMf[bodyIndices_[i]]);
+    value.segment(3 * i, 3) = bodyPoseLocal.translation();
+  }
+  return value;
+}
+
+vector_t MotionCommandTerm::getRobotBodyOrientationLocal() const {
+  const auto& data = model_->getPinData();
+  const auto& refPoseReal = data.oMf[referenceBodyIndex_];
+  vector_t value(getSize());
+  for (size_t i = 0; i < cfg_.bodyNames.size(); ++i) {
+    const auto& bodyPoseLocal = refPoseReal.actInv(data.oMf[bodyIndices_[i]]);
+    value.segment(i * 4, 4) = rotationToVectorWxyz(bodyPoseLocal.rotation());
+  }
+  return value;
 }
 
 }  // namespace legged
