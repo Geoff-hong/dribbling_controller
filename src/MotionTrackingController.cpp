@@ -9,7 +9,7 @@ controller_interface::return_type MotionTrackingController::update(const rclcpp:
     return controller_interface::return_type::ERROR;
   }
 
-  dataLogger_->update(time);
+  // dataLogger_->update(time);
 
   return controller_interface::return_type::OK;
 }
@@ -32,7 +32,7 @@ controller_interface::CallbackReturn MotionTrackingController::on_activate(const
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  dataLogger_ = std::make_shared<DataLogger>(leggedModel(), policy_);
+  // dataLogger_ = std::make_shared<DataLogger>(leggedModel(), policy_);
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -42,7 +42,7 @@ controller_interface::CallbackReturn MotionTrackingController::on_deactivate(con
     return controller_interface::CallbackReturn::ERROR;
   }
 
-  dataLogger_->writeAndClear();
+  // dataLogger_->writeAndClear();
 
   return controller_interface::CallbackReturn::SUCCESS;
 }

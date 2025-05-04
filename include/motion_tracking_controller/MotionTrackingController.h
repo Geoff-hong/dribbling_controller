@@ -1,7 +1,7 @@
 #pragma once
 
 #include <legged_rl_controllers/OnnxController.h>
-#include <legged_rl_controllers/DataLogger.h>
+// #include <legged_rl_controllers/DataLogger.h>
 
 #include "motion_tracking_controller/common.h"
 #include "motion_tracking_controller/MotionCommand.h"
@@ -23,7 +23,7 @@ class MotionTrackingController : public OnnxController {
 
   MotionCommandCfg cfg_;
   MotionCommandTerm::SharedPtr commandTerm_;
-  DataLogger::SharedPtr dataLogger_;
+  // DataLogger::SharedPtr dataLogger_;
 };
 
 }  // namespace legged
