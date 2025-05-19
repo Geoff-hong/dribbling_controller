@@ -61,7 +61,7 @@ def control_spawner(names, inactive=False):
 def setup_controllers(context, control_node):
     robot_type_value = LaunchConfiguration('robot_type').perform(context)
 
-    controllers_config_path = 'config/' + robot_type_value + '/controllers.yaml'
+    controllers_config_path = 'config/' + robot_type_value + '/on_board.yaml'
     temp_controllers_config_path = fill_policy_path(
         controllers_config_path,
         "motion_tracking_controller"
@@ -79,6 +79,7 @@ def setup_controllers(context, control_node):
     ]
     inactive_list = [
         "walking_controller",
+        "walking_controller1",
     ]
     active_spawner = control_spawner(active_list)
     inactive_spawner = control_spawner(inactive_list, inactive=True)
