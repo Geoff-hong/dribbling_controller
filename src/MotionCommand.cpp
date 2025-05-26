@@ -124,15 +124,19 @@ vector3_t MotionCommandTerm::getReferencePositionLocal() const {
   return refPoseReal.actInv(worldToInit_.act(refPos));
 }
 
-vector_t MotionCommandTerm::getReferenceOrientationGlobal() const {
+vector_t MotionCommandTerm::getReferenceOrientationLocal() const {
   const auto& refPoseReal = model_->getPinData().oMf[referenceBodyIndex_];
-  return rotationToVectorWxyz(worldToInit_.actInv(refPoseReal).rotation());
+  const pinocchio::SE3 refOri(referenceOrientation_[motionIndex_], vector3_t::Zero());
+  const auto rot = refPoseReal.actInv(worldToInit_.act(refOri)).rotation();
+  vector_t rot6(6);
+  rot6 << rot(0, 0), rot(0, 1), rot(1, 0), rot(1, 1), rot(2, 0), rot(2, 1);
+  return rot6;
 }
 
 vector_t MotionCommandTerm::getRobotBodyPositionLocal() const {
   const auto& data = model_->getPinData();
   const auto& refPoseReal = data.oMf[referenceBodyIndex_];
-  vector_t value(getSize());
+  vector_t value(3 * cfg_.bodyNames.size());
   for (size_t i = 0; i < cfg_.bodyNames.size(); ++i) {
     const auto& bodyPoseLocal = refPoseReal.actInv(data.oMf[bodyIndices_[i]]);
     value.segment(3 * i, 3) = bodyPoseLocal.translation();
@@ -143,10 +147,12 @@ vector_t MotionCommandTerm::getRobotBodyPositionLocal() const {
 vector_t MotionCommandTerm::getRobotBodyOrientationLocal() const {
   const auto& data = model_->getPinData();
   const auto& refPoseReal = data.oMf[referenceBodyIndex_];
-  vector_t value(getSize());
+  vector_t value(6 * cfg_.bodyNames.size());
   for (size_t i = 0; i < cfg_.bodyNames.size(); ++i) {
-    const auto& bodyPoseLocal = refPoseReal.actInv(data.oMf[bodyIndices_[i]]);
-    value.segment(i * 4, 4) = rotationToVectorWxyz(bodyPoseLocal.rotation());
+    const auto& rot = refPoseReal.actInv(data.oMf[bodyIndices_[i]]).rotation();
+    vector_t rot6(6);
+    rot6 << rot(0, 0), rot(0, 1), rot(1, 0), rot(1, 1), rot(2, 0), rot(2, 1);
+    value.segment(i * 6, 6) = rot6;
   }
   return value;
 }

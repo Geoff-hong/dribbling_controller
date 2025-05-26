@@ -28,13 +28,13 @@ class MotionReferencePosition final : public MotionObservation {
   vector_t evaluate() override { return commandTerm_->getReferencePositionLocal(); }
 };
 
-class RobotReferenceOrientation final : public MotionObservation {
+class MotionReferenceOrientation final : public MotionObservation {
  public:
   using MotionObservation::MotionObservation;
-  size_t getSize() const override { return 4; }
+  size_t getSize() const override { return 6; }
 
  protected:
-  vector_t evaluate() override { return commandTerm_->getReferenceOrientationGlobal(); }
+  vector_t evaluate() override { return commandTerm_->getReferenceOrientationLocal(); }
 };
 
 class RobotBodyPosition final : public MotionObservation {
@@ -49,7 +49,7 @@ class RobotBodyPosition final : public MotionObservation {
 class RobotBodyOrientation final : public MotionObservation {
  public:
   using MotionObservation::MotionObservation;
-  size_t getSize() const override { return 4 * commandTerm_->getCfg().bodyNames.size(); }
+  size_t getSize() const override { return 6 * commandTerm_->getCfg().bodyNames.size(); }
 
  protected:
   vector_t evaluate() override { return commandTerm_->getRobotBodyOrientationLocal(); }

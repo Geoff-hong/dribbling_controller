@@ -22,7 +22,7 @@ class MotionCommandTerm : public CommandTerm {
 
   MotionCommandCfg getCfg() const { return cfg_; }
   vector3_t getReferencePositionLocal() const;
-  vector_t getReferenceOrientationGlobal() const;
+  vector_t getReferenceOrientationLocal() const;
   vector_t getRobotBodyPositionLocal() const;
   vector_t getRobotBodyOrientationLocal() const;
 
