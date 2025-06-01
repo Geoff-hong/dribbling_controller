@@ -8,6 +8,8 @@ controller_manager:
       type: legged_controllers/StandbyController
     walking_controller:
       type: motion_tracking_controller/MotionTrackingController
+    walking_controller1:
+      type: legged_rl_controllers/OnnxController
 
 state_estimator:
   ros__parameters:

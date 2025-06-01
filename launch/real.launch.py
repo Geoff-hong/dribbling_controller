@@ -78,7 +78,6 @@ def setup_controllers(context, control_node):
     ]
     inactive_list = [
         "walking_controller",
-        "walking_controller1",
     ]
     active_spawner = control_spawner(active_list)
     inactive_spawner = control_spawner(inactive_list, inactive=True)
