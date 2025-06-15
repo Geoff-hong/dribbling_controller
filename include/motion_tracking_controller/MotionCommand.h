@@ -4,9 +4,12 @@
 
 #pragma once
 
+#include "motion_tracking_controller/MotionOnnxPolicy.h"
 #include "motion_tracking_controller/common.h"
 
 #include <legged_rl_controllers/CommandManager.h>
+
+#include <utility>
 
 namespace legged {
 
@@ -14,8 +17,8 @@ class MotionCommandTerm : public CommandTerm {
  public:
   using SharedPtr = std::shared_ptr<MotionCommandTerm>;
 
-  explicit MotionCommandTerm(const MotionCommandCfg& cfg) : cfg_(cfg), motionIndex_(0), referenceBodyIndex_(0) {}
-  bool loadMotionFile();
+  MotionCommandTerm(MotionCommandCfg cfg, MotionOnnxPolicy::SharedPtr motionPolicy)
+      : cfg_(std::move(cfg)), motionPolicy_(std::move(motionPolicy)), referenceRobotIndex_(0), referenceMotionIndex_(0) {}
 
   vector_t getValue() override;
   void reset() override;
@@ -27,19 +30,14 @@ class MotionCommandTerm : public CommandTerm {
   vector_t getRobotBodyOrientationLocal() const;
 
  protected:
-  size_t getSize() const override { return 2 * cfg_.jointNames.size(); }
+  size_t getSize() const override { return 2 * model_->getNumJoints(); }
 
   MotionCommandCfg cfg_;
+  MotionOnnxPolicy::SharedPtr motionPolicy_;
 
-  size_t motionIndex_, referenceBodyIndex_;
+  size_t referenceRobotIndex_, referenceMotionIndex_;
   std::vector<size_t> bodyIndices_{};
   pinocchio::SE3 worldToInit_;
-
-  std::vector<vector3_t> referencePosition_;
-  std::vector<quaternion_t> referenceOrientation_;
-  std::vector<vector_t> jointPosition_;
-  std::vector<vector_t> jointVelocity_;
-  std::vector<std::vector<vector3_t>> bodyPositions_;
 };
 
 template <typename Scalar>

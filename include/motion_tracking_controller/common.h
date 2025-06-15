@@ -11,8 +11,7 @@
 namespace legged {
 
 struct MotionCommandCfg {
-  std::string path, referenceBody;
-  std::vector<std::string> jointNames;
+  std::string referenceBody;
   std::vector<std::string> bodyNames;
 };
 

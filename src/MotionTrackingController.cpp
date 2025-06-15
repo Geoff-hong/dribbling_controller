@@ -15,16 +15,15 @@ controller_interface::return_type MotionTrackingController::update(const rclcpp:
 }
 
 controller_interface::CallbackReturn MotionTrackingController::on_configure(const rclcpp_lifecycle::State& previous_state) {
-  get_node()->get_parameter("motion.path", cfg_.path);
   get_node()->get_parameter("motion.reference_body", cfg_.referenceBody);
-  get_node()->get_parameter("motion.joint_names", cfg_.jointNames);
   get_node()->get_parameter("motion.body_names", cfg_.bodyNames);
 
-  if (OnnxController::on_configure(previous_state) != controller_interface::CallbackReturn::SUCCESS) {
-    return controller_interface::CallbackReturn::ERROR;
-  }
+  std::string policyPath{};
+  get_node()->get_parameter("policy.path", policyPath);
+  policy_ = std::make_shared<MotionOnnxPolicy>(policyPath);
+  RCLCPP_INFO_STREAM(rclcpp::get_logger("MotionTrackingController"), "Load Onnx model from" << policyPath << " successfully !");
 
-  return controller_interface::CallbackReturn::SUCCESS;
+  return RlController::on_configure(previous_state);
 }
 
 controller_interface::CallbackReturn MotionTrackingController::on_activate(const rclcpp_lifecycle::State& previous_state) {
@@ -52,9 +51,9 @@ bool MotionTrackingController::parserCommand(const std::string& name) {
     return true;
   }
   if (name == "motion") {
-    commandTerm_ = std::make_shared<MotionCommandTerm>(cfg_);
+    commandTerm_ = std::make_shared<MotionCommandTerm>(cfg_, std::dynamic_pointer_cast<MotionOnnxPolicy>(policy_));
     commandManager_->addTerm(commandTerm_);
-    return commandTerm_->loadMotionFile();
+    return true;
   }
   return false;
 }
