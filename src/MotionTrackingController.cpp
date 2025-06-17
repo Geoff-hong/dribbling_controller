@@ -21,6 +21,7 @@ controller_interface::CallbackReturn MotionTrackingController::on_configure(cons
   std::string policyPath{};
   get_node()->get_parameter("policy.path", policyPath);
   policy_ = std::make_shared<MotionOnnxPolicy>(policyPath);
+  policy_->init();
   RCLCPP_INFO_STREAM(rclcpp::get_logger("MotionTrackingController"), "Load Onnx model from" << policyPath << " successfully !");
 
   return RlController::on_configure(previous_state);
