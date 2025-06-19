@@ -20,6 +20,7 @@ state_estimator:
       position:
         noise: 1e-2
         topic: "/glim/odom"
+        frame_id: "mid360_link"
 
 standby_controller:
   ros__parameters:

@@ -4,6 +4,7 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
+    ExecuteProcess,
     RegisterEventHandler,
     DeclareLaunchArgument,
     OpaqueFunction,
@@ -138,6 +139,11 @@ def generate_launch_description():
         function=setup_controllers, kwargs={'control_node': control_node}
     )
 
+    rosbag2 = ExecuteProcess(
+        cmd=['ros2', 'bag', 'record', '-s', 'mcap', '-a', '-x', '^/(api|lowcmd).*'],
+        output='screen'
+    )
+
     teleop = PathJoinSubstitution([
         FindPackageShare('unitree_bringup'),
         'launch',
@@ -150,6 +156,7 @@ def generate_launch_description():
         controllers_opaque_func,
         control_node,
         node_robot_state_publisher,
+        rosbag2,
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(teleop)
         )
