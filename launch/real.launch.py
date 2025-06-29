@@ -139,9 +139,30 @@ def generate_launch_description():
         function=setup_controllers, kwargs={'control_node': control_node}
     )
 
+    # Exclude all Unitree topics... it should start from the same namespace, fuck Unitree!
+    exclude_regex = (
+        r'(/EstimatorData|/SymState(_back)?|/api/.*'
+        r'|/arm/action/state|/arm_sdk'
+        r'|/audio_msg|/audiosender|/config_change_status'
+        r'|/dex3/(left|right)/(cmd|state)'
+        r'|/frontvideostream|/gnss'
+        r'|/gpt_(cmd|state)|/gptflowfeedback'
+        r'|/lf/(bmsstate|dex3/(left|right)/state|lowstate|mainboardstate|'
+        r'odommodestate|secondary_imu|sportmodestate)'
+        r'|/low(cmd|state)|/multiplestate|/odommodestate'
+        r'|/parameter_events|/public_network_status|/rosout'
+        r'|/rtc/(state|status)|/secondary_imu|/selftest'
+        r'|/servicestate(activate)?|/slam_info|/sportmodestate'
+        r'|/utlidar/range_info|/videohub/inner'
+        r'|/webrtc(req|res)|/wirelesscontroller)'
+    )
+
     rosbag2 = ExecuteProcess(
-        cmd=['ros2', 'bag', 'record', '-s', 'mcap', '-a', '-x', '^/(api|lowcmd).*'],
-        output='screen'
+        cmd=[
+            'ros2', 'bag', 'record', '-s', 'mcap', '-a',  # record all topics
+            '--exclude', exclude_regex,  # skip those that match the regex
+        ],
+        output='screen',
     )
 
     teleop = PathJoinSubstitution([
