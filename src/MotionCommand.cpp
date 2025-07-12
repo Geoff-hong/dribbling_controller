@@ -32,11 +32,19 @@ void MotionCommandTerm::reset() {
   if (referenceMotionIndex_ == cfg_.bodyNames.size()) {
     throw std::runtime_error("Reference body " + cfg_.referenceBody + " not found in body names.");
   }
-  const pinocchio::SE3 initToRef(motionPolicy_->getBodyOrientations()[referenceMotionIndex_],
-                                 motionPolicy_->getBodyPositions()[referenceMotionIndex_]);
-  const pinocchio::SE3 worldToRef = model_->getPinData().oMf[referenceRobotIndex_];
+
+  // Move the whole motion frame s.t. the first frame of the motion is aligned with the current robot in position and yaw orientation.
+  pinocchio::SE3 initToRef(motionPolicy_->getBodyOrientations()[referenceMotionIndex_],
+                           motionPolicy_->getBodyPositions()[referenceMotionIndex_]);
+  pinocchio::SE3 worldToRef = model_->getPinData().oMf[referenceRobotIndex_];
+  initToRef.rotation() = yawQuaternion(quaternion_t(initToRef.rotation()));
+  worldToRef.rotation() = yawQuaternion(quaternion_t(worldToRef.rotation()));
+
   worldToInit_ = worldToRef * initToRef.inverse();
-  worldToInit_.rotation() = yawQuaternion(quaternion_t(worldToInit_.rotation()));
+
+  std::cerr << initToRef << std::endl;
+  std::cerr << worldToRef << std::endl;
+  std::cerr << worldToInit_ << std::endl;
 }
 
 vector3_t MotionCommandTerm::getReferencePositionLocal() const {
