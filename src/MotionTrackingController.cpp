@@ -17,10 +17,11 @@ controller_interface::return_type MotionTrackingController::update(const rclcpp:
 controller_interface::CallbackReturn MotionTrackingController::on_configure(const rclcpp_lifecycle::State& previous_state) {
   get_node()->get_parameter("motion.reference_body", cfg_.referenceBody);
   get_node()->get_parameter("motion.body_names", cfg_.bodyNames);
+  get_node()->get_parameter("motion.start_step", cfg_.startStep);
 
   std::string policyPath{};
   get_node()->get_parameter("policy.path", policyPath);
-  policy_ = std::make_shared<MotionOnnxPolicy>(policyPath);
+  policy_ = std::make_shared<MotionOnnxPolicy>(policyPath, cfg_.startStep);
   policy_->init();
   RCLCPP_INFO_STREAM(rclcpp::get_logger("MotionTrackingController"), "Load Onnx model from" << policyPath << " successfully !");
 

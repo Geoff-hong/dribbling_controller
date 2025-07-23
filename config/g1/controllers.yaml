@@ -39,8 +39,8 @@ standby_controller:
     default_position: [ -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,
                         -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,
                         0.0, 0.0, 0.0,
-                        0.2, 1.57, 0.0, 1.57, 0.0, 0.0, 0.0,
-                        0.2, -1.57, 0.0, 1.57, 0.0, 0.0, 0.0 ]
+                        0.2, 0.2, 0.0, 0.6, 0.0, 0.0, 0.0,
+                        0.2, -0.2, 0.0, 0.6, 0.0, 0.0, 0.0 ]
     kp: [ 350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
           350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
           200.0, 200.0, 200.0,
@@ -64,3 +64,5 @@ walking_controller:
                     'torso_link',
                     'left_shoulder_roll_link', 'left_elbow_link', 'left_wrist_yaw_link',
                     'right_shoulder_roll_link', 'right_elbow_link', 'right_wrist_yaw_link' ]
+
+      start_step: 0
