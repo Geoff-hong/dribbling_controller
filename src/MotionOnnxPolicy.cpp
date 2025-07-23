@@ -10,13 +10,13 @@ namespace legged {
 
 void MotionOnnxPolicy::reset() {
   OnnxPolicy::reset();
-  time_step_ = 0;
+  timeStep_ = startStep_;
   forward(vector_t::Zero(getObservationSize()));
 }
 
 vector_t MotionOnnxPolicy::forward(const vector_t& observations) {
   tensor2d_t timeStep(1, 1);
-  timeStep(0, 0) = static_cast<tensor_element_t>(time_step_++);
+  timeStep(0, 0) = static_cast<tensor_element_t>(timeStep_++);
   inputTensors_[name2Index_.at("time_step")] = timeStep;
   OnnxPolicy::forward(observations);
 

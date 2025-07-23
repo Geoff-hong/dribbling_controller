@@ -13,6 +13,7 @@ namespace legged {
 struct MotionCommandCfg {
   std::string referenceBody;
   std::vector<std::string> bodyNames;
+  int startStep = 0;
 };
 
 inline vector_t rotationToVectorWxyz(const quaternion_t& ori) {
