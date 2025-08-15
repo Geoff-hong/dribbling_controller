@@ -57,7 +57,7 @@ walking_controller:
     policy:
       path: "config/g1/policy.onnx"
     motion:
-      reference_body: "torso_link"
+      anchor_body: "torso_link"
       body_names: [ 'pelvis',
                     'left_hip_roll_link', 'left_knee_link', 'left_ankle_roll_link',
                     'right_hip_roll_link', 'right_knee_link', 'right_ankle_roll_link',

@@ -19,22 +19,22 @@ class MotionObservation : public ObservationTerm {
   MotionCommandTerm::SharedPtr commandTerm_;
 };
 
-class MotionReferencePosition final : public MotionObservation {
+class MotionAnchorPosition final : public MotionObservation {
  public:
   using MotionObservation::MotionObservation;
   size_t getSize() const override { return 3; }
 
  protected:
-  vector_t evaluate() override { return commandTerm_->getReferencePositionLocal(); }
+  vector_t evaluate() override { return commandTerm_->getAnchorPositionLocal(); }
 };
 
-class MotionReferenceOrientation final : public MotionObservation {
+class MotionAnchorOrientation final : public MotionObservation {
  public:
   using MotionObservation::MotionObservation;
   size_t getSize() const override { return 6; }
 
  protected:
-  vector_t evaluate() override { return commandTerm_->getReferenceOrientationLocal(); }
+  vector_t evaluate() override { return commandTerm_->getAnchorOrientationLocal(); }
 };
 
 class RobotBodyPosition final : public MotionObservation {

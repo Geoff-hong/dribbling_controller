@@ -11,7 +11,7 @@
 namespace legged {
 
 struct MotionCommandCfg {
-  std::string referenceBody;
+  std::string anchorBody;
   std::vector<std::string> bodyNames;
   int startStep = 0;
 };

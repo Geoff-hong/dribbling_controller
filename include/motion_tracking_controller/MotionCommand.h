@@ -18,14 +18,14 @@ class MotionCommandTerm : public CommandTerm {
   using SharedPtr = std::shared_ptr<MotionCommandTerm>;
 
   MotionCommandTerm(MotionCommandCfg cfg, MotionOnnxPolicy::SharedPtr motionPolicy)
-      : cfg_(std::move(cfg)), motionPolicy_(std::move(motionPolicy)), referenceRobotIndex_(0), referenceMotionIndex_(0) {}
+      : cfg_(std::move(cfg)), motionPolicy_(std::move(motionPolicy)), anchorRobotIndex_(0), anchorMotionIndex_(0) {}
 
   vector_t getValue() override;
   void reset() override;
 
   MotionCommandCfg getCfg() const { return cfg_; }
-  vector3_t getReferencePositionLocal() const;
-  vector_t getReferenceOrientationLocal() const;
+  vector3_t getAnchorPositionLocal() const;
+  vector_t getAnchorOrientationLocal() const;
   vector_t getRobotBodyPositionLocal() const;
   vector_t getRobotBodyOrientationLocal() const;
 
@@ -35,7 +35,7 @@ class MotionCommandTerm : public CommandTerm {
   MotionCommandCfg cfg_;
   MotionOnnxPolicy::SharedPtr motionPolicy_;
 
-  size_t referenceRobotIndex_, referenceMotionIndex_;
+  size_t anchorRobotIndex_, anchorMotionIndex_;
   std::vector<size_t> bodyIndices_{};
   pinocchio::SE3 worldToInit_;
 };
