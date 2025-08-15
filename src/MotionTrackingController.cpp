@@ -9,13 +9,11 @@ controller_interface::return_type MotionTrackingController::update(const rclcpp:
     return controller_interface::return_type::ERROR;
   }
 
-  // dataLogger_->update(time);
-
   return controller_interface::return_type::OK;
 }
 
 controller_interface::CallbackReturn MotionTrackingController::on_configure(const rclcpp_lifecycle::State& previous_state) {
-  get_node()->get_parameter("motion.reference_body", cfg_.referenceBody);
+  get_node()->get_parameter("motion.anchor_body", cfg_.anchorBody);
   get_node()->get_parameter("motion.body_names", cfg_.bodyNames);
   get_node()->get_parameter("motion.start_step", cfg_.startStep);
 
@@ -32,8 +30,6 @@ controller_interface::CallbackReturn MotionTrackingController::on_activate(const
   if (OnnxController::on_activate(previous_state) != controller_interface::CallbackReturn::SUCCESS) {
     return controller_interface::CallbackReturn::ERROR;
   }
-
-  // dataLogger_ = std::make_shared<DataLogger>(leggedModel(), policy_);
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
@@ -64,10 +60,10 @@ bool MotionTrackingController::parserObservation(const std::string& name) {
   if (OnnxController::parserObservation(name)) {
     return true;
   }
-  if (name == "motion_ref_pos_b") {
-    observationManager_->addTerm(std::make_shared<MotionReferencePosition>(commandTerm_));
-  } else if (name == "motion_ref_ori_b") {
-    observationManager_->addTerm(std::make_shared<MotionReferenceOrientation>(commandTerm_));
+  if (name == "motion_ref_pos_b" || name == "motion_anchor_pos_b") {
+    observationManager_->addTerm(std::make_shared<MotionAnchorPosition>(commandTerm_));
+  } else if (name == "motion_ref_ori_b" || name == "motion_anchor_ori_b") {
+    observationManager_->addTerm(std::make_shared<MotionAnchorOrientation>(commandTerm_));
   } else if (name == "robot_body_pos") {
     observationManager_->addTerm(std::make_shared<RobotBodyPosition>(commandTerm_));
   } else if (name == "robot_body_ori") {
