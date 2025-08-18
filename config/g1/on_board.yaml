@@ -52,8 +52,6 @@ standby_controller:
 
 walking_controller:
   ros__parameters:
-    policy:
-      path: "config/g1/policy.onnx"
     motion:
       anchor_body: "torso_link"
       body_names: [ 'pelvis',
