@@ -40,4 +40,11 @@ vector_t MotionOnnxPolicy::forward(const vector_t& observations) {
   return getLastAction();
 }
 
+void MotionOnnxPolicy::parseMetadata() {
+  OnnxPolicy::parseMetadata();
+  anchorBodyName_ = getMetadataStr("anchor_body_name");
+  std::cout << '\t' << "anchor_body_name: " << anchorBodyName_ << '\n';
+  bodyNames_ = parseCsv<std::string>(getMetadataStr("body_names"));
+  std::cout << '\t' << "body_names: " << bodyNames_ << '\n';
+}
 }  // namespace legged
