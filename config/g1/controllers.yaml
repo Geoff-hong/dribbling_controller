@@ -8,8 +8,6 @@ controller_manager:
       type: legged_controllers/StandbyController
     walking_controller:
       type: motion_tracking_controller/MotionTrackingController
-    walking_controller1:
-      type: legged_rl_controllers/OnnxController
 
 state_estimator:
   ros__parameters:
@@ -17,11 +15,8 @@ state_estimator:
       base_name: "pelvis"
       six_dof_contact_names: [ "LL_FOOT", "LR_FOOT" ]
     estimation:
-      contact:
-        height_sensor_noise: 1e10
       position:
         noise: 1e-2
-        topic: "/mid360"
         frame_id: "mid360_link"
 
 standby_controller:

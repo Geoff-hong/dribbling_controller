@@ -84,6 +84,7 @@ def setup_controllers(context):
     robot_type_value = LaunchConfiguration('robot_type').perform(context)
     policy_path_value = LaunchConfiguration('policy_path').perform(context)
     start_step_value = LaunchConfiguration('start_step').perform(context)
+    ext_pos_corr = LaunchConfiguration('ext_pos_corr').perform(context)
 
     kv_pairs = []
     if policy_path_value:
@@ -91,8 +92,11 @@ def setup_controllers(context):
         kv_pairs.append(('walking_controller.policy.path', abs_path))
     if start_step_value:
         kv_pairs.append(('walking_controller.motion.start_step', start_step_value))
+    if ext_pos_corr.lower() in ["true", "1", "yes"]:
+        kv_pairs.append(('state_estimator.estimation.contact.height_sensor_noise', 1e10))
+        kv_pairs.append(('state_estimator.estimation.position.topic', "/glim/odom"))
 
-    controllers_config_path = f'config/{robot_type_value}/on_board.yaml'
+    controllers_config_path = f'config/{robot_type_value}/controllers.yaml'
     temp_controllers_config_path = generate_temp_config(
         controllers_config_path,
         'motion_tracking_controller',
@@ -208,6 +212,11 @@ def generate_launch_description():
             'start_step',
             default_value='0',
             description='Integer start step for walking_controller.motion.start_step'
+        ),
+        DeclareLaunchArgument(
+            'ext_pos_corr',
+            default_value='false',
+            description='Enable external position correction'
         ),
         wandb,
         controllers_opaque_func,
