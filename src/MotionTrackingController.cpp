@@ -4,32 +4,38 @@
 #include "motion_tracking_controller/MotionObservation.h"
 
 namespace legged {
-controller_interface::return_type MotionTrackingController::update(const rclcpp::Time& time, const rclcpp::Duration& period) {
-  if (OnnxController::update(time, period) != controller_interface::return_type::OK) {
-    return controller_interface::return_type::ERROR;
+controller_interface::CallbackReturn MotionTrackingController::on_init() {
+  if (RlController::on_init() != controller_interface::CallbackReturn::SUCCESS) {
+    return controller_interface::CallbackReturn::ERROR;
   }
 
-  return controller_interface::return_type::OK;
+  try {
+    auto_declare("motion.start_step", 0);
+  } catch (const std::exception& e) {
+    RCLCPP_ERROR(get_node()->get_logger(), "Exception during init: %s", e.what());
+    return CallbackReturn::ERROR;
+  }
+
+  return controller_interface::CallbackReturn::SUCCESS;
 }
 
 controller_interface::CallbackReturn MotionTrackingController::on_configure(const rclcpp_lifecycle::State& previous_state) {
-  int startStep = 0;
-  get_node()->get_parameter("motion.start_step", startStep);
-  std::string policyPath{};
-  get_node()->get_parameter("policy.path", policyPath);
+  const auto policyPath = get_node()->get_parameter("policy.path").as_string();
+  const auto startStep = static_cast<size_t>(get_node()->get_parameter("motion.start_step").as_int());
+
   policy_ = std::make_shared<MotionOnnxPolicy>(policyPath, startStep);
   policy_->init();
 
   auto policy = std::dynamic_pointer_cast<MotionOnnxPolicy>(policy_);
   cfg_.anchorBody = policy->getAnchorBodyName();
   cfg_.bodyNames = policy->getBodyNames();
-  RCLCPP_INFO_STREAM(rclcpp::get_logger("MotionTrackingController"), "Load Onnx model from" << policyPath << " successfully !");
+  RCLCPP_INFO_STREAM(rclcpp::get_logger("MotionTrackingController"), "Load Onnx model from " << policyPath << " successfully !");
 
   return RlController::on_configure(previous_state);
 }
 
 controller_interface::CallbackReturn MotionTrackingController::on_activate(const rclcpp_lifecycle::State& previous_state) {
-  if (OnnxController::on_activate(previous_state) != controller_interface::CallbackReturn::SUCCESS) {
+  if (RlController::on_activate(previous_state) != controller_interface::CallbackReturn::SUCCESS) {
     return controller_interface::CallbackReturn::ERROR;
   }
 
@@ -37,17 +43,15 @@ controller_interface::CallbackReturn MotionTrackingController::on_activate(const
 }
 
 controller_interface::CallbackReturn MotionTrackingController::on_deactivate(const rclcpp_lifecycle::State& previous_state) {
-  if (OnnxController::on_deactivate(previous_state) != controller_interface::CallbackReturn::SUCCESS) {
+  if (RlController::on_deactivate(previous_state) != controller_interface::CallbackReturn::SUCCESS) {
     return controller_interface::CallbackReturn::ERROR;
   }
-
-  // dataLogger_->writeAndClear();
 
   return controller_interface::CallbackReturn::SUCCESS;
 }
 
 bool MotionTrackingController::parserCommand(const std::string& name) {
-  if (OnnxController::parserCommand(name)) {
+  if (RlController::parserCommand(name)) {
     return true;
   }
   if (name == "motion") {
@@ -59,7 +63,7 @@ bool MotionTrackingController::parserCommand(const std::string& name) {
 }
 
 bool MotionTrackingController::parserObservation(const std::string& name) {
-  if (OnnxController::parserObservation(name)) {
+  if (RlController::parserObservation(name)) {
     return true;
   }
   if (name == "motion_ref_pos_b" || name == "motion_anchor_pos_b") {
