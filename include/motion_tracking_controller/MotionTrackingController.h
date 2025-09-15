@@ -1,14 +1,14 @@
 #pragma once
 
-#include <legged_rl_controllers/OnnxController.h>
+#include <legged_rl_controllers/RlController.h>
 
 #include "motion_tracking_controller/MotionCommand.h"
 #include "motion_tracking_controller/common.h"
 
 namespace legged {
-class MotionTrackingController : public OnnxController {
+class MotionTrackingController : public RlController {
  public:
-  controller_interface::return_type update(const rclcpp::Time& time, const rclcpp::Duration& period) override;
+  controller_interface::CallbackReturn on_init() override;
 
   controller_interface::CallbackReturn on_configure(const rclcpp_lifecycle::State& previous_state) override;
 
