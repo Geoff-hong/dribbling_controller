@@ -46,3 +46,7 @@ standby_controller:
           5.0, 5.0, 5.0,
           3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,
           3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0 ]
+
+walking_controller:
+  ros__parameters:
+    update_rate: 50

@@ -68,7 +68,6 @@ def generate_temp_config(config_path, package_name, kv_pairs):
 # --------------------------
 def control_spawner(names, inactive=False):
     args = list(names)
-    args += ['--param-file', LaunchConfiguration('controllers_yaml')]
     if inactive:
         args.append('--inactive')
     return Node(
@@ -150,6 +149,7 @@ def generate_launch_description():
             {"model_package": "unitree_description",
              "model_file": PythonExpression(["'/mjcf/", robot_type, ".xml'"]),
              "physics_plugins": ["mujoco_ros2_control::MujocoRos2ControlPlugin"],
+             "use_sim_time": True
              },
             robot_description,
             LaunchConfiguration('controllers_yaml'),
