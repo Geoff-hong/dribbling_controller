@@ -60,6 +60,7 @@ Clone two repo into the `src` of workspace.
 cd ~/colcon_ws/src
 git clone https://github.com/qiayuanl/unitree_bringup.git
 git clone https://github.com/HybridRobotics/motion_tracking_controller.git
+cd ../
 ```
 
 Install dependencies automatically:
