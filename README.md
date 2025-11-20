@@ -18,12 +18,12 @@ This repo also serves as an example of how to implement a custom controller usin
 ### Dependencies
 
 This software is built on
-the [ROS 2 Humble](https://docs.ros.org/en/humble/Installation/Ubuntu-Install-Debs.html#ubuntu-deb-packages), which
+the [ROS 2 Jazzy](https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html#ubuntu-deb-packages), which
 needs to be installed first. Additionally, this code base depends on `legged_control2`.
 
 ### Install `legged_control2`
 
-Pre-built binaries for `legged_control2` are available on ROS 2 Humble. We recommend first reading
+Pre-built binaries for `legged_control2` are available on ROS 2 Jazzy. We recommend first reading
 the [full documentation](https://qiayuanl.github.io/legged_control2_doc/overview.html).
 
 Specifically, For this repo, follow
@@ -32,15 +32,15 @@ Additionally, install Unitree-specific packages:
 
 ```bash
 # Add debian source
-echo "deb [trusted=yes] https://github.com/qiayuanl/unitree_buildfarm/raw/jammy-humble-amd64/ ./" | sudo tee /etc/apt/sources.list.d/qiayuanl_unitree_buildfarm.list
-echo "yaml https://github.com/qiayuanl/unitree_buildfarm/raw/jammy-humble-amd64/local.yaml humble" | sudo tee /etc/ros/rosdep/sources.list.d/1-qiayuanl_unitree_buildfarm.list
+echo "deb [trusted=yes] https://github.com/qiayuanl/unitree_buildfarm/raw/noble-jazzy-amd64/ ./" | sudo tee /etc/apt/sources.list.d/qiayuanl_unitree_buildfarm.list
+echo "yaml https://github.com/qiayuanl/unitree_buildfarm/raw/noble-jazzy-amd64/local.yaml jazzy" | sudo tee /etc/ros/rosdep/sources.list.d/1-qiayuanl_unitree_buildfarm.list
 sudo apt-get update
 ```
 
 ```bash
 # Install packages
-sudo apt-get install ros-humble-unitree-description
-sudo apt-get install ros-humble-unitree-systems
+sudo apt-get install ros-jazzy-unitree-description
+sudo apt-get install ros-jazzy-unitree-systems
 ```
 
 ### Build Package
