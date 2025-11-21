@@ -184,12 +184,14 @@ def generate_launch_description():
         r'|/servicestate(activate)?|/slam_info|/sportmodestate'
         r'|/utlidar/range_info|/videohub/inner'
         r'|/webrtc(req|res)|/wirelesscontroller)'
+        r'|/controller_manager/introspection_data/full'
+        r'|/controller_manager/statistics/full'
     )
 
     rosbag2 = ExecuteProcess(
         cmd=[
             'ros2', 'bag', 'record', '-s', 'mcap', '-a',  # record all topics
-            '--exclude', exclude_regex,  # skip those that match the regex
+            '--exclude-regex', exclude_regex,  # skip those that match the regex
         ],
         output='screen',
     )
