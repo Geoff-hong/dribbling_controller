@@ -1,0 +1,213 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 500  # Hz
+
+    state_estimator:
+      type: legged_controllers/StateEstimator
+    standby_controller:
+      type: legged_controllers/StandbyController
+    walking_controller:
+      type: motion_tracking_controller/SoftTouchDribbleController
+
+mujoco_sim_ros2_node:
+  ros__parameters:
+    softtouch_mujoco_ball_bridge:
+      enabled: true
+      frame_id: "world"
+      pose_topic: "/softtouch/ball/pose"
+      twist_topic: "/softtouch/ball/twist"
+      publish_rate_hz: 100.0
+      ball_joint: "softtouch_ball_freejoint"
+      position_sensor: "softtouch_ball_pos"
+      quaternion_sensor: "softtouch_ball_quat"
+      linear_velocity_sensor: "softtouch_ball_linvel"
+      angular_velocity_sensor: "softtouch_ball_angvel"
+      publish_base_state: true
+      base_joint: "floating_base_joint"
+      base_pose_topic: "/softtouch/base/pose"
+      base_twist_topic: "/softtouch/base/twist"
+      ball_translational_damping: 0.0
+      # Current empirical MuJoCo sim2sim value. The pure-rolling equivalent of
+      # PhysX angular_damping=4.0 is 0.0044064, but the full robot rollout
+      # currently needs more contact-model tuning before that value is stable.
+      ball_angular_damping: 4.0
+      reset:
+        enabled: true
+        # softtouch_dribble_mujoco.launch.py fills this with the package share path.
+        state_file: ""
+        apply_on_configure: true
+        apply_on_reset: true
+        zero_velocity: true
+        request_topic: "/softtouch/mujoco_reset"
+
+state_estimator:
+  ros__parameters:
+    model:
+      base_name: "pelvis"
+      six_dof_contact_names: [ "LL_FOOT", "LR_FOOT" ]
+    estimation:
+      position:
+        noise: 1e-2
+        frame_id: "mid360_link"
+
+standby_controller:
+  ros__parameters:
+    joint_names:
+      [ left_hip_pitch_joint, left_hip_roll_joint, left_hip_yaw_joint,
+        left_knee_joint, left_ankle_pitch_joint, left_ankle_roll_joint,
+        right_hip_pitch_joint, right_hip_roll_joint, right_hip_yaw_joint,
+        right_knee_joint, right_ankle_pitch_joint, right_ankle_roll_joint,
+        waist_yaw_joint, waist_roll_joint, waist_pitch_joint,
+        left_shoulder_pitch_joint, left_shoulder_roll_joint, left_shoulder_yaw_joint,
+        left_elbow_joint, left_wrist_roll_joint, left_wrist_pitch_joint, left_wrist_yaw_joint,
+        right_shoulder_pitch_joint, right_shoulder_roll_joint, right_shoulder_yaw_joint,
+        right_elbow_joint, right_wrist_roll_joint, right_wrist_pitch_joint, right_wrist_yaw_joint ]
+    default_position: [ -0.312, 0.0, 0.0, 0.669, -0.33, 0.0,
+                        -0.312, 0.0, 0.0, 0.669, -0.33, 0.0,
+                        0.0, 0.0, 0.0,
+                        0.2, 0.2, 0.0, 0.6, 0.0, 0.0, 0.0,
+                        0.2, -0.2, 0.0, 0.6, 0.0, 0.0, 0.0 ]
+    kp: [ 350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
+          350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
+          200.0, 200.0, 200.0,
+          40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0,
+          40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0 ]
+    kd: [ 5.0, 5.0, 5.0, 10.0, 5.0, 5.0,
+          5.0, 5.0, 5.0, 10.0, 5.0, 5.0,
+          5.0, 5.0, 5.0,
+          3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,
+          3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0 ]
+
+walking_controller:
+  ros__parameters:
+    update_rate: 50
+    policy:
+      # Launch files fill this with ~/SoftTouch/checkpoints/.../softtouch_dribble_deploy.onnx by default.
+      path: ""
+      action_type: position_absolute
+
+    command:
+      names:
+        - softtouch_dribble
+
+    observation:
+      names:
+        - base_ang_vel
+        - projected_gravity
+        - joint_pos
+        - joint_vel
+        - last_latent_action
+        - ball_pos_b
+        - ball_lin_vel_b
+        - target_dir_b
+        - target_speed
+        - cmd_dir_w
+        - next_cmd_dir_w
+        - next_target_speed
+        - pelvis_pos_xy_w
+        - pelvis_yaw_cossin_w
+        - decoder_base_ang_vel
+        - decoder_joint_pos
+        - decoder_joint_vel
+        - last_decoded_action
+
+    softtouch:
+      base_name: "pelvis"
+      seed: 42
+      joint_order_source: "onnx_metadata"
+      observation_dim: 180
+      action_dim: 29
+      latent_dim: 8
+      use_previous_applied_raw_action: true
+
+      ball_state:
+        # Mocap/ROS2 controller contract:
+        # position = ball center xyz in world frame, metres
+        # velocity = ball center linear velocity xyz in world frame, m/s
+        source: "topic"
+        pose_topic: "/softtouch/ball/pose"
+        twist_topic: "/softtouch/ball/twist"
+        frame_id: "world"
+        timeout_s: 0.10
+
+      base_state:
+        # Default deployment path uses legged_control2/StateEstimator.
+        # For MuJoCo source comparison, set source=topic to use /softtouch/base/*
+        # direct simulator truth from the SoftTouch MuJoCo bridge.
+        source: "model"
+        pose_topic: "/softtouch/base/pose"
+        twist_topic: "/softtouch/base/twist"
+        frame_id: "world"
+        timeout_s: 0.10
+
+      reset:
+        ball_forward_m: 0.65
+        ball_z_m: 0.09
+        reset_route_on_activate: true
+        reset_policy_memory_on_activate: true
+        mujoco_reset_on_activate: true
+        mujoco_reset_topic: "/softtouch/mujoco_reset"
+        mujoco_reset_hold_s: 0.06
+
+      action:
+        command_mode: "position_target"
+        policy_update_period_s: 0.02
+        effort_limit: [ 88.0, 88.0, 88.0, 139.0, 139.0, 50.0,
+                        88.0, 88.0, 50.0, 139.0, 139.0,
+                        25.0, 25.0, 50.0, 50.0, 25.0,
+                        25.0, 50.0, 50.0, 25.0, 25.0,
+                        25.0, 25.0, 25.0, 25.0, 5.0,
+                        5.0, 5.0, 5.0 ]
+        clip_target_to_joint_range: true
+        joint_limit_factor: 0.9
+        joint_limit_lower: [ -2.5307, -2.5307, -2.618, -0.5236, -2.9671, -0.52,
+                             -2.7576, -2.7576, -0.52, -0.087267, -0.087267,
+                             -3.0892, -3.0892, -0.87267, -0.87267, -1.5882,
+                             -2.2515, -0.2618, -0.2618, -2.618, -2.618,
+                             -1.0472, -1.0472, -1.97222, -1.97222, -1.61443,
+                             -1.61443, -1.61443, -1.61443 ]
+        joint_limit_upper: [ 2.8798, 2.8798, 2.618, 2.9671, 0.5236, 0.52,
+                             2.7576, 2.7576, 0.52, 2.8798, 2.8798,
+                             2.6704, 2.6704, 0.5236, 0.5236, 2.2515,
+                             1.5882, 0.2618, 0.2618, 2.618, 2.618,
+                             2.0944, 2.0944, 1.97222, 1.97222, 1.61443,
+                             1.61443, 1.61443, 1.61443 ]
+
+      mujoco_runtime:
+        # Keep sim2sim physics settings explicit and aligned with the exported MJCF.
+        sim_dt: 0.005
+        integrator: "euler"
+        joint_armature_source: "onnx_metadata"
+        ball_angular_damping: 4.0
+        ball_site: "softtouch_ball_center"
+        ball_position_sensor: "softtouch_ball_pos"
+        ball_quaternion_sensor: "softtouch_ball_quat"
+        ball_linear_velocity_sensor: "softtouch_ball_linvel"
+        ball_angular_velocity_sensor: "softtouch_ball_angvel"
+
+      visualization:
+        enabled: true
+        topic: "/softtouch/dribble/markers"
+        frame_id: "world"
+        publish_period_s: 0.05
+        target_arrow_length: 0.45
+        ball_marker_radius: 0.09
+        route_max_points: 160
+
+      route:
+        cmd_mode: 4
+        route_length_m: 20.0
+        route_seg_len_m: 0.25
+        route_lookahead_m: 0.8
+        route_preview_arc_m: 1.0
+        route_human_kappa_cap: 0.5
+        route_human_persist: 0.6
+        route_human_weave_mag: [0.4, 1.0]
+        route_human_big_prob: 0.09
+        route_human_big_angle_deg: [40.0, 180.0]
+        route_kvscale: 0.75
+        route_vmax: 2.0
+        route_lazy_extend: true
+        route_init_segments: 9
+        route_extend_chunk: 1
+        route_extend_ahead_margin_segs: 10

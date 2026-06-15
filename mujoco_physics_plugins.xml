@@ -1,0 +1,9 @@
+<library path="motion_tracking_controller">
+    <class name="motion_tracking_controller/SoftTouchMujocoBallBridgePlugin"
+           type="legged::SoftTouchMujocoBallBridgePlugin"
+           base_class_type="mujoco_sim_ros2::MujocoPhysicsPlugin">
+        <description>
+            Publishes the SoftTouch dribble ball pose/twist from MuJoCo sensors and applies ball freejoint damping.
+        </description>
+    </class>
+</library>
