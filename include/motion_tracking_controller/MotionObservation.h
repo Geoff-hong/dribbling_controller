@@ -46,6 +46,15 @@ class RobotBodyPosition final : public MotionObservation {
   vector_t evaluate() override { return commandTerm_->getRobotBodyPositionLocal(); }
 };
 
+class MotionBodyPositionError final : public MotionObservation {
+ public:
+  using MotionObservation::MotionObservation;
+  size_t getSize() const override { return 3 * commandTerm_->getCfg().bodyNames.size(); }
+
+ protected:
+  vector_t evaluate() override { return commandTerm_->getMotionBodyPositionErrorLocal(); }
+};
+
 class RobotBodyOrientation final : public MotionObservation {
  public:
   using MotionObservation::MotionObservation;

@@ -11,7 +11,13 @@ namespace legged {
 class MotionOnnxPolicy : public OnnxPolicy {
  public:
   using SharedPtr = std::shared_ptr<MotionOnnxPolicy>;
-  MotionOnnxPolicy(const std::string& modelPath, size_t startStep) : OnnxPolicy(modelPath), startStep_(startStep) {}
+  MotionOnnxPolicy(const std::string& modelPath, size_t startStep, size_t motionLength = 0, bool loopMotion = false,
+                   size_t timeStepStride = 1)
+      : OnnxPolicy(modelPath),
+        startStep_(startStep),
+        motionLength_(motionLength),
+        loopMotion_(loopMotion),
+        timeStepStride_(timeStepStride == 0 ? 1 : timeStepStride) {}
 
   void reset() override;
   vector_t forward(const vector_t& observations) override;
@@ -28,6 +34,9 @@ class MotionOnnxPolicy : public OnnxPolicy {
 
  protected:
   size_t timeStep_ = 0, startStep_ = 0;
+  size_t motionLength_ = 0;
+  bool loopMotion_ = false;
+  size_t timeStepStride_ = 1;
   vector_t jointPosition_;
   vector_t jointVelocity_;
   std::vector<vector3_t> bodyPositions_;

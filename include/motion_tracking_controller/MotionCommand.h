@@ -27,6 +27,7 @@ class MotionCommandTerm : public CommandTerm {
   vector3_t getAnchorPositionLocal() const;
   vector_t getAnchorOrientationLocal() const;
   vector_t getRobotBodyPositionLocal() const;
+  vector_t getMotionBodyPositionErrorLocal() const;
   vector_t getRobotBodyOrientationLocal() const;
 
  protected:
