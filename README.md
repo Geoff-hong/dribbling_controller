@@ -1,143 +1,247 @@
-# BeyondMimic Motion Tracking Inference
+# SoftTouch Dribbling Controller
 
-[[Website]](https://beyondmimic.github.io/)
-[[Arxiv]](https://arxiv.org/abs/2508.08241)
-[[Video]](https://youtu.be/RS_MtKVIAzY)
+This repository is a dribbling-oriented fork of the BeyondMimic
+`motion_tracking_controller`.  The original controller runs whole-body motion
+tracking policies with legged_control2.  This fork keeps that path and adds a
+SoftTouch dribbling deployment path:
 
-This repository provides the inference pipeline for motion tracking policies in BeyondMimic. The pipeline is implemented
-in C++ using the ONNX CPU inference engine. Model parameters (joint order, impedance, etc.)
-are stored in ONNX metadata, and the reference motion is returned via the `forward()` function.
-See [this script](https://github.com/HybridRobotics/whole_body_tracking/blob/main/source/whole_body_tracking/whole_body_tracking/utils/exporter.py)
-for details on exporting models.
+- a ROS 2 controller for the SoftTouch Stage-3 dribble policy,
+- ball pose/twist inputs for MuJoCo, mocap, or future perception pipelines,
+- route command generation matching the SoftTouch dribble task,
+- a MuJoCo physics bridge for ball state publishing and motion-frame reset,
+- launch files for dribble sim2sim and mocap-based sim2real tests.
 
-This repo also serves as an example of how to implement a custom controller using the
-[legged_control2](https://qiayuanl.github.io/legged_control2_doc/) framework.
+The controller is still a whole-body controller.  The main difference from
+single-motion tracking is that the policy also observes ball state and route
+commands.
+
+## Requirements
+
+The tested setup is:
+
+- Ubuntu 24.04
+- ROS 2 Jazzy
+- legged_control2 and its Unitree/MuJoCo packages
+- a G1 whole-body tracking or SoftTouch policy exported to ONNX
+
+If ROS 1 is installed on the same machine, use a clean shell for ROS 2:
+
+```bash
+env -u ROS_DISTRO -u ROS_ROOT -u ROS_PACKAGE_PATH bash --noprofile --norc
+source /opt/ros/jazzy/setup.bash
+```
 
 ## Installation
 
-### Dependencies
+Install ROS 2 Jazzy first by following the official ROS 2 documentation.  Then
+install legged_control2 following the recommended Debian source installation:
 
-This software is built on
-the [ROS 2 Jazzy](https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html#ubuntu-deb-packages), which
-needs to be installed first. Additionally, this code base depends on `legged_control2`.
+https://qiayuanl.github.io/legged_control2_doc/installation.html#debian-source-recommended
 
-### Install `legged_control2`
-
-Pre-built binaries for `legged_control2` are available on ROS 2 Jazzy. We recommend first reading
-the [full documentation](https://qiayuanl.github.io/legged_control2_doc/overview.html).
-
-Specifically, For this repo, follow
-the [Debian Source installation](https://qiayuanl.github.io/legged_control2_doc/installation.html#debian-source-recommended).
-Additionally, install Unitree-specific packages:
+The following packages are expected to be available after that setup:
 
 ```bash
-# Add debian source
-echo "deb [trusted=yes] https://github.com/qiayuanl/unitree_buildfarm/raw/noble-jazzy-amd64/ ./" | sudo tee /etc/apt/sources.list.d/qiayuanl_unitree_buildfarm.list
-echo "yaml https://github.com/qiayuanl/unitree_buildfarm/raw/noble-jazzy-amd64/local.yaml jazzy" | sudo tee /etc/ros/rosdep/sources.list.d/1-qiayuanl_unitree_buildfarm.list
-sudo apt-get update
+sudo apt update
+sudo apt install -y \
+  ros-jazzy-unitree-description \
+  ros-jazzy-unitree-systems \
+  ros-jazzy-mujoco-ros2-control \
+  ros-jazzy-rviz2 \
+  ros-dev-tools \
+  python3-colcon-common-extensions \
+  python3-rosdep \
+  python3-vcstool
 ```
 
-```bash
-# Install packages
-sudo apt-get install ros-jazzy-unitree-description
-sudo apt-get install ros-jazzy-unitree-systems
-```
-
-### Build Package
-
-After installing `legged_control2`, you can build this package. You’ll also need the
-`unitree_bringup` repo, which contains utilities not included in the pre-built binaries.
-
-Create a ROS 2 workspace if you don't have one. Below we use `~/colcon_ws` as an example.
+Create a workspace and clone this fork:
 
 ```bash
-mkdir -p ~/colcon_ws/src
-```
-
-Clone two repo into the `src` of workspace.
-
-```bash
-cd ~/colcon_ws/src
+mkdir -p ~/softtouch_ros2_ws/src
+cd ~/softtouch_ros2_ws/src
 git clone https://github.com/qiayuanl/unitree_bringup.git
-git clone https://github.com/HybridRobotics/motion_tracking_controller.git
-cd ../
+git clone https://github.com/Geoff-hong/dribbling_controller.git motion_tracking_controller
+cd ~/softtouch_ros2_ws
 ```
 
-Install dependencies automatically:
+Install dependencies and build:
 
 ```bash
 rosdep install --from-paths src --ignore-src -r -y
-```
-
-Build the packages:
-
-```bash
-colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=RelwithDebInfo --packages-up-to unitree_bringup
-colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=RelwithDebInfo --packages-up-to motion_tracking_controller
+colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo --packages-up-to motion_tracking_controller
 source install/setup.bash
 ```
 
-## Basic Usage
+## SoftTouch Policy Artifact
 
-### Sim-to-Sim
+The dribble launch files default to:
 
-We provide a launch file for running the policy in MuJoCo simulation.
-
-```bash
-# Load policy from WandB
-ros2 launch motion_tracking_controller mujoco.launch.py wandb_path:=<your_wandb_run_path>
+```text
+~/SoftTouch/checkpoints/g1_dribble_s3_human_iter35000/softtouch_dribble_deploy.onnx
 ```
 
-```bash
-# OR load policy from local ONNX file (should be absolute or start with `~`)
-ros2 launch motion_tracking_controller mujoco.launch.py policy_path:=<your_onnx_file_path>
-```
-
-### Real Experiments
-
-> ⚠️ **Disclaimer**  
-> Running these models on real robots is **dangerous** and entirely at your own risk.  
-> They are provided **for research only**, and we accept **no responsibility** for any harm, damage, or malfunction.
-
-1. Connect to the robot via ethernet cable.
-2. Set the ethernet adapter to static IP: `192.168.123.11`.
-3. Use `ifconfig` to find the `<network_interface>`, (e.g.,`eth0` or `enp3s0`).
+If that ONNX file already exists, no export step is needed.  If you have the
+SoftTouch checkpoint and Stage-2 decoder but not the deployment ONNX, export it
+from the SoftTouch Python environment:
 
 ```bash
-# Load policy from WandB
-ros2 launch motion_tracking_controller real.launch.py network_interface:=<network_interface> wandb_path:=<your_wandb_run_path>
+cd ~/softtouch_ros2_ws/src/motion_tracking_controller
+python tools/export_softtouch_dribble_policy.py \
+  --checkpoint ~/SoftTouch/checkpoints/g1_dribble_s3_human_iter35000/model_35000.pt \
+  --artifact ~/SoftTouch/checkpoints/g1_dribble_s3_human_iter35000/stage2_decoder_dim8.pt \
+  --output ~/SoftTouch/checkpoints/g1_dribble_s3_human_iter35000/softtouch_dribble_deploy.onnx
 ```
+
+The exported ONNX packs the Stage-3 actor and frozen Stage-2 decoder into one
+deployment graph.  It expects the SoftTouch dribble observation layout described
+in `config/g1/softtouch_dribble_controllers.yaml`.
+
+## Sim2Sim Usage
+
+Run the default dribble MuJoCo sim2sim:
 
 ```bash
-# OR load policy from local ONNX file (should be absolute or start with `~`)
-ros2 launch motion_tracking_controller real.launch.py network_interface:=<network_interface> policy_path:=<your_onnx_file_name>.onnx
+env -u ROS_DISTRO -u ROS_ROOT -u ROS_PACKAGE_PATH bash --noprofile --norc
+source /opt/ros/jazzy/setup.bash
+source ~/softtouch_ros2_ws/install/setup.bash
+
+ros2 launch motion_tracking_controller softtouch_dribble_mujoco.launch.py
 ```
 
-The robot should enter standby controller in the beginning.
-Use the Unitree remote (joystick) to start and stop the policy:
+Useful overrides:
 
-- Standby controller (joint position control): `L1 + A`
-- Motion tracking controller (the policy): `R1 + A`
-- E-stop (damping): `B`
+```bash
+# Use a non-default exported policy
+ros2 launch motion_tracking_controller softtouch_dribble_mujoco.launch.py \
+  policy_path:=/absolute/path/to/softtouch_dribble_deploy.onnx
+
+# Show route and ball markers in RViz
+ros2 launch motion_tracking_controller softtouch_dribble_mujoco.launch.py \
+  launch_rviz:=true
+
+# Use direct MuJoCo base truth for source comparison
+ros2 launch motion_tracking_controller softtouch_dribble_mujoco.launch.py \
+  softtouch_base_state_source:=topic
+
+# Fall back to the original legged_control2 action path
+ros2 launch motion_tracking_controller softtouch_dribble_mujoco.launch.py \
+  softtouch_action_command_mode:=rl_controller
+```
+
+The default dribble sim2sim launch uses:
+
+- `mjcf/g1_softtouch_dribble.xml`,
+- `config/g1/softtouch_dribble_controllers.yaml`,
+- `config/g1/softtouch_mujoco_reset_walkf_rf_frame0.txt`,
+- `SoftTouchMujocoBallBridgePlugin` to publish `/softtouch/ball/pose` and
+  `/softtouch/ball/twist`,
+- `position_target` action mode, which sends absolute joint targets with PD
+  gains from the deployment metadata.
+
+## Real Robot / Mocap Usage
+
+Real robot experiments are dangerous and are entirely at your own risk.  Start
+with low-risk mocap wiring tests and verify all topics before activating the
+policy on hardware.
+
+The SoftTouch controller expects ball state on:
+
+```text
+/softtouch/ball/pose   geometry_msgs/PoseStamped, ball center xyz in world frame
+/softtouch/ball/twist  geometry_msgs/TwistStamped, ball center linear velocity in world frame
+```
+
+If mocap publishes a `PoseStamped`, bridge it into the SoftTouch topic contract:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ~/softtouch_ros2_ws/install/setup.bash
+
+ros2 run motion_tracking_controller bridge_softtouch_mocap_ball.py \
+  --input-pose /mocap/ball/pose \
+  --output-pose /softtouch/ball/pose \
+  --output-twist /softtouch/ball/twist
+```
+
+Then launch the dribble real stack:
+
+```bash
+ros2 launch motion_tracking_controller softtouch_dribble_real.launch.py \
+  network_interface:=<robot_network_interface>
+```
+
+Optional:
+
+```bash
+ros2 launch motion_tracking_controller softtouch_dribble_real.launch.py \
+  network_interface:=<robot_network_interface> \
+  policy_path:=/absolute/path/to/softtouch_dribble_deploy.onnx \
+  enable_rosbag:=true
+```
+
+## Single Motion Tracking
+
+The original BeyondMimic motion tracking path is still available:
+
+```bash
+ros2 launch motion_tracking_controller mujoco.launch.py policy_path:=/absolute/path/to/policy.onnx
+ros2 launch motion_tracking_controller real.launch.py network_interface:=<robot_network_interface> policy_path:=/absolute/path/to/policy.onnx
+```
+
+The fork adds optional motion controls useful for expert policies:
+
+- `motion_length`
+- `motion_loop`
+- `motion_time_step_stride`
+- `motion_action_command_mode`
+
+Leaving `motion_action_command_mode` empty uses the original
+`RlController::update()` path.
 
 ## Code Structure
 
-This section will be especially helpful if you decide to write your own legged_control2 controller.
-For a minimal starting point, check
-the [legged_template_controller](https://github.com/qiayuanl/legged_template_controller).
+- `MotionTrackingController.*`
+  Original whole-body tracking controller, extended with optional reset,
+  motion timing, and explicit position/effort action modes.
 
-Below is an overview of the code structure for this repository:
+- `MotionOnnxPolicy.*`
+  ONNX wrapper for motion tracking policies.  It now supports motion length,
+  looping, and time-step stride.
 
-- **`include`** or **`src`**
-    - **`MotionTrackingController`** Manages observations (like an RL environment) and passes them to the policy.
+- `SoftTouchDribbleController.*`
+  ROS 2 lifecycle controller for the SoftTouch dribble policy.
 
-    - **`MotionOnnxPolicy`** Wraps the neural network, runs inference, and extracts reference motion from the ONNX file.
+- `SoftTouchDribbleOnnxPolicy.*`
+  Deployment ONNX wrapper.  It maintains latent/raw/decoded action history and
+  converts raw policy output into absolute joint targets.
 
-    - **`MotionCommand`** Defines observation terms aligned with the training code.
+- `SoftTouchDribbleCommand.*`
+  Ball state, optional base-state topic input, route command generation, and
+  reset-time fallback state.
 
+- `SoftTouchDribbleObservation.*`
+  Observation terms matching the SoftTouch dribble task.
 
-- **`launch`**
-    - Includes launch files like `mujoco.launch.py` and `real.launch.py` for simulation and real robot execution.
-- **`config`**
-    - Stores configuration files for standby controller and state estimation params.
+- `SoftTouchMujocoBallBridgePlugin.*`
+  MuJoCo physics plugin for ball/base state publishing, ball damping, and
+  reset-state application.
 
+- `tools/bridge_softtouch_mocap_ball.py`
+  Converts mocap ball pose into SoftTouch ball pose/twist topics.
+
+- `tools/export_softtouch_dribble_policy.py`
+  Exports the SoftTouch Stage-3 actor plus Stage-2 decoder into one deployment
+  ONNX.
+
+- `tools/export_softtouch_mujoco_reset_state.py`
+  Generates reset-state text files from SoftTouch motion clips.
+
+## Notes
+
+- `joint order mapping` is intentional.  Policy metadata order, ROS 2 control
+  command order, and MuJoCo actuator order should not be assumed to match.
+- `position_target` is not a torque policy.  It sends absolute joint targets,
+  stiffness, damping, and zero effort.
+- `effort_pd` is available for comparison, but it is not the default real robot
+  path.
+- MuJoCo sim2sim ball state is simulator truth.  For sim2real, replace it with
+  mocap or perception estimates that obey the same topic contract.
