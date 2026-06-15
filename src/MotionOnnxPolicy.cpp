@@ -12,11 +12,15 @@ void MotionOnnxPolicy::reset() {
   OnnxPolicy::reset();
   timeStep_ = startStep_;
   forward(vector_t::Zero(getObservationSize()));
+  OnnxPolicy::reset();
 }
 
 vector_t MotionOnnxPolicy::forward(const vector_t& observations) {
   tensor2d_t timeStep(1, 1);
-  timeStep(0, 0) = static_cast<tensor_element_t>(timeStep_++);
+  const size_t policyStep =
+      loopMotion_ && motionLength_ > 0 ? (timeStep_ % motionLength_) : timeStep_;
+  timeStep(0, 0) = static_cast<tensor_element_t>(policyStep);
+  timeStep_ += timeStepStride_;
   inputTensors_[name2Index_.at("time_step")] = timeStep;
   OnnxPolicy::forward(observations);
 

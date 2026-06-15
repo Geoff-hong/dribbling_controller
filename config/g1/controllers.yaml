@@ -50,3 +50,5 @@ standby_controller:
 walking_controller:
   ros__parameters:
     update_rate: 50 # Remove this line if using Humble!!!
+    policy:
+      action_type: position_absolute

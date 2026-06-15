@@ -13,12 +13,13 @@ vector_t MotionCommandTerm::getValue() {
 void MotionCommandTerm::reset() {
   const auto& pinModel = model_->getPinModel();
   anchorRobotIndex_ = pinModel.getFrameId(cfg_.anchorBody);
-  if (anchorRobotIndex_ >= pinModel.nframes) {
+  const auto numFrames = static_cast<size_t>(pinModel.nframes);
+  if (anchorRobotIndex_ >= numFrames) {
     throw std::runtime_error("Anchor body " + cfg_.anchorBody + " not found.");
   }
   for (const auto& bodyName : cfg_.bodyNames) {
     bodyIndices_.push_back(pinModel.getFrameId(bodyName));
-    if (bodyIndices_.back() >= pinModel.nframes) {
+    if (bodyIndices_.back() >= numFrames) {
       throw std::runtime_error("Frame " + bodyName + " not found.");
     }
   }
@@ -50,7 +51,8 @@ vector3_t MotionCommandTerm::getAnchorPositionLocal() const {
   const auto& data = model_->getPinData();
   const auto& anchorPoseReal = data.oMf[anchorRobotIndex_];
 
-  const auto& anchorPos = motionPolicy_->getBodyPositions()[anchorMotionIndex_];
+  const auto bodyPositions = motionPolicy_->getBodyPositions();
+  const auto& anchorPos = bodyPositions[anchorMotionIndex_];
   return anchorPoseReal.actInv(worldToInit_.act(anchorPos));
 }
 
@@ -74,12 +76,26 @@ vector_t MotionCommandTerm::getRobotBodyPositionLocal() const {
   return value;
 }
 
+vector_t MotionCommandTerm::getMotionBodyPositionErrorLocal() const {
+  const auto& data = model_->getPinData();
+  const auto& anchorPoseReal = data.oMf[anchorRobotIndex_];
+  const auto bodyPositions = motionPolicy_->getBodyPositions();
+  vector_t value(3 * cfg_.bodyNames.size());
+  for (size_t i = 0; i < cfg_.bodyNames.size(); ++i) {
+    const vector3_t motionPosLocal = anchorPoseReal.actInv(worldToInit_.act(bodyPositions[i]));
+    const vector3_t robotPosLocal = anchorPoseReal.actInv(data.oMf[bodyIndices_[i]]).translation();
+    value.segment(3 * i, 3) = motionPosLocal - robotPosLocal;
+  }
+  return value;
+}
+
 vector_t MotionCommandTerm::getRobotBodyOrientationLocal() const {
   const auto& data = model_->getPinData();
   const auto& anchorPoseReal = data.oMf[anchorRobotIndex_];
   vector_t value(6 * cfg_.bodyNames.size());
   for (size_t i = 0; i < cfg_.bodyNames.size(); ++i) {
-    const auto& rot = anchorPoseReal.actInv(data.oMf[bodyIndices_[i]]).rotation();
+    const auto bodyPoseLocal = anchorPoseReal.actInv(data.oMf[bodyIndices_[i]]);
+    const auto& rot = bodyPoseLocal.rotation();
     vector_t rot6(6);
     rot6 << rot(0, 0), rot(0, 1), rot(1, 0), rot(1, 1), rot(2, 0), rot(2, 1);
     value.segment(i * 6, 6) = rot6;
