@@ -10,9 +10,29 @@
     <buildtool_depend>ament_cmake</buildtool_depend>
     <build_depend>ament_cmake_auto</build_depend>
 
+    <depend>rclcpp</depend>
+    <depend>rclcpp_lifecycle</depend>
+    <depend>controller_interface</depend>
+    <depend>builtin_interfaces</depend>
+    <depend>pluginlib</depend>
+    <depend>mujoco_ament</depend>
+    <depend>mujoco_sim_ros2</depend>
+    <depend>legged_model</depend>
     <depend>legged_rl_controllers</depend>
     <depend>legged_bringup</depend>
-    <depend>rosbag2-storage-mcap</depend>
+    <depend>geometry_msgs</depend>
+    <depend>std_msgs</depend>
+    <depend>visualization_msgs</depend>
+    <exec_depend>rclpy</exec_depend>
+    <exec_depend>controller_manager</exec_depend>
+    <exec_depend>ros2controlcli</exec_depend>
+    <exec_depend>robot_state_publisher</exec_depend>
+    <exec_depend>xacro</exec_depend>
+    <exec_depend>mujoco_ros2_control</exec_depend>
+    <exec_depend>unitree_description</exec_depend>
+    <exec_depend>unitree_bringup</exec_depend>
+    <exec_depend>rosbag2_storage_mcap</exec_depend>
+    <exec_depend>rviz2</exec_depend>
 
     <export>
         <build_type>ament_cmake</build_type>

@@ -6,4 +6,11 @@
             Template controller for legged robot.
         </description>
     </class>
+    <class name="motion_tracking_controller/SoftTouchDribbleController"
+           type="legged::SoftTouchDribbleController"
+           base_class_type="controller_interface::ControllerInterface">
+        <description>
+            SoftTouch dribble whole-body controller with mocap/MuJoCo ball state and route observations.
+        </description>
+    </class>
 </library>

@@ -8,6 +8,7 @@ from launch.actions import (
     SetLaunchConfiguration,
     IncludeLaunchDescription,
 )
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, FindExecutable, PathJoinSubstitution, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
@@ -22,19 +23,35 @@ def setup_controllers(context):
     policy_path_value = LaunchConfiguration('policy_path').perform(context)
     wandb_path_value = LaunchConfiguration('wandb_path').perform(context)
     start_step_value = LaunchConfiguration('start_step').perform(context)
+    motion_length_value = LaunchConfiguration('motion_length').perform(context)
+    motion_loop_value = LaunchConfiguration('motion_loop').perform(context)
+    motion_time_step_stride_value = LaunchConfiguration('motion_time_step_stride').perform(context)
+    policy_action_type = LaunchConfiguration('policy_action_type').perform(context)
+    controller_type_value = LaunchConfiguration('controller_type').perform(context)
+    controllers_config_value = LaunchConfiguration('controllers_config').perform(context)
     ext_pos_corr = LaunchConfiguration('ext_pos_corr').perform(context)
 
     if not policy_path_value and wandb_path_value:
         policy_path_value = download_wandb_onnx(wandb_path_value)
 
-    controllers_config_path = f'config/{robot_type_value}/controllers.yaml'
+    controllers_config_path = controllers_config_value or f'config/{robot_type_value}/controllers.yaml'
 
     kv_pairs = resolve_policy_paths(controllers_config_path, 'motion_tracking_controller')
+    if controller_type_value:
+        kv_pairs.append(('controller_manager.ros__parameters.walking_controller.type', controller_type_value))
     if policy_path_value:
         abs_path = os.path.abspath(os.path.expanduser(os.path.expandvars(policy_path_value)))
         kv_pairs.append(('walking_controller.policy.path', abs_path))
     if start_step_value:
         kv_pairs.append(('walking_controller.motion.start_step', start_step_value))
+    if motion_length_value:
+        kv_pairs.append(('walking_controller.motion.length', motion_length_value))
+    if motion_loop_value:
+        kv_pairs.append(('walking_controller.motion.loop', motion_loop_value))
+    if motion_time_step_stride_value:
+        kv_pairs.append(('walking_controller.motion.time_step_stride', motion_time_step_stride_value))
+    if policy_action_type:
+        kv_pairs.append(('walking_controller.policy.action_type', policy_action_type))
     if ext_pos_corr.lower() in ["true", "1", "yes"]:
         kv_pairs.append(('state_estimator.estimation.contact.height_sensor_noise', 1e10))
         kv_pairs.append(('state_estimator.estimation.position.topic', "/glim/odom"))
@@ -64,6 +81,8 @@ def setup_controllers(context):
 def generate_launch_description():
     robot_type = LaunchConfiguration('robot_type')
     network_interface = LaunchConfiguration('network_interface')
+    enable_teleop = LaunchConfiguration('enable_teleop')
+    enable_rosbag = LaunchConfiguration('enable_rosbag')
     urdf_name = PythonExpression(["'g1' if '", robot_type, "' == 'g1' else 'sdk1'"])
 
     robot_description_command = Command([
@@ -127,6 +146,7 @@ def generate_launch_description():
             '--exclude-regex', exclude_regex,  # skip those that match the regex
         ],
         output='screen',
+        condition=IfCondition(enable_rosbag),
     )
 
     teleop = PathJoinSubstitution([
@@ -139,14 +159,44 @@ def generate_launch_description():
         DeclareLaunchArgument('robot_type', default_value='g1'),
         DeclareLaunchArgument('network_interface'),
         DeclareLaunchArgument(
+            'controllers_config',
+            default_value='',
+            description='Optional controller YAML path. Default: config/<robot_type>/controllers.yaml'
+        ),
+        DeclareLaunchArgument(
             'policy_path',
             default_value='',
             description='Absolute or ~-expanded path for walking_controller.policy.path'
         ),
         DeclareLaunchArgument(
+            'controller_type',
+            default_value='',
+            description='Optional override for controller_manager.walking_controller.type'
+        ),
+        DeclareLaunchArgument(
             'start_step',
-            default_value='0',
-            description='Integer start step for walking_controller.motion.start_step'
+            default_value='',
+            description='Optional integer start step for walking_controller.motion.start_step'
+        ),
+        DeclareLaunchArgument(
+            'motion_length',
+            default_value='',
+            description='Optional reference motion length for walking_controller.motion.length'
+        ),
+        DeclareLaunchArgument(
+            'motion_loop',
+            default_value='',
+            description='Optional true/false for walking_controller.motion.loop'
+        ),
+        DeclareLaunchArgument(
+            'motion_time_step_stride',
+            default_value='',
+            description='Optional integer stride for walking_controller.motion.time_step_stride'
+        ),
+        DeclareLaunchArgument(
+            'policy_action_type',
+            default_value='',
+            description='Optional walking_controller.policy.action_type override'
         ),
         DeclareLaunchArgument(
             'ext_pos_corr',
@@ -158,12 +208,23 @@ def generate_launch_description():
             default_value='',
             description='W&B run path to download ONNX from (used when policy_path is empty)'
         ),
+        DeclareLaunchArgument(
+            'enable_teleop',
+            default_value='true',
+            description='Launch unitree_bringup teleop nodes'
+        ),
+        DeclareLaunchArgument(
+            'enable_rosbag',
+            default_value='true',
+            description='Record all non-Unitree topics with rosbag2/mcap'
+        ),
         controllers_opaque_func,
         control_node,
         node_robot_state_publisher,
         rosbag2,
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(teleop),
-            launch_arguments={'robot_type': robot_type}.items()
+            launch_arguments={'robot_type': robot_type}.items(),
+            condition=IfCondition(enable_teleop),
         )
     ])
