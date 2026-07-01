@@ -27,10 +27,11 @@ mujoco_sim_ros2_node:
       base_pose_topic: "/softtouch/base/pose"
       base_twist_topic: "/softtouch/base/twist"
       ball_translational_damping: 0.0
-      # Current empirical MuJoCo sim2sim value. The pure-rolling equivalent of
-      # PhysX angular_damping=4.0 is 0.0044064, but the full robot rollout
-      # currently needs more contact-model tuning before that value is stable.
-      ball_angular_damping: 4.0
+      # = 4 * ball_rotational_inertia, reproducing PhysX angular_damping=4.0 spin-decay
+      # RATE (MuJoCo dof_damping is a torque coeff, not PhysX's 1/s rate).
+      # 2026-06-17 ball: r=0.10, m=0.391 -> I=2/5*m*r^2=0.001564 -> 4*I=0.006256.
+      # (old 0.09/0.34 ball was 0.0044064.)
+      ball_angular_damping: 0.006256
       reset:
         enabled: true
         # softtouch_dribble_mujoco.launch.py fills this with the package share path.
@@ -101,11 +102,7 @@ walking_controller:
         - ball_lin_vel_b
         - target_dir_b
         - target_speed
-        - cmd_dir_w
-        - next_cmd_dir_w
         - next_target_speed
-        - pelvis_pos_xy_w
-        - pelvis_yaw_cossin_w
         - decoder_base_ang_vel
         - decoder_joint_pos
         - decoder_joint_vel
@@ -134,7 +131,10 @@ walking_controller:
         # Default deployment path uses legged_control2/StateEstimator.
         # For MuJoCo source comparison, set source=topic to use /softtouch/base/*
         # direct simulator truth from the SoftTouch MuJoCo bridge.
-        source: "model"
+        # sim2sim: training fed sim-truth root state, so use the ground-truth base
+        # topic instead of the real-robot StateEstimator, whose lag/bias on pelvis
+        # orientation + base_ang_vel was degrading balance (pitch topple).
+        source: "topic"
         pose_topic: "/softtouch/base/pose"
         twist_topic: "/softtouch/base/twist"
         frame_id: "world"
@@ -142,7 +142,7 @@ walking_controller:
 
       reset:
         ball_forward_m: 0.65
-        ball_z_m: 0.09
+        ball_z_m: 0.10
         reset_route_on_activate: true
         reset_policy_memory_on_activate: true
         mujoco_reset_on_activate: true
@@ -176,9 +176,10 @@ walking_controller:
       mujoco_runtime:
         # Keep sim2sim physics settings explicit and aligned with the exported MJCF.
         sim_dt: 0.005
-        integrator: "euler"
+        integrator: "implicitfast"
         joint_armature_source: "onnx_metadata"
-        ball_angular_damping: 4.0
+        # Doc mirror only (not read by code); see softtouch_mujoco_ball_bridge above.
+        ball_angular_damping: 0.006256
         ball_site: "softtouch_ball_center"
         ball_position_sensor: "softtouch_ball_pos"
         ball_quaternion_sensor: "softtouch_ball_quat"
@@ -196,7 +197,7 @@ walking_controller:
 
       route:
         cmd_mode: 4
-        route_length_m: 20.0
+        route_length_m: 100.0
         route_seg_len_m: 0.25
         route_lookahead_m: 0.8
         route_preview_arc_m: 1.0

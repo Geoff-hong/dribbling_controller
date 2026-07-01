@@ -50,7 +50,6 @@ vector_t makeSoftTouchDribbleObservation(const SoftTouchDribbleState& state, con
   const vector3_t ballLinearVelocityBody = rotateWorldToBody(pelvisOrientationWorld, state.ballLinearVelocityWorld);
   const vector3_t targetDirBody =
       rotateWorldToBody(pelvisOrientationWorld, vector3_t(command.targetDirWorld.x(), command.targetDirWorld.y(), 0.0));
-  const scalar_t yaw = yawFromQuaternion(pelvisOrientationWorld);
 
   vector_t obs(kSoftTouchDribbleObsDim);
   Eigen::Index cursor = 0;
@@ -71,15 +70,7 @@ vector_t makeSoftTouchDribbleObservation(const SoftTouchDribbleState& state, con
   obs.segment(cursor, 2) = targetDirBody.head<2>();
   cursor += 2;
   obs(cursor++) = command.targetSpeed;
-  obs.segment(cursor, 2) = command.targetDirWorld;
-  cursor += 2;
-  obs.segment(cursor, 2) = command.nextTargetDirWorld;
-  cursor += 2;
   obs(cursor++) = command.nextTargetSpeed;
-  obs.segment(cursor, 2) = state.pelvisPositionWorld.head<2>();
-  cursor += 2;
-  obs(cursor++) = std::cos(yaw);
-  obs(cursor++) = std::sin(yaw);
 
   obs.segment(cursor, 3) = state.baseAngularVelocityBody;
   cursor += 3;

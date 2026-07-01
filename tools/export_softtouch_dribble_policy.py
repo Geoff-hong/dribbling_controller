@@ -192,6 +192,8 @@ ARMATURE_PATTERNS = {
     ".*_wrist_yaw_joint": ARMATURE_4010,
 }
 
+# 2026-06-17 DR run dropped all world-frame terms (cmd_dir_w, next_cmd_dir_w,
+# pelvis_pos_xy_w, pelvis_yaw_cossin_w) -> yaw/position-invariant actor obs = 82.
 ACTOR_OBSERVATION_NAMES = [
     "base_ang_vel",
     "projected_gravity",
@@ -202,11 +204,7 @@ ACTOR_OBSERVATION_NAMES = [
     "ball_lin_vel_b",
     "target_dir_b",
     "target_speed",
-    "cmd_dir_w",
-    "next_cmd_dir_w",
     "next_target_speed",
-    "pelvis_pos_xy_w",
-    "pelvis_yaw_cossin_w",
 ]
 
 DEPLOY_OBSERVATION_NAMES = ACTOR_OBSERVATION_NAMES + [
@@ -226,11 +224,7 @@ DEPLOY_OBSERVATION_DIMS = [
     3,
     2,
     1,
-    2,
-    2,
     1,
-    2,
-    2,
     3,
     29,
     29,
@@ -288,11 +282,42 @@ def csv(values: Iterable[object], decimals: int = 10) -> str:
     return ",".join(out)
 
 
+# --- v2 obs layout (2026-06-21 run) -----------------------------------------
+# Adds a single-frame `ball_radius` term (r-0.10) and a 10-frame flattened actor
+# history (isaaclab policy group history_length=10). Single frame = 83 dims, so
+# the actor input is 83*10 = 830. Decoder state_only is unchanged (single frame).
+ACTOR_SINGLE_FRAME_NAMES_V2 = [
+    "base_ang_vel",
+    "projected_gravity",
+    "joint_pos",
+    "joint_vel",
+    "last_latent_action",
+    "ball_pos_b",
+    "ball_lin_vel_b",
+    "ball_radius",
+    "target_dir_b",
+    "target_speed",
+    "next_target_speed",
+]
+ACTOR_SINGLE_FRAME_DIMS_V2 = [3, 3, 29, 29, 8, 3, 3, 1, 2, 1, 1]  # sum = 83
+DECODER_OBSERVATION_NAMES = [
+    "decoder_base_ang_vel",
+    "decoder_joint_pos",
+    "decoder_joint_vel",
+    "last_decoded_action",
+]
+DECODER_OBSERVATION_DIMS = [3, 29, 29, 29]  # sum = 90
+ACTOR_HISTORY_LENGTH_V2 = 10
+
+
 class SoftTouchActor(nn.Module):
     def __init__(self, state_dict: dict[str, torch.Tensor]) -> None:
         super().__init__()
+        # Infer the actor input width from the checkpoint so this serves both the
+        # 82-dim single-frame policy and the 830-dim (83x10 history) policy.
+        in_dim = int(state_dict["actor.0.weight"].shape[1])
         self.net = nn.Sequential(
-            nn.Linear(90, 512),
+            nn.Linear(in_dim, 512),
             nn.ELU(),
             nn.Linear(512, 256),
             nn.ELU(),
@@ -368,10 +393,12 @@ class SoftTouchVaeCore(nn.Module):
 class SoftTouchDribbleDeployPolicy(nn.Module):
     def __init__(self, checkpoint: dict, artifact: dict, lab_lambda: float) -> None:
         super().__init__()
-        self.actor_obs_dim = 90
+        self.actor = SoftTouchActor(checkpoint["model_state_dict"])
+        # actor input width = single_frame_dim * history_length (830 for the v2
+        # history policy, 82 for the original single-frame policy)
+        self.actor_obs_dim = int(self.actor.net[0].in_features)
         self.decoder_state_dim = int(artifact["architecture"]["state_only_dim"])
         self.lab_lambda = float(lab_lambda)
-        self.actor = SoftTouchActor(checkpoint["model_state_dict"])
         self.vae = SoftTouchVaeCore(artifact)
 
         norm = checkpoint["obs_norm_state_dict"]
@@ -390,8 +417,21 @@ class SoftTouchDribbleDeployPolicy(nn.Module):
         return raw_joint_action, latent_action, z, mu_p, logvar_p
 
 
-def attach_metadata(onnx_path: Path, checkpoint_path: Path, artifact_path: Path, lab_lambda: float) -> None:
+def attach_metadata(onnx_path: Path, checkpoint_path: Path, artifact_path: Path, lab_lambda: float,
+                    obs_layout: str = "v1") -> None:
     model = onnx.load(str(onnx_path))
+    if obs_layout == "v2":
+        actor_names = ACTOR_SINGLE_FRAME_NAMES_V2
+        actor_dims = ACTOR_SINGLE_FRAME_DIMS_V2
+        actor_history = ACTOR_HISTORY_LENGTH_V2
+    else:
+        actor_names = ACTOR_OBSERVATION_NAMES
+        actor_dims = DEPLOY_OBSERVATION_DIMS[: len(ACTOR_OBSERVATION_NAMES)]
+        actor_history = 1
+    obs_names = actor_names + DECODER_OBSERVATION_NAMES
+    obs_dims = list(actor_dims) + DECODER_OBSERVATION_DIMS
+    history_lengths = [actor_history] * len(actor_names) + [1] * len(DECODER_OBSERVATION_NAMES)
+    actor_obs_dim = sum(actor_dims) * actor_history  # 830 for v2, 82 for v1
     metadata = {
         "policy_kind": "softtouch_dribble_latent_v1",
         "checkpoint_path": str(checkpoint_path),
@@ -404,16 +444,19 @@ def attach_metadata(onnx_path: Path, checkpoint_path: Path, artifact_path: Path,
         "default_joint_pos": DEFAULT_JOINT_POS,
         "action_scale": resolve_action_scale_like_isaaclab(ACTION_SCALE_PATTERNS, JOINT_NAMES),
         "command_names": ["dribble_route"],
-        "observation_names": DEPLOY_OBSERVATION_NAMES,
-        "observation_dims": DEPLOY_OBSERVATION_DIMS,
-        "observation_history_lengths": [1] * len(DEPLOY_OBSERVATION_NAMES),
-        "actor_observation_dim": 90,
+        "observation_names": obs_names,
+        "observation_dims": obs_dims,
+        "observation_history_lengths": history_lengths,
+        "actor_observation_dim": actor_obs_dim,
         "decoder_state_dim": 90,
         "latent_dim": 8,
         "action_dim": 29,
         "obs_normalizer_eps": 1.0e-2,
-        "onnx_input_layout": "obs = actor_obs[90] + decoder_state_only[90]",
-        "actor_obs_names": ACTOR_OBSERVATION_NAMES,
+        "onnx_input_layout": (
+            f"obs = actor_obs[{actor_obs_dim}] + decoder_state_only[90]"
+        ),
+        "actor_obs_names": actor_names,
+        "actor_history_length": actor_history,
         "route_defaults": [
             "reset_ball_forward_m=0.65",
             "route_seg_len_m=0.25",
@@ -456,6 +499,9 @@ def main() -> None:
     )
     parser.add_argument("--lab-lambda", type=float, default=2.5)
     parser.add_argument("--opset", type=int, default=11)
+    parser.add_argument("--obs-layout", choices=["v1", "v2"], default="v1",
+                        help="v1 = 82-dim single-frame actor; v2 = 83-dim single frame "
+                             "(+ball_radius) x 10-frame history = 830-dim actor (2026-06-21 run)")
     args = parser.parse_args()
 
     checkpoint_path = Path(os.path.expanduser(args.checkpoint)).resolve()
@@ -485,7 +531,7 @@ def main() -> None:
         output_names=["actions", "latent_action", "latent_z", "prior_mu", "prior_logvar"],
         dynamic_axes={},
     )
-    attach_metadata(output_path, checkpoint_path, artifact_path, args.lab_lambda)
+    attach_metadata(output_path, checkpoint_path, artifact_path, args.lab_lambda, args.obs_layout)
     onnx.checker.check_model(str(output_path))
     print(f"[export] wrote {output_path}")
 

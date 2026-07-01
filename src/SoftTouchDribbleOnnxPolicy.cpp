@@ -31,7 +31,8 @@ void SoftTouchDribbleOnnxPolicy::reset() {
 
 vector_t SoftTouchDribbleOnnxPolicy::forward(const vector_t& observations) {
   if (observations.size() != static_cast<Eigen::Index>(kSoftTouchDribbleObsDim)) {
-    throw std::runtime_error("SoftTouchDribbleOnnxPolicy expected 180-D observation, got " +
+    throw std::runtime_error("SoftTouchDribbleOnnxPolicy expected " +
+                             std::to_string(kSoftTouchDribbleObsDim) + "-D observation, got " +
                              std::to_string(observations.size()));
   }
   OnnxPolicy::forward(observations);

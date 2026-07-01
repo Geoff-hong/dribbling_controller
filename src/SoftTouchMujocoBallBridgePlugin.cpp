@@ -19,7 +19,10 @@ namespace legged {
 namespace {
 
 constexpr const char* kParamPrefix = "softtouch_mujoco_ball_bridge.";
-constexpr double kDefaultMujocoBallAngularDamping = 4.0;
+// = 4 * ball_rotational_inertia; reproduces PhysX angular_damping=4.0 spin-decay rate.
+// (MuJoCo dof_damping is a torque coeff, not PhysX's 1/s rate.) See controllers.yaml.
+// 2026-06-17 ball r=0.10/m=0.391 -> 4*I=0.006256 (was 0.0044064 for 0.09/0.34).
+constexpr double kDefaultMujocoBallAngularDamping = 0.006256;
 
 bool readBoolParam(const rclcpp::Node::SharedPtr& node, const std::string& name, bool fallback) {
   if (!node->has_parameter(name)) {
@@ -182,6 +185,18 @@ void SoftTouchMujocoBallBridgePlugin::Configure(rclcpp::Node::SharedPtr& node, r
     baseTwistPub_ = node_->create_publisher<geometry_msgs::msg::TwistStamped>(baseTwistTopic_, qos);
   }
 
+  // Route-line visualization inside the MuJoCo viewer: drive 'route_dot_*' mocap
+  // bodies from the controller's route MarkerArray.
+  resolveRouteDots(model);
+  if (!routeDotMocapIds_.empty()) {
+    routeMarkerTopic_ = readStringParam(node_, std::string(kParamPrefix) + "route_marker_topic", routeMarkerTopic_);
+    routeMarkerSub_ = node_->create_subscription<visualization_msgs::msg::MarkerArray>(
+        routeMarkerTopic_, 1,
+        [this](const visualization_msgs::msg::MarkerArray::SharedPtr msg) { handleRouteMarkers(msg); });
+    RCLCPP_INFO_STREAM(node_->get_logger(), "SoftTouch route viz: " << routeDotMocapIds_.size()
+                                                                    << " mocap dots from " << routeMarkerTopic_);
+  }
+
   if (publishBallStateEnabled_) {
     RCLCPP_INFO_STREAM(node_->get_logger(), "SoftTouch MuJoCo ball bridge publishes "
                                                 << positionSensorName_ << "/" << linearVelocitySensorName_ << " to "
@@ -251,10 +266,74 @@ void SoftTouchMujocoBallBridgePlugin::Update(mjModel* model, mjData* data) {
     return;
   }
   lastPublishTime_ = data->time;
+  updateRouteDots(model, data);
   if (publishBallStateEnabled_) {
     publishBallState(data);
   }
   publishBaseState(data);
+}
+
+void SoftTouchMujocoBallBridgePlugin::resolveRouteDots(mjModel* model) {
+  routeDotMocapIds_.clear();
+  if (model == nullptr) {
+    return;
+  }
+  for (int i = 0;; ++i) {
+    const std::string name = "route_dot_" + std::to_string(i);
+    const int bodyId = mj_name2id(model, mjOBJ_BODY, name.c_str());
+    if (bodyId < 0) {
+      break;
+    }
+    routeDotMocapIds_.push_back(model->body_mocapid[bodyId]);
+  }
+}
+
+void SoftTouchMujocoBallBridgePlugin::handleRouteMarkers(const visualization_msgs::msg::MarkerArray::SharedPtr msg) {
+  std::vector<std::array<double, 3>> points;
+  for (const auto& marker : msg->markers) {
+    if (marker.type != visualization_msgs::msg::Marker::LINE_STRIP) {
+      continue;  // the route is the LINE_STRIP marker (ns softtouch_dribble, id 1)
+    }
+    points.reserve(marker.points.size());
+    for (const auto& p : marker.points) {
+      points.push_back({p.x, p.y, p.z});
+    }
+    break;
+  }
+  std::lock_guard<std::mutex> lock(routeMutex_);
+  routePoints_ = std::move(points);
+}
+
+void SoftTouchMujocoBallBridgePlugin::updateRouteDots(const mjModel* model, mjData* data) {
+  (void)model;
+  if (routeDotMocapIds_.empty() || data == nullptr) {
+    return;
+  }
+  std::vector<std::array<double, 3>> points;
+  {
+    std::lock_guard<std::mutex> lock(routeMutex_);
+    points = routePoints_;
+  }
+  const int numDots = static_cast<int>(routeDotMocapIds_.size());
+  const int numPoints = static_cast<int>(points.size());
+  for (int i = 0; i < numDots; ++i) {
+    const int mocapId = routeDotMocapIds_[i];
+    if (mocapId < 0) {
+      continue;
+    }
+    double* dst = data->mocap_pos + 3 * mocapId;
+    if (numPoints < 2) {
+      dst[0] = 0.0;
+      dst[1] = 0.0;
+      dst[2] = -1.0;  // no route yet -> park underground (hidden)
+      continue;
+    }
+    // sample the route evenly across the available points (integer-rounded)
+    const int idx = (numDots > 1) ? (i * (numPoints - 1) + (numDots - 1) / 2) / (numDots - 1) : 0;
+    dst[0] = points[static_cast<size_t>(idx)][0];
+    dst[1] = points[static_cast<size_t>(idx)][1];
+    dst[2] = points[static_cast<size_t>(idx)][2];
+  }
 }
 
 void SoftTouchMujocoBallBridgePlugin::resolveSensors(mjModel* model) {
