@@ -27,6 +27,9 @@ class SoftTouchDribbleOnnxPolicy : public OnnxPolicy {
   const vector_t& getJointTarget() const { return jointTarget_; }
   const vector_t& getCurrentRawAction() const { return rawAction_; }
   const vector_t& getCurrentLatentAction() const { return latentAction_; }
+  // Per-observation-term history lengths from ONNX metadata (v2 history policy).
+  // Empty if the model predates the field (caller then keeps default history=1).
+  std::vector<size_t> getObservationHistoryLengths() const;
   void setJointTargetClip(const vector_t& lower, const vector_t& upper, scalar_t factor);
   void disableJointTargetClip();
 
