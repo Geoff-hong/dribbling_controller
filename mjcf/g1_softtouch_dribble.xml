@@ -1,5 +1,8 @@
 <mujoco model="g1">
-    <option timestep="0.005" integrator="Euler"/>
+    <!-- impratio>1 + elliptic cone: rigid, isotropic friction so the feet don't
+         slip at the solver level (MuJoCo default impratio=1/pyramidal is slip-prone
+         for legged robots and under-grips vs PhysX patch friction). -->
+    <option timestep="0.005" integrator="implicitfast" cone="elliptic" impratio="10"/>
     <compiler angle="radian" meshdir="/opt/ros/jazzy/share/unitree_description/meshes/g1"/>
 
     <default>
@@ -367,21 +370,21 @@
 
     <contact>
         <!-- left foot - floor -->
-        <pair name="left_foot1_floor" geom1="left_foot1_collision" geom2="floor" solref="0.01 1" friction="0.8 0.8"/>
-        <pair name="left_foot2_floor" geom1="left_foot2_collision" geom2="floor" solref="0.01 1" friction="0.8 0.8"/>
-        <pair name="left_foot3_floor" geom1="left_foot3_collision" geom2="floor" solref="0.01 1" friction="0.8 0.8"/>
-        <pair name="left_foot4_floor" geom1="left_foot4_collision" geom2="floor" solref="0.01 1" friction="0.8 0.8"/>
-        <pair name="left_foot5_floor" geom1="left_foot5_collision" geom2="floor" solref="0.01 1" friction="0.8 0.8"/>
-        <pair name="left_foot6_floor" geom1="left_foot6_collision" geom2="floor" solref="0.01 1" friction="0.8 0.8"/>
-        <pair name="left_foot7_floor" geom1="left_foot7_collision" geom2="floor" solref="0.01 1" friction="0.8 0.8"/>
+        <pair name="left_foot1_floor" geom1="left_foot1_collision" geom2="floor" condim="4" solref="0.01 1" friction="0.8 0.8 0.04"/>
+        <pair name="left_foot2_floor" geom1="left_foot2_collision" geom2="floor" condim="4" solref="0.01 1" friction="0.8 0.8 0.04"/>
+        <pair name="left_foot3_floor" geom1="left_foot3_collision" geom2="floor" condim="4" solref="0.01 1" friction="0.8 0.8 0.04"/>
+        <pair name="left_foot4_floor" geom1="left_foot4_collision" geom2="floor" condim="4" solref="0.01 1" friction="0.8 0.8 0.04"/>
+        <pair name="left_foot5_floor" geom1="left_foot5_collision" geom2="floor" condim="4" solref="0.01 1" friction="0.8 0.8 0.04"/>
+        <pair name="left_foot6_floor" geom1="left_foot6_collision" geom2="floor" condim="4" solref="0.01 1" friction="0.8 0.8 0.04"/>
+        <pair name="left_foot7_floor" geom1="left_foot7_collision" geom2="floor" condim="4" solref="0.01 1" friction="0.8 0.8 0.04"/>
         <!-- right foot - floor -->
-        <pair name="right_foot1_floor" geom1="right_foot1_collision" geom2="floor" solref="0.01 1" friction="0.8 0.8"/>
-        <pair name="right_foot2_floor" geom1="right_foot2_collision" geom2="floor" solref="0.01 1" friction="0.8 0.8"/>
-        <pair name="right_foot3_floor" geom1="right_foot3_collision" geom2="floor" solref="0.01 1" friction="0.8 0.8"/>
-        <pair name="right_foot4_floor" geom1="right_foot4_collision" geom2="floor" solref="0.01 1" friction="0.8 0.8"/>
-        <pair name="right_foot5_floor" geom1="right_foot5_collision" geom2="floor" solref="0.01 1" friction="0.8 0.8"/>
-        <pair name="right_foot6_floor" geom1="right_foot6_collision" geom2="floor" solref="0.01 1" friction="0.8 0.8"/>
-        <pair name="right_foot7_floor" geom1="right_foot7_collision" geom2="floor" solref="0.01 1" friction="0.8 0.8"/>
+        <pair name="right_foot1_floor" geom1="right_foot1_collision" geom2="floor" condim="4" solref="0.01 1" friction="0.8 0.8 0.04"/>
+        <pair name="right_foot2_floor" geom1="right_foot2_collision" geom2="floor" condim="4" solref="0.01 1" friction="0.8 0.8 0.04"/>
+        <pair name="right_foot3_floor" geom1="right_foot3_collision" geom2="floor" condim="4" solref="0.01 1" friction="0.8 0.8 0.04"/>
+        <pair name="right_foot4_floor" geom1="right_foot4_collision" geom2="floor" condim="4" solref="0.01 1" friction="0.8 0.8 0.04"/>
+        <pair name="right_foot5_floor" geom1="right_foot5_collision" geom2="floor" condim="4" solref="0.01 1" friction="0.8 0.8 0.04"/>
+        <pair name="right_foot6_floor" geom1="right_foot6_collision" geom2="floor" condim="4" solref="0.01 1" friction="0.8 0.8 0.04"/>
+        <pair name="right_foot7_floor" geom1="right_foot7_collision" geom2="floor" condim="4" solref="0.01 1" friction="0.8 0.8 0.04"/>
             <pair name="floor_ball" geom1="floor" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.5 0.5 0.005 0.0001 0.0001"/>
         <pair name="left_foot1_collision_ball" geom1="left_foot1_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.5 0.5 0.005 0.0001 0.0001"/>
         <pair name="left_foot2_collision_ball" geom1="left_foot2_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.5 0.5 0.005 0.0001 0.0001"/>
@@ -466,13 +469,56 @@
 
 
       <worldbody>
-    <body name="softtouch_ball" pos="0.65 0 0.09">
+    <body name="softtouch_ball" pos="0.65 0 0.10">
       <freejoint name="softtouch_ball_freejoint"/>
-      <geom name="softtouch_ball_geom" type="sphere" size="0.09"
-            mass="0.34" condim="6" rgba="1 0.45 0 1"
+      <geom name="softtouch_ball_geom" type="sphere" size="0.10"
+            mass="0.391" condim="6" rgba="1 0.45 0 1"
             friction="0.5 0.005 0.0001"/>
       <site name="softtouch_ball_center" pos="0 0 0"/>
     </body>
+    <!-- Route visualization dots (mocap, no physics). SoftTouchMujocoBallBridgePlugin
+         positions them along the cmd route from /softtouch/dribble/markers so the
+         route shows inside the MuJoCo viewer (parked at z=-1 until a route arrives). -->
+    <body name="route_dot_0" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_1" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_2" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_3" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_4" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_5" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_6" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_7" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_8" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_9" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_10" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_11" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_12" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_13" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_14" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_15" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_16" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_17" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_18" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_19" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_20" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_21" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_22" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_23" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_24" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_25" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_26" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_27" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_28" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_29" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_30" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_31" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_32" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_33" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_34" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_35" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_36" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_37" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_38" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
+    <body name="route_dot_39" mocap="true" pos="0 0 -1"><geom type="sphere" size="0.03" rgba="0.1 0.8 1 0.8" contype="0" conaffinity="0"/></body>
   </worldbody>
 
 </mujoco>

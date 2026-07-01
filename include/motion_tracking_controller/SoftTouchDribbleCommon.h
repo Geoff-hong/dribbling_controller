@@ -12,7 +12,9 @@ namespace legged {
 
 static constexpr size_t kSoftTouchDribbleNumJoints = 29;
 static constexpr size_t kSoftTouchDribbleLatentDim = 8;
-static constexpr size_t kSoftTouchDribbleActorObsDim = 90;
+// 2026-06-17 DR run dropped the 4 world-frame actor obs terms (cmd_dir_w,
+// next_cmd_dir_w, pelvis_pos_xy_w, pelvis_yaw_cossin_w) -> 90 - 8 = 82.
+static constexpr size_t kSoftTouchDribbleActorObsDim = 82;
 static constexpr size_t kSoftTouchDribbleDecoderStateDim = 90;
 static constexpr size_t kSoftTouchDribbleObsDim = kSoftTouchDribbleActorObsDim + kSoftTouchDribbleDecoderStateDim;
 

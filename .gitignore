@@ -1,0 +1,10 @@
+# Local Claude Code state
+.claude/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Sim2sim evaluation artifacts (large media / generated)
+eval_result/
+*.mp4

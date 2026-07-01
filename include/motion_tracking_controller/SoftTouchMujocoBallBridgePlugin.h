@@ -5,7 +5,9 @@
 #include <mujoco_sim_ros2/mujoco_physics_plugin.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float64.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 
+#include <array>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -51,6 +53,9 @@ class SoftTouchMujocoBallBridgePlugin final : public mujoco_sim_ros2::MujocoPhys
   void resolveBaseJoint(mjModel* model);
   void publishBaseState(const mjData* data);
   void handleResetRequest(const std_msgs::msg::Float64::SharedPtr msg);
+  void resolveRouteDots(mjModel* model);
+  void handleRouteMarkers(const visualization_msgs::msg::MarkerArray::SharedPtr msg);
+  void updateRouteDots(const mjModel* model, mjData* data);
 
   rclcpp::Node::SharedPtr node_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr posePub_;
@@ -58,6 +63,14 @@ class SoftTouchMujocoBallBridgePlugin final : public mujoco_sim_ros2::MujocoPhys
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr basePosePub_;
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr baseTwistPub_;
   rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr resetRequestSub_;
+  rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr routeMarkerSub_;
+
+  // Route-line visualization in the MuJoCo viewer: mocap 'route_dot_*' bodies are
+  // positioned along the cmd route parsed from /softtouch/dribble/markers.
+  std::string routeMarkerTopic_ = "/softtouch/dribble/markers";
+  std::mutex routeMutex_;
+  std::vector<std::array<double, 3>> routePoints_;  // latest LINE_STRIP points (world)
+  std::vector<int> routeDotMocapIds_;               // mocap id per route_dot body (-1 if absent)
 
   bool enabled_ = false;
   std::string frameId_ = "world";
@@ -79,7 +92,7 @@ class SoftTouchMujocoBallBridgePlugin final : public mujoco_sim_ros2::MujocoPhys
   double publishPeriod_ = 0.01;
   double lastPublishTime_ = -1.0e30;
   double ballTranslationalDamping_ = 0.0;
-  double ballAngularDamping_ = 4.0;
+  double ballAngularDamping_ = 0.006256;
   bool resetEnabled_ = false;
   bool resetApplyOnConfigure_ = true;
   bool resetApplyOnReset_ = true;
