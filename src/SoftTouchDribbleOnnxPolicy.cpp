@@ -30,10 +30,12 @@ void SoftTouchDribbleOnnxPolicy::reset() {
 }
 
 vector_t SoftTouchDribbleOnnxPolicy::forward(const vector_t& observations) {
-  if (observations.size() != static_cast<Eigen::Index>(kSoftTouchDribbleObsDim)) {
-    throw std::runtime_error("SoftTouchDribbleOnnxPolicy expected " +
-                             std::to_string(kSoftTouchDribbleObsDim) + "-D observation, got " +
-                             std::to_string(observations.size()));
+  // Drive the expected width from the ONNX obs input so v1 (172) and v2 history
+  // (920) policies both work without recompiling.
+  const auto expectedObsSize = static_cast<Eigen::Index>(getObservationSize());
+  if (observations.size() != expectedObsSize) {
+    throw std::runtime_error("SoftTouchDribbleOnnxPolicy expected " + std::to_string(expectedObsSize) +
+                             "-D observation, got " + std::to_string(observations.size()));
   }
   OnnxPolicy::forward(observations);
 
@@ -87,6 +89,25 @@ vector_t SoftTouchDribbleOnnxPolicy::parseVectorMetadata(const std::string& key,
                              " values, expected " + std::to_string(expectedSize));
   }
   return vectorFromStdVector(values);
+}
+
+std::vector<size_t> SoftTouchDribbleOnnxPolicy::getObservationHistoryLengths() const {
+  std::vector<size_t> lengths;
+  try {
+    lengths = parseCsv<size_t>(getMetadataStr("observation_history_lengths"));
+  } catch (const std::exception&) {
+    return {};  // model predates the field -> caller keeps default history=1
+  }
+  // Only trust it when it lines up 1:1 with observation_names (i.e. one length per
+  // ObservationManager term); otherwise indexing terms by it would be unsafe.
+  try {
+    if (parseCsv<std::string>(getMetadataStr("observation_names")).size() != lengths.size()) {
+      return {};
+    }
+  } catch (const std::exception&) {
+    return {};
+  }
+  return lengths;
 }
 
 void SoftTouchDribbleOnnxPolicy::setJointTargetClip(const vector_t& lower, const vector_t& upper, scalar_t factor) {

@@ -148,6 +148,22 @@ controller_interface::CallbackReturn SoftTouchDribbleController::on_configure(
   if (result != controller_interface::CallbackReturn::SUCCESS) {
     return result;
   }
+  // v2 history policies: stack per-term observation history (e.g. 10-frame actor
+  // history) from ONNX metadata. Empty for v1 -> terms keep their default length 1.
+  const auto historyLengths = softtouchPolicy_->getObservationHistoryLengths();
+  if (!historyLengths.empty() && observationManager_) {
+    observationManager_->setHistoryLengths(historyLengths);
+  }
+  // Fail fast at configure time if the assembled observation width does not match
+  // the ONNX obs input (wrong term set / history layout) instead of throwing later.
+  if (observationManager_ &&
+      observationManager_->getSize() != softtouchPolicy_->getObservationSize()) {
+    RCLCPP_ERROR_STREAM(get_node()->get_logger(),
+                        "SoftTouch observation width " << observationManager_->getSize()
+                        << " != ONNX obs input " << softtouchPolicy_->getObservationSize()
+                        << ". Check observation_names / history metadata vs the policy.");
+    return controller_interface::CallbackReturn::ERROR;
+  }
   configureJointTargetClip();
   subscribeBallState();
   subscribeBaseState();
@@ -264,6 +280,9 @@ bool SoftTouchDribbleController::parserObservation(const std::string& name) {
     observationManager_->addTerm(std::make_shared<SoftTouchBallPositionBody>(commandTerm_));
   } else if (name == "ball_lin_vel_b") {
     observationManager_->addTerm(std::make_shared<SoftTouchBallLinearVelocityBody>(commandTerm_));
+  } else if (name == "ball_radius") {
+    // Deployed ball rests at z = radius, so cfg_.resetBallZ is the ball radius.
+    observationManager_->addTerm(std::make_shared<SoftTouchBallRadius>(cfg_.resetBallZ));
   } else if (name == "target_dir_b") {
     observationManager_->addTerm(std::make_shared<SoftTouchTargetDirectionBody>(commandTerm_));
   } else if (name == "target_speed") {
@@ -453,7 +472,7 @@ controller_interface::return_type SoftTouchDribbleController::updatePositionTarg
     effortTargetPolicyOrder_ = softtouchPolicy_->forward(policyObs);
     lastEffortPolicyUpdateTime_ = now;
     hasEffortTarget_ = true;
-  } else if (policyObs.size() != static_cast<Eigen::Index>(kSoftTouchDribbleObsDim)) {
+  } else if (policyObs.size() != static_cast<Eigen::Index>(softtouchPolicy_->getObservationSize())) {
     policyObs = observationManager_->getValue();
   }
 
@@ -491,7 +510,7 @@ controller_interface::return_type SoftTouchDribbleController::updateEffortPd(con
     effortTargetPolicyOrder_ = softtouchPolicy_->forward(policyObs);
     lastEffortPolicyUpdateTime_ = now;
     hasEffortTarget_ = true;
-  } else if (policyObs.size() != static_cast<Eigen::Index>(kSoftTouchDribbleObsDim)) {
+  } else if (policyObs.size() != static_cast<Eigen::Index>(softtouchPolicy_->getObservationSize())) {
     policyObs = observationManager_->getValue();
   }
   const vector_t& targetPolicyOrder = effortTargetPolicyOrder_;

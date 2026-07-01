@@ -155,4 +155,23 @@ class SoftTouchLastDecodedAction final : public SoftTouchDribbleObservation {
   vector_t evaluate() override;
 };
 
+// v2 policy single-frame ball-radius term: value = ball_radius - 0.10 m (nominal),
+// matching multiagent_sim.tasks.dribble.mdp.observations:ball_radius_obs used at
+// training time. The deployed ball is fixed, so the radius comes from config.
+class SoftTouchBallRadius final : public ObservationTerm {
+ public:
+  explicit SoftTouchBallRadius(scalar_t ballRadius) : ballRadius_(ballRadius) {}
+  size_t getSize() const override { return 1; }
+
+ protected:
+  vector_t evaluate() override {
+    vector_t value(1);
+    value(0) = ballRadius_ - scalar_t(0.10);
+    return value;
+  }
+
+ private:
+  scalar_t ballRadius_;
+};
+
 }  // namespace legged
