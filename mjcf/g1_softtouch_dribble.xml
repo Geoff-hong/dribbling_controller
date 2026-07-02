@@ -421,6 +421,10 @@
         <rgba haze="0.15 0.25 0.35 1"/>
         <global azimuth="120" elevation="-20"/>
     </visual>
+    <!-- Initial free-camera framing: distance ~= 1.5*extent, look-at = center.
+         Larger extent zooms the viewer out so the robot+ball+route are visible on
+         startup without manual zoom. -->
+    <statistic center="0 0 0.5" extent="16"/>
 
     <asset>
         <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="3072"/>
