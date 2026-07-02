@@ -8,3 +8,6 @@ __pycache__/
 # Sim2sim evaluation artifacts (large media / generated)
 eval_result/
 *.mp4
+
+# DR sweep generated MJCF variants
+mjcf/dr_variants/
