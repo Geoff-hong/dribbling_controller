@@ -84,6 +84,9 @@ def setup_controllers(context):
     ext_pos_corr = LaunchConfiguration('ext_pos_corr').perform(context)
     softtouch_base_state_source = LaunchConfiguration('softtouch_base_state_source').perform(context)
     softtouch_route_cmd_mode = LaunchConfiguration('softtouch_route_cmd_mode').perform(context)
+    softtouch_seed = LaunchConfiguration('softtouch_seed').perform(context)
+    softtouch_route_length_m = LaunchConfiguration('softtouch_route_length_m').perform(context)
+    softtouch_ball_angular_damping = LaunchConfiguration('softtouch_ball_angular_damping').perform(context)
     softtouch_action_command_mode = LaunchConfiguration('softtouch_action_command_mode').perform(context)
     softtouch_mujoco_reset_hold_s = LaunchConfiguration('softtouch_mujoco_reset_hold_s').perform(context)
     activate_walking_controller = LaunchConfiguration('activate_walking_controller').perform(context).lower() in [
@@ -166,6 +169,13 @@ def setup_controllers(context):
         kv_pairs.append(('walking_controller.softtouch.base_state.source', softtouch_base_state_source))
     if softtouch_route_cmd_mode:
         kv_pairs.append(('walking_controller.softtouch.route.cmd_mode', softtouch_route_cmd_mode))
+    if softtouch_seed:
+        kv_pairs.append(('walking_controller.softtouch.seed', softtouch_seed))
+    if softtouch_route_length_m:
+        kv_pairs.append(('walking_controller.softtouch.route.route_length_m', softtouch_route_length_m))
+    if softtouch_ball_angular_damping:
+        kv_pairs.append(('mujoco_sim_ros2_node.ros__parameters.softtouch_mujoco_ball_bridge.ball_angular_damping',
+                         softtouch_ball_angular_damping))
     if softtouch_action_command_mode:
         kv_pairs.append(('walking_controller.softtouch.action.command_mode', softtouch_action_command_mode))
     if softtouch_mujoco_reset_hold_s:
@@ -387,6 +397,26 @@ def generate_launch_description():
             'softtouch_route_cmd_mode',
             default_value='',
             description='Optional SoftTouch route cmd_mode override, e.g. 0 for a straight-line route'
+        ),
+        DeclareLaunchArgument(
+            'softtouch_seed',
+            default_value='',
+            description='Optional SoftTouch route RNG seed override (softtouch.seed). '
+                        'Different seeds give different but reproducible routes.'
+        ),
+        DeclareLaunchArgument(
+            'softtouch_route_length_m',
+            default_value='',
+            description='Optional SoftTouch route length (m) override. The robot dribbles to '
+                        'the route end and then stops, so a shorter route = a shorter episode '
+                        '(e.g. ~18 m ~= 10 s at vmax 2 m/s). Used by the DR sweep.'
+        ),
+        DeclareLaunchArgument(
+            'softtouch_ball_angular_damping',
+            default_value='',
+            description='Optional SoftTouch MuJoCo ball bridge ball_angular_damping override '
+                        '(= 4*I). Used by the DR sweep to keep spin-decay consistent with the '
+                        'randomized ball mass/radius.'
         ),
         DeclareLaunchArgument(
             'softtouch_action_command_mode',

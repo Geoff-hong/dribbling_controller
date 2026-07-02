@@ -20,6 +20,9 @@ def generate_launch_description():
     ext_pos_corr = LaunchConfiguration('ext_pos_corr')
     softtouch_base_state_source = LaunchConfiguration('softtouch_base_state_source')
     softtouch_route_cmd_mode = LaunchConfiguration('softtouch_route_cmd_mode')
+    softtouch_seed = LaunchConfiguration('softtouch_seed')
+    softtouch_route_length_m = LaunchConfiguration('softtouch_route_length_m')
+    softtouch_ball_angular_damping = LaunchConfiguration('softtouch_ball_angular_damping')
     softtouch_action_command_mode = LaunchConfiguration('softtouch_action_command_mode')
     softtouch_mujoco_reset_hold_s = LaunchConfiguration('softtouch_mujoco_reset_hold_s')
     launch_rviz = LaunchConfiguration('launch_rviz')
@@ -109,6 +112,24 @@ def generate_launch_description():
             description='Optional SoftTouch route cmd_mode override, e.g. 0 for a straight-line route.',
         ),
         DeclareLaunchArgument(
+            'softtouch_seed',
+            default_value='',
+            description='Optional SoftTouch route RNG seed override; different seeds give '
+                        'different but reproducible routes (default 42 from the YAML).',
+        ),
+        DeclareLaunchArgument(
+            'softtouch_route_length_m',
+            default_value='',
+            description='Optional SoftTouch route length (m); shorter route = shorter dribble '
+                        'episode (robot stops at the route end). ~18 m ~= 10 s.',
+        ),
+        DeclareLaunchArgument(
+            'softtouch_ball_angular_damping',
+            default_value='',
+            description='Optional ball bridge ball_angular_damping (= 4*I) override, used by '
+                        'the DR sweep to match the randomized ball mass/radius.',
+        ),
+        DeclareLaunchArgument(
             'softtouch_action_command_mode',
             default_value='',
             description='Optional SoftTouch action command mode override: rl_controller, position_target, or effort_pd.',
@@ -147,6 +168,9 @@ def generate_launch_description():
                 'ext_pos_corr': ext_pos_corr,
                 'softtouch_base_state_source': softtouch_base_state_source,
                 'softtouch_route_cmd_mode': softtouch_route_cmd_mode,
+                'softtouch_seed': softtouch_seed,
+                'softtouch_route_length_m': softtouch_route_length_m,
+                'softtouch_ball_angular_damping': softtouch_ball_angular_damping,
                 'softtouch_action_command_mode': softtouch_action_command_mode,
                 'softtouch_mujoco_reset_hold_s': softtouch_mujoco_reset_hold_s,
             }.items(),
