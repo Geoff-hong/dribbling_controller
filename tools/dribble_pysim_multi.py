@@ -345,11 +345,17 @@ def default_matrix_conditions(episode_s):
     for v in (1.0, 1.5, 2.0, 2.5, 3.0, 3.5):
         C(f"straight_{v:g}", "straight_speed", v, dr=NOM, mode="straight", vmax=v,
           jitter=True, route_len=v * episode_s * 1.2 + 5.0)
-    for kap in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0):
-        vlaw = min(2.0, np.sqrt(0.75 / kap))
+    # turn-into-corner test: random straight lead-in (0.5-2 m), one finite arc of
+    # 150-180 deg at constant kappa, straight exit; ball >0.8 m off the route ends
+    # the episode as a failure; 10 s budget; metric = success rate.  kappa < 0.4
+    # is excluded: a 150-180 deg arc at the trained speed law does not fit in 10 s
+    # (arc time = (theta/kappa)/min(2, sqrt(0.75/kappa)), e.g. 8.1 s at kappa=0.2).
+    for kap in (0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0):
+        rl = 2.0 + np.pi / kap + 3.0   # max lead + 180deg arc + exit tail & margin
         for sgn, tag in ((1.0, "L"), (-1.0, "R")):
             C(f"arc_{tag}_{kap:g}", "arc_kappa", sgn * kap, dr=NOM, mode="arc",
-              kappa=sgn * kap, jitter=True, route_len=vlaw * episode_s * 1.2 + 6.0)
+              kappa=sgn * kap, jitter=True, route_len=rl, lead_m=[0.5, 2.0],
+              arc_deg=[150.0, 180.0], offroute_kill_m=0.8, episode_s=10.0)
     return conds
 
 
@@ -371,6 +377,12 @@ def load_matrix_conditions(path, episode_s):
             if cond["dr"] is not None and set(cond["dr"]) != {"mass", "radius", "foot", "ball"}:
                 raise ValueError(f"dr must have exactly the keys mass/radius/foot/ball, "
                                  f"got {sorted(cond['dr'])}")
+            if cond["arc_deg"] is not None and (len(cond["arc_deg"]) != 2 or cond["kappa"] is None):
+                raise ValueError("arc_deg must be [min_deg, max_deg] and requires 'kappa'")
+            if cond["episode_s"] is not None and float(cond["episode_s"]) <= 0:
+                raise ValueError("episode_s must be > 0")
+            if cond["offroute_kill_m"] is not None and float(cond["offroute_kill_m"]) <= 0:
+                raise ValueError("offroute_kill_m must be > 0")
         except (ValueError, KeyError) as e:
             raise ValueError(f"conditions[{i}] ({name}): {e}") from e
         conds.append({**cond, "name": name, "group": group, "axis": axis})
@@ -384,7 +396,9 @@ def matrix_report(mrec, args):
     cols = ["condition", "group", "axis_value", "rep", "route_seed",
             "ball_mass", "ball_radius", "foot_fric", "ball_fric",
             "fell", "duration_s", "cross_track_m", "progress_m",
-            "ach_speed_mps", "cmd_speed_mps", "ball_lost", "ball_dist_m"]
+            "ach_speed_mps", "cmd_speed_mps", "ball_lost", "ball_dist_m",
+            "off_route", "completed", "success"]
+    flag = lambda v: "" if not np.isfinite(v) else int(v)
     if args.csv:
         import csv
         with open(args.csv, "w", newline="") as f:
@@ -396,25 +410,28 @@ def matrix_report(mrec, args):
                             f"{r['foot']:.4f}", f"{r['ball']:.4f}",
                             int(r["fell"]), f"{r['duration']:.3f}", f"{r['cross_track']:.5f}",
                             f"{r['progress']:.3f}", f"{r['ach_speed']:.4f}",
-                            f"{r['cmd_speed']:.4f}", int(r["ball_lost"]), f"{r['ball_dist']:.4f}"])
+                            f"{r['cmd_speed']:.4f}", int(r["ball_lost"]), f"{r['ball_dist']:.4f}",
+                            int(r["off_route"]), flag(r["completed"]), flag(r["success"])])
         print(f"[matrix] saved {args.csv} ({len(mrec)} rows)")
     # per-condition console summary (survival / possession / speed ratio / tracking)
     by = {}
     for r in mrec:
         by.setdefault((r["group"], r["axis_value"], r["condition"]), []).append(r)
     print(f"\n=== MATRIX: {len(mrec)} episodes | {len(by)} conditions ===")
-    print(f"{'condition':<16}{'n':>4}{'surv%':>7}{'poss%':>7}{'v/cmd':>7}{'ct(m)':>8}")
+    print(f"{'condition':<16}{'n':>4}{'surv%':>7}{'succ%':>7}{'poss%':>7}{'v/cmd':>7}{'ct(m)':>8}")
     for (group, axis, name) in sorted(by, key=lambda k: (k[0], k[1])):
         rs = by[(group, axis, name)]
         n = len(rs)
         surv = 100.0 * (1.0 - np.mean([r["fell"] for r in rs]))
         poss = 100.0 * (1.0 - np.mean([r["ball_lost"] for r in rs]))
+        succs = [r["success"] for r in rs if np.isfinite(r["success"])]
+        succ = f"{100.0 * np.mean(succs):>7.0f}" if succs else f"{'-':>7}"
         ratios = [r["ach_speed"] / r["cmd_speed"] for r in rs
                   if np.isfinite(r["ach_speed"]) and np.isfinite(r["cmd_speed"]) and r["cmd_speed"] > 0.05]
         ratio = np.mean(ratios) if ratios else float("nan")
         alive = [r["cross_track"] for r in rs if r["fell"] < 0.5 and np.isfinite(r["cross_track"])]
         ct = np.mean(alive) if alive else float("nan")
-        print(f"{name:<16}{n:>4}{surv:>7.0f}{poss:>7.0f}{ratio:>7.2f}{ct:>8.3f}")
+        print(f"{name:<16}{n:>4}{surv:>7.0f}{succ}{poss:>7.0f}{ratio:>7.2f}{ct:>8.3f}")
 
 
 def print_eval(robots, resets):
@@ -443,6 +460,7 @@ def csv_floats(s):
 # an explicit dr dict pins the values. ball_delay/act_delay_ms=None -> --latency
 # flag decides (random training latency DR); a number pins that latency exactly.
 DEFAULT_COND = dict(mode="human", kappa=None, vmax=None, lead_m=1.0, route_len=None,
+                    arc_deg=None, offroute_kill_m=None, episode_s=None,
                     push_dv=0.0, ball_push_dv=0.0, push_interval=5.0,
                     ball_delay=None, act_delay_ms=None, jitter=False,
                     dr=None, dr_scale=None)
@@ -467,6 +485,10 @@ class Route:
         self.rng = np.random.Generator(np.random.PCG64(seed))
         self.const_kappa = None   # not None -> constant-curvature arc (signed 1/m)
         self.lead_segments = 0    # straight lead-in before the arc starts
+        self.lead_range = None    # (min,max) m -> lead length drawn per episode from route rng
+        self.arc_deg = None       # (min,max) deg -> FINITE arc, angle drawn per episode;
+        self.arc_segments = None  #                  None -> infinite arc (full circles)
+        self.arc_end_s = None     # arc-exit arc length (lead + arc), for completion checks
         self._alloc()
         self.filled = 0; self.end_heading = 0.0; self.last_seg = -1
         self.h_sign = 1.0; self.big_remain = 0.0; self.big_sign = 1.0
@@ -488,6 +510,19 @@ class Route:
         self.last_seg = -1; self.filled = 0
         self.last_s = 0.0; self.max_s = 0.0
         self._alloc()   # condition overrides may have changed routeLength
+        # turn-into-corner test: draw per-episode lead length / arc angle from the
+        # route rng (route_seed-controlled -> the same seed reproduces the same
+        # lead+angle across conditions and experiments, pairing the comparisons)
+        if self.const_kappa is not None:
+            ds = self.cfg["routeSegmentLength"]
+            if self.lead_range is not None:
+                self.lead_segments = max(0, int(round(self._u(*self.lead_range) / ds)))
+            if self.arc_deg is not None:
+                th = np.deg2rad(self._u(*self.arc_deg))
+                self.arc_segments = max(1, int(np.ceil(th / (abs(self.const_kappa) * ds))))
+                self.arc_end_s = (self.lead_segments + self.arc_segments) * ds
+            else:
+                self.arc_segments = None; self.arc_end_s = None
         max_seg = len(self.speed)
         init = int(np.clip(self.cfg["routeInitSegments"], 1, max_seg)) if self.cfg["routeLazyExtend"] else max_seg
         self._build(init, True, np.asarray(origin, float), self._unit(np.asarray(forward, float)))
@@ -536,12 +571,15 @@ class Route:
             self.big_remain = 0.0; self.big_sign = 1.0; self.points[0] = org
         if self.const_kappa is not None:
             # constant-curvature arc (capability axis): straight lead-in so the
-            # reset transient settles before the turn starts, then constant kappa.
+            # reset transient settles before the turn starts, then constant kappa
+            # (finite arc_segments -> straight exit tail after the turn).
             # Speed still follows the trained law min(vmax, sqrt(kv/|kappa|)).
-            kappa = np.full(num, self.const_kappa)
+            kappa = np.zeros(num)
             for i in range(num):
-                if seg_off + i < self.lead_segments:
-                    kappa[i] = 0.0
+                gi = seg_off + i
+                if gi >= self.lead_segments and (self.arc_segments is None
+                                                 or gi < self.lead_segments + self.arc_segments):
+                    kappa[i] = self.const_kappa
         elif self.cmd_mode == 4:
             kappa = self._human_kappa(num)
         else:
@@ -694,6 +732,9 @@ class Robot:
         self.ct_sum = 0.0; self.ct_count = 0   # cross-track (ball deviation from route) accumulators
         self.default_cond = make_cond()        # main() overrides from the single-run CLI knobs
         self.hold_s = 0.0                      # main() sets = args.standby_hold_s
+        self.ep_len_default = 20.0             # main() sets = args.episode_s
+        self.ep_len = 20.0
+        self.offroute_kill = None; self.off_route = False
         self.lat_active = False
         self.spd_sum = 0.0                     # commanded target_speed accumulator
         self.bd_sum = 0.0; self.bd_n = 0       # ball-pelvis distance accumulators
@@ -744,8 +785,18 @@ class Robot:
         rcfg["routeVmax"] = ROUTE_CFG["routeVmax"] if cond["vmax"] is None else float(cond["vmax"])
         rcfg["routeLength"] = ROUTE_CFG["routeLength"] if cond["route_len"] is None else float(cond["route_len"])
         self.route.const_kappa = cond["kappa"]
-        self.route.lead_segments = (int(round(cond["lead_m"] / rcfg["routeSegmentLength"]))
-                                    if cond["kappa"] is not None else 0)
+        if cond["kappa"] is not None:
+            lm = cond["lead_m"]
+            self.route.lead_range = (tuple(float(x) for x in lm)
+                                     if isinstance(lm, (list, tuple)) else (float(lm), float(lm)))
+            self.route.arc_deg = (tuple(float(x) for x in cond["arc_deg"])
+                                  if cond["arc_deg"] is not None else None)
+        else:
+            self.route.lead_range = None; self.route.arc_deg = None
+            self.route.lead_segments = 0
+            self.route.arc_segments = None; self.route.arc_end_s = None
+        self.ep_len = float(cond["episode_s"]) if cond["episode_s"] else self.ep_len_default
+        self.offroute_kill = cond["offroute_kill_m"]
         cmd_mode = cond_cmd_mode(cond)
         # DR: explicit dict > dr_scale (centered training ranges x alpha) > training DR
         if dr is None:
@@ -821,6 +872,7 @@ class Robot:
         self.spd_sum = 0.0
         self.bd_sum = 0.0; self.bd_n = 0
         self.ball_lost = False; self.lost_since = None
+        self.off_route = False
 
     def _obs(self, data):
         bq = data.qpos[self.bq + 3:self.bq + 7]; pelvis = data.qpos[self.bq:self.bq + 3]
@@ -884,6 +936,9 @@ class Robot:
             return
         self.ct_sum += self.cmd["crosstrack"]; self.ct_count += 1
         self.spd_sum += self.cmd["target_speed"]
+        if self.offroute_kill is not None and self.cmd["crosstrack"] > self.offroute_kill:
+            self.off_route = True   # ball strayed off the route -> episode fails
+
         # ball possession: horizontal ball-pelvis distance + sticky lost-ball flag
         d = float(np.hypot(*(data.qpos[self.ballq:self.ballq + 2] - data.qpos[self.bq:self.bq + 2])))
         self.bd_sum += d; self.bd_n += 1
@@ -940,14 +995,24 @@ class Robot:
         move_s = t - self.move_start
         moved = self.ct_count > 0 and move_s > 1e-6
         nan = float("nan")
-        return dict(fell=1.0 if self.base_z(data) < FALL_Z else 0.0,
+        fell = self.base_z(data) < FALL_Z
+        # finite-arc (turn-into-corner) episodes get a completion/success verdict:
+        # success = made it through the turn (+0.5 m into the exit) with no fall
+        # and no off-route termination, within the episode budget.
+        completed = success = nan
+        if self.route.arc_end_s is not None:
+            completed = 1.0 if self.route.max_s >= self.route.arc_end_s + 0.5 else 0.0
+            success = 1.0 if (completed > 0.5 and not fell and not self.off_route) else 0.0
+        return dict(fell=1.0 if fell else 0.0,
                     duration=t - self.ep_start,
                     cross_track=self.ct_sum / self.ct_count if self.ct_count else nan,
                     progress=float(self.route.max_s),
                     ach_speed=float(self.route.max_s) / move_s if moved else nan,
                     cmd_speed=self.spd_sum / self.ct_count if self.ct_count else nan,
                     ball_lost=1.0 if self.ball_lost else 0.0,
-                    ball_dist=self.bd_sum / self.bd_n if self.bd_n else nan)
+                    ball_dist=self.bd_sum / self.bd_n if self.bd_n else nan,
+                    off_route=1.0 if self.off_route else 0.0,
+                    completed=completed, success=success)
 
     def _update_dots(self, data):
         npts = self.route.filled + 1; nd = len(self.dots)
@@ -1006,6 +1071,10 @@ def main():
     ap.add_argument("--route-kappa", type=float, default=None,
                     help="constant-curvature arc (signed 1/m); speed follows the trained kv law")
     ap.add_argument("--route-lead-m", type=float, default=1.0, help="straight lead-in before the arc (m)")
+    ap.add_argument("--arc-deg", type=float, nargs=2, default=None, metavar=("MIN", "MAX"),
+                    help="finite arc angle range (deg); omit = endless arc (full circles)")
+    ap.add_argument("--offroute-kill-m", type=float, default=None,
+                    help="end the episode as a failure when the ball is this far off the route (m)")
     ap.add_argument("--push-dv", type=float, default=0.0, help="base velocity kick (m/s) every --push-interval-s")
     ap.add_argument("--ball-push-dv", type=float, default=0.0, help="ball velocity kick (m/s)")
     ap.add_argument("--push-interval-s", type=float, default=5.0, help="seconds between pushes")
@@ -1060,6 +1129,7 @@ def main():
     # single-run knobs become every robot's default condition (matrix overrides per episode)
     cli_cond = make_cond(mode=("arc" if args.route_kappa is not None else args.cmd_mode),
                          kappa=args.route_kappa, vmax=args.route_vmax, lead_m=args.route_lead_m,
+                         arc_deg=args.arc_deg, offroute_kill_m=args.offroute_kill_m,
                          push_dv=args.push_dv, ball_push_dv=args.ball_push_dv,
                          push_interval=args.push_interval_s,
                          ball_delay=args.ball_delay_steps, act_delay_ms=args.act_delay_ms,
@@ -1067,6 +1137,7 @@ def main():
     for rb in robots:
         rb.latency = args.latency
         rb.hold_s = args.standby_hold_s
+        rb.ep_len_default = args.episode_s
         rb.default_cond = cli_cond
     mujoco.mj_resetData(model, data)
     for rb in robots:
@@ -1089,7 +1160,7 @@ def main():
             mujoco.mj_step(model, data)
         t = data.time
         return [j for j, rb in enumerate(robots)
-                if rb.base_z(data) < FALL_Z or (t - rb.ep_start) >= args.episode_s]
+                if rb.base_z(data) < FALL_Z or rb.off_route or (t - rb.ep_start) >= rb.ep_len]
 
     def control_period():
         ended = advance()
@@ -1124,13 +1195,17 @@ def main():
         queue = []
         for ci, cond in enumerate(matrix_conds):
             for e in range(R * reps):
-                rs_seed = (e % R) if cond_cmd_mode(cond) == 4 else 0
-                queue.append((ci, e, rs_seed))
+                # every condition cycles the same route-seed bank: human routes AND the
+                # per-episode lead/angle draws of finite arcs are seed-reproducible, so
+                # conditions (and experiments) are compared on paired draws.
+                queue.append((ci, e, e % R))
         qrng = np.random.default_rng(args.seed)
         qrng.shuffle(queue)                      # interleave conditions over time/robots
         total = len(queue); qi = 0; mrec = []
+        est_h = sum(R * reps * float(c["episode_s"] or args.episode_s)
+                    for c in matrix_conds) / 3600.0
         print(f"[matrix] {len(matrix_conds)} conditions x {R * reps} episodes = {total} "
-              f"(~{total * args.episode_s / 3600.0:.1f} robot-hours)")
+              f"(~{est_h:.1f} robot-hours)")
 
         def matrix_assign(rb, t):
             nonlocal qi

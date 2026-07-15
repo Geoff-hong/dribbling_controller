@@ -34,10 +34,10 @@ GROUP_LABEL = {
     "obs_latency": "ball-obs latency (steps)",
     "act_latency": "action latency (ms)",
     "straight_speed": "cmd speed v, STRAIGHT (m/s)",
-    "arc_kappa": "|kappa|, SINGLE arc (1/m)",
+    "arc_kappa": "|kappa|, corner turn 150-180deg (1/m)",
 }
 CAPABILITY = {"straight_speed", "arc_kappa"}
-ROWS = ["survival rate (%)", "ball possession (%)", "speed ratio (achieved/cmd)",
+ROWS = ["survival % (arc: success %)", "ball possession (%)", "speed ratio (achieved/cmd)",
         "cross-track (m, survivors)"]
 COLORS = ["tab:red", "tab:blue", "0.45", "tab:green", "tab:purple", "tab:orange"]
 
@@ -46,10 +46,14 @@ def load(path):
     rows = []
     with open(path) as f:
         for r in csv.DictReader(f):
+            def num(key):
+                v = r.get(key)
+                return float(v) if v not in (None, "") else float("nan")
             rows.append(dict(group=r["group"], axis=float(r["axis_value"]),
                              fell=float(r["fell"]), lost=float(r["ball_lost"]),
-                             ct=float(r["cross_track_m"]),
-                             ach=float(r["ach_speed_mps"]), cmd=float(r["cmd_speed_mps"])))
+                             ct=num("cross_track_m"),
+                             ach=num("ach_speed_mps"), cmd=num("cmd_speed_mps"),
+                             succ=num("success")))
     return rows
 
 
@@ -67,18 +71,22 @@ def level_stats(rows):
                   if np.isfinite(r["ach"]) and np.isfinite(r["cmd"]) and r["cmd"] > 0.05]
         ratio = float(np.mean(ratios)) if ratios else float("nan")
         alive = [r["ct"] for r in rs if r["fell"] < 0.5 and np.isfinite(r["ct"])]
+        succs = [r["succ"] for r in rs if np.isfinite(r["succ"])]
+        succ = float(np.mean(succs)) if succs else float("nan")
+        ns = max(1, len(succs))
         out[ax_v] = dict(
             n=n, surv=surv, poss=poss, ratio=ratio,
             surv_se=np.sqrt(max(surv * (1 - surv), 1e-4 / n) / n),
             poss_se=np.sqrt(max(poss * (1 - poss), 1e-4 / n) / n),
+            succ=succ, succ_se=np.sqrt(max(succ * (1 - succ), 1e-4 / ns) / ns) if succs else float("nan"),
             ct=float(np.mean(alive)) if alive else np.nan)
     return out
 
 
-def draw(ax_panel, row, x, st, color, ls, label=None, use_abs=False):
+def draw(ax_panel, row, x, st, color, ls, label=None, use_abs=False, row0="surv"):
     x = list(x)
     if row == 0:
-        y = 100 * np.array([st[v]["surv"] for v in x]); se = 100 * np.array([st[v]["surv_se"] for v in x])
+        y = 100 * np.array([st[v][row0] for v in x]); se = 100 * np.array([st[v][f"{row0}_se"] for v in x])
     elif row == 1:
         y = 100 * np.array([st[v]["poss"] for v in x]); se = 100 * np.array([st[v]["poss_se"] for v in x])
     elif row == 2:
@@ -122,12 +130,15 @@ def main():
                     ss = [r for r in sub if (r["axis"] >= 0) == (sgn > 0)]
                     if not ss:
                         continue
+                    # corner-turn conditions carry a success verdict -> row 0 shows
+                    # success rate; older CSVs without it fall back to survival
+                    row0 = "succ" if any(np.isfinite(r["succ"]) for r in ss) else "surv"
                     st = level_stats(ss); x = sorted(st)
                     for row in range(4):
                         lbl = None
                         if row == 0 and (ei, tag) not in labeled:
                             lbl = f"{lab} ({tag})"; labeled.add((ei, tag))
-                        draw(axg[row, c], row, x, st, color, ls, label=lbl, use_abs=True)
+                        draw(axg[row, c], row, x, st, color, ls, label=lbl, use_abs=True, row0=row0)
             else:
                 st = level_stats(sub); x = sorted(st)
                 for row in range(4):
