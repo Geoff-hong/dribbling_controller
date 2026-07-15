@@ -47,14 +47,20 @@ def _route_engine():
 
 
 def _example_route(kappa=None, lead_m=1.0, angle_deg=180.0, human_seed=None,
-                   route_len=20.0):
+                   route_len=20.0, human_kappa_cap=None, vmax_range=None):
     """One example route polyline from the REAL benchmark route generator —
     the schematic shows exactly the geometry the test commands."""
     engine = _route_engine()
     cfg = dict(engine.ROUTE_CFG)
     cfg["routeLength"] = route_len
+    if human_kappa_cap is not None:
+        cfg["routeHumanKappaCap"] = human_kappa_cap
     route = engine.Route(cfg, 0)
     route.rng = np.random.Generator(np.random.PCG64(0 if human_seed is None else human_seed))
+    if vmax_range is not None:
+        # consume the same per-episode cruise draw as the real condition, so the
+        # geometry draws line up with the actual test routes
+        route.vmax_range = tuple(vmax_range)
     if kappa is not None:
         route.const_kappa = kappa
         route.lead_range = (lead_m, lead_m)
@@ -228,11 +234,23 @@ def robustness_figure(experiments, labels, out_path):
                ("cross_track", "cross-track (m, survivors)")]
     groups = [g for g in ROBUSTNESS_GROUPS if any(r["group"] == g for e in experiments for r in e)]
     groups += sorted({r["group"] for e in experiments for r in e} - set(groups)
-                     - {"baseline", "straight_speed", "corner_turn", "u_turn", "speed_tracking"})
+                     - {"baseline", "straight_speed", "corner_turn", "u_turn",
+                        "human_dribble", "speed_tracking"})
     if not groups:
         return False
-    fig, panels = plt.subplots(len(metrics), len(groups),
-                               figsize=(3.4 * len(groups) + 1, 12), sharey="row", squeeze=False)
+    # metric grid + one extra column: the shared route-bank schematic (top half)
+    fig = plt.figure(figsize=(3.4 * (len(groups) + 1) + 1, 12))
+    grid = fig.add_gridspec(len(metrics), len(groups) + 1)
+    panels = np.empty((len(metrics), len(groups)), dtype=object)
+    for row in range(len(metrics)):
+        for col in range(len(groups)):
+            panels[row, col] = fig.add_subplot(
+                grid[row, col], sharey=None if col == 0 else panels[row, 0])
+    schematic_panel = fig.add_subplot(grid[0:2, len(groups)])
+    _draw_route_examples(schematic_panel, [
+        (_example_route(human_seed=seed, route_len=30.0), f"route seed {seed}", color, "-")
+        for seed, color in zip((0, 1, 2), SCHEMATIC_COLORS)
+    ], "test routes: nominal human bank\n(every condition cycles the same seeds)")
     labeled = set()
     for col, group in enumerate(groups):
         for exp_index, (rows, label) in enumerate(zip(experiments, labels)):
@@ -365,13 +383,12 @@ def speed_control_traces_figure(traces, label, out_path):
     if not traces:
         return False
     keys = sorted(traces)
-    multi_vmax = len({vmax for vmax, _ in keys}) > 1
     n_cols = min(4, len(keys))
     n_rows = -(-len(keys) // n_cols)
     fig, panels = plt.subplots(n_rows, n_cols, figsize=(4.6 * n_cols, 3.6 * n_rows),
                                sharey=True, squeeze=False)
     for index, key in enumerate(keys):
-        vmax, episode = key
+        _, episode = key
         panel = panels[index // n_cols, index % n_cols]
         cmd, along_cmd, speed_abs = traces[key]
         t = np.arange(len(cmd)) / 50.0
@@ -383,13 +400,23 @@ def speed_control_traces_figure(traces, label, out_path):
                    label="ball v-along-cmd smooth 0.5s" if index == 0 else None)
         panel.plot(t, cmd, color="black", ls="--", lw=1.3,
                    label="cmd target" if index == 0 else None)
-        name = f"vmax={vmax:g} ep{episode}" if multi_vmax else f"env{episode}"
-        panel.set_title(f"{name}  mean v-cmd={np.mean(along_cmd):.2f}  "
+        panel.set_title(f"env{episode}  mean v-cmd={np.mean(along_cmd):.2f}  "
                         f"mean cmd={np.mean(cmd):.2f} m/s", fontsize=10)
         panel.grid(alpha=0.25)
         panel.set_xlabel("t (s)")
         if index % n_cols == 0:
             panel.set_ylabel("m/s")
+        # bottom-right inset: the ACTUAL route of this episode — env i replays
+        # route-bank seed i with the same per-episode cruise draw as the real
+        # speed_tracking condition, so this is the very polyline it followed
+        inset = panel.inset_axes([0.60, 0.05, 0.38, 0.40])
+        points = _example_route(human_seed=episode, route_len=45.0,
+                                vmax_range=(1.2, 2.0))
+        inset.plot(points[:, 0], points[:, 1], color="#4f81bd", lw=1.0)
+        inset.plot(0, 0, marker="o", ms=3, color="black")
+        inset.set_aspect("equal")
+        inset.tick_params(labelsize=6, length=2, pad=1)
+        inset.set_title("route (m)", fontsize=7, pad=2)
     for index in range(len(keys), n_rows * n_cols):
         panels[index // n_cols, index % n_cols].axis("off")
     panels[0, 0].legend(fontsize=7.5, loc="upper right")
@@ -401,16 +428,13 @@ def speed_control_traces_figure(traces, label, out_path):
     return True
 
 
-def _turn_test_figure(experiments, labels, group, test_name, suptitle, out_path,
-                      schematic_kappas, schematic_lead_m, schematic_angle_deg):
-    """Shared layout for the turn tests (corner_turn / u_turn) over |kappa|:
-    success rate, survival rate (no fall before termination, whatever ended the
-    episode), survivor cross-track, and an example-routes schematic;
+def _draw_turn_row(panels, experiments, labels, group, test_name,
+                   schematic_kappas, schematic_lead_m, schematic_angle_deg):
+    """One turn-test row (corner_turn / u_turn) over |kappa|: success rate,
+    survival rate (no fall before termination, whatever ended the episode),
+    survivor cross-track, and an example-routes schematic;
     solid = left turns, dashed = right turns."""
-    if not any(r["group"] == group for e in experiments for r in e):
-        return False
-    fig, (success_panel, survival_panel, ct_panel, schematic_panel) = plt.subplots(
-        1, 4, figsize=(22.5, 5.4))
+    success_panel, survival_panel, ct_panel, schematic_panel = panels
     labeled = set()
     for exp_index, (rows, label) in enumerate(zip(experiments, labels)):
         color = EXPERIMENT_COLORS[exp_index % len(EXPERIMENT_COLORS)]
@@ -470,29 +494,78 @@ def _turn_test_figure(experiments, labels, group, test_name, suptitle, out_path,
     _draw_route_examples(schematic_panel, example_routes,
                          f"test routes: lead-in + {schematic_angle_deg:.0f} deg turn + exit\n"
                          f"(command polyline, ds={segment_len:g} m)")
-    fig.suptitle(suptitle, fontsize=12)
-    fig.tight_layout(rect=(0, 0, 1, 0.92))
+
+
+def _draw_human_dribble_row(panels, experiments, labels):
+    """The human-dribble row of the route figure: success / survival /
+    cross-track over the route_human_kappa_cap sweep + example routes."""
+    success_panel, survival_panel, ct_panel, schematic_panel = panels
+    for exp_index, (rows, label) in enumerate(zip(experiments, labels)):
+        color = EXPERIMENT_COLORS[exp_index % len(EXPERIMENT_COLORS)]
+        group_rows = [r for r in rows if r["group"] == "human_dribble"]
+        if not group_rows:
+            continue
+        stats = level_stats(group_rows)
+        x_values = sorted(stats)
+        draw_series(success_panel, stats, x_values, "success", color, "-", label)
+        draw_series(survival_panel, stats, x_values, "survival", color, "-")
+        draw_series(ct_panel, stats, x_values, "cross_track", color, "-")
+    success_panel.set_ylim(-5, 105)
+    success_panel.set_ylabel("success rate (%)")
+    success_panel.set_title("human dribble: success\n(kept control for 20 s)", fontsize=11)
+    survival_panel.set_ylim(-5, 105)
+    survival_panel.set_ylabel("survival rate (%)")
+    survival_panel.set_title("human dribble: survival\n(no fall before termination)",
+                             fontsize=11)
+    ct_panel.set_ylabel("cross-track (m, survivors)")
+    ct_panel.set_title("human dribble: tracking error", fontsize=11)
+    for panel in (success_panel, survival_panel, ct_panel):
+        panel.set_xlabel("route_human_kappa_cap (1/m)")
+        panel.grid(alpha=0.3)
+    success_panel.legend(fontsize=8.5)
+    example_routes = []
+    for cap, color, seed in ((0.3, SCHEMATIC_COLORS[0], 7), (0.7, SCHEMATIC_COLORS[1], 7),
+                             (1.1, SCHEMATIC_COLORS[2], 7)):
+        example_routes.append((_example_route(human_seed=seed, route_len=30.0,
+                                              human_kappa_cap=cap),
+                               f"kappa cap {cap:g}", color, "-"))
+    _draw_route_examples(schematic_panel, example_routes,
+                         "human routes, same seed:\nturn aggressiveness scales with the cap")
+
+
+def route_figure(experiments, labels, out_path):
+    """The ROUTE figure: corner-turn row on top, human-dribble row below."""
+    has_corner = any(r["group"] == "corner_turn" for e in experiments for r in e)
+    has_human = any(r["group"] == "human_dribble" for e in experiments for r in e)
+    if not (has_corner or has_human):
+        return False
+    fig, panels = plt.subplots(2, 4, figsize=(22.5, 10.4))
+    _draw_turn_row(panels[0], experiments, labels, "corner_turn", "corner turn",
+                   schematic_kappas=(0.4, 0.7, 1.0), schematic_lead_m=2.75,
+                   schematic_angle_deg=165.0)
+    _draw_human_dribble_row(panels[1], experiments, labels)
+    fig.suptitle("Sim2sim benchmark — ROUTE: corner turn (150-180 deg arc, 12 s; "
+                 "solid = L, dashed = R) + human dribble (kappa-cap sweep, 20 s)",
+                 fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
     fig.savefig(out_path, dpi=115)
     print(f"saved {out_path}")
     return True
 
 
-def route_figure(experiments, labels, out_path):
-    return _turn_test_figure(
-        experiments, labels, "corner_turn", "corner turn",
-        "Sim2sim benchmark — ROUTE: corner turn (150-180 deg arc, "
-        "trained speed law, 12 s); solid = L, dashed = R", out_path,
-        schematic_kappas=(0.4, 0.7, 1.0), schematic_lead_m=2.75,
-        schematic_angle_deg=165.0)
-
-
 def uturn_figure(experiments, labels, out_path):
-    return _turn_test_figure(
-        experiments, labels, "u_turn", "u-turn",
-        "Sim2sim benchmark — U-TURN: about-face drill (run-in + 160-200 deg turn, "
-        "radius 1/kappa, 10 s); solid = L, dashed = R", out_path,
-        schematic_kappas=(2.0, 3.0, 4.0), schematic_lead_m=2.75,
-        schematic_angle_deg=180.0)
+    if not any(r["group"] == "u_turn" for e in experiments for r in e):
+        return False
+    fig, panels = plt.subplots(1, 4, figsize=(22.5, 5.4))
+    _draw_turn_row(panels, experiments, labels, "u_turn", "u-turn",
+                   schematic_kappas=(2.0, 3.0, 4.0), schematic_lead_m=2.75,
+                   schematic_angle_deg=180.0)
+    fig.suptitle("Sim2sim benchmark — U-TURN: about-face drill (run-in + 160-200 deg turn, "
+                 "radius 1/kappa, 10 s); solid = L, dashed = R", fontsize=12)
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    fig.savefig(out_path, dpi=115)
+    print(f"saved {out_path}")
+    return True
 
 
 def main():

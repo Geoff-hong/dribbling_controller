@@ -271,7 +271,12 @@ truncation bias) with one CSV row per episode:
   constant kappa, then a straight exit, both turn directions, speed following
   the trained law `min(2, sqrt(0.75/|kappa|))`; success additionally requires
   finishing the turn; 12 s budget.  kappa < 0.4 is not swept (the arc alone
-  cannot finish in time at the trained speed law).  `u_turn` is the about-face drill
+  cannot finish in time at the trained speed law).  `human_dribble` runs the
+  nominal task itself as a route test: human-dribble routes with the turn
+  aggressiveness swept via `route_human_kappa_cap` (0.3-1.1; old policies
+  trained at 0.5, the new command generator uses 1.0), 20 s fail-fast episodes,
+  success = kept control the whole episode; drawn as the second row of the
+  route figure.  `u_turn` is the about-face drill
   matching the training u_turn mode (run-in 1.5-4 m, ONE 160-200 deg turn,
   kappa swept 1.5-4.0 = turn radius down to 0.25 m, both directions; same
   fail-fast/success semantics, its own figure).  `speed_tracking` measures speed
@@ -287,15 +292,19 @@ truncation bias) with one CSV row per episode:
 
 All conditions pin latency to the deployment nominal (ball lag 2 steps, action
 lag 10 ms) unless the axis varies it.  Episodes per condition = `--route-bank`
-(12) x `--reps` (4); every condition cycles the same route seeds, so routes and
-the corner lead/angle draws are paired across conditions and experiments.
-A custom table can be run with `--conditions table.json`.
+(12) x `--reps` (4).  Every per-episode random draw — route geometry, cruise
+pace, corner lead/angle, DR sampling, reset jitter, push phases — is a pure
+function of (benchmark seed, condition, rep), so independently-run experiments
+compare on IDENTICAL paired episodes; pick any set of run dirs to merge at
+plot time.  A custom table can be run with `--conditions table.json`.
 
 ```bash
 # from the repo root, SoftTouch python env
 $PY -m sim2sim_benchmark --robustness --capability \
     --onnx "$ONNX" --reset "$RESET" --robots 32 --out-dir eval_result/m80000
 # -> eval_result/m80000/robustness.csv + capability.csv (+ console summaries)
+# add --videos to also record one mp4 per condition (rep-0 route, chase camera)
+# under eval_result/m80000/videos/<test>/ (offscreen; needs MUJOCO_GL=egl-capable box)
 
 # comparison figures: one color per experiment
 $PY -m sim2sim_benchmark.plot --run-dirs eval_result/m80000 eval_result/m90000 \

@@ -33,6 +33,13 @@ ROUTE_CFG = dict(
     routeCurvatureMin=0.0, routeCurvatureMax=0.0, routeSFlipArc=2.5,
     routeHumanKappaCap=0.5, routeHumanPersist=0.6, routeHumanWeaveMin=0.4, routeHumanWeaveMax=1.0,
     routeHumanBigProbability=0.09, routeHumanBigAngleMinDeg=40.0, routeHumanBigAngleMaxDeg=180.0,
+    routeHumanCumCapDeg=190.0,
+    # human-route self-clearance: sections farther apart than the window along
+    # the route must stay at least this far apart in space, otherwise the ball's
+    # nearest-segment projection (global, as in training) can jump branches.
+    # 1.8 m = 2x the off-route fail distance (0.8 m) + margin, and still admits a
+    # single 180-deg turn at kappa_eff ~1.05 (legs 1.9 m apart).
+    routeMinClearanceM=1.8, routeClearanceWindowM=5.0,
     routeKvScale=0.75, routeVmax=2.0, routeLazyExtend=True, routeInitSegments=9,
     routeExtendChunk=1, routeExtendAheadMarginSegments=10,
 )
@@ -142,7 +149,7 @@ def csv_floats(s):
 #           the commanded direction) pairs for the speed-controllability test.
 DEFAULT_CONDITION = dict(
     route_mode="human", arc_kappa=None, route_vmax=None, route_len_m=None,
-    lead_in_m=1.0, arc_angle_deg=None,
+    human_kappa_cap=None, lead_in_m=1.0, arc_angle_deg=None,
     offroute_fail_m=None, ball_far_fail_m=None, episode_s=None,
     push_dv=0.0, ball_push_dv=0.0, push_interval_s=5.0,
     ball_obs_delay_steps=None, action_delay_ms=None, reset_jitter=False,
@@ -187,6 +194,7 @@ class Route:
         self._alloc()
         self.filled = 0; self.end_heading = 0.0; self.last_seg = -1
         self.h_sign = 1.0; self.big_remain = 0.0; self.big_sign = 1.0
+        self.heading_cum = 0.0
         self.last_s = 0.0; self.max_s = 0.0   # ball arc-length progress along the route
 
     def _alloc(self):
@@ -230,9 +238,43 @@ class Route:
             else:
                 self.arc_segments = None; self.arc_kappa_eff = None; self.arc_end_s = None
         max_seg = len(self.speed)
-        init = int(np.clip(self.cfg["routeInitSegments"], 1, max_seg)) if self.cfg["routeLazyExtend"] else max_seg
-        self._build(init, True, np.asarray(origin, float), self._unit(np.asarray(forward, float)))
+        origin = np.asarray(origin, float); forward = self._unit(np.asarray(forward, float))
+        if cmd_mode == 4:
+            # human routes are built EAGERLY and re-drawn (same rng stream, so a
+            # given route_seed stays deterministic) until no two far-apart route
+            # sections come closer than the clearance -> the ball can never sit
+            # nearer to another branch of its own route
+            best_clearance, best_state = -np.inf, None
+            for _ in range(30):
+                self._build(max_seg, True, origin, forward)
+                clearance = self._self_clearance()
+                if clearance >= self.cfg["routeMinClearanceM"]:
+                    best_state = None
+                    break
+                if clearance > best_clearance:
+                    best_clearance = clearance
+                    best_state = (self.points.copy(), self.speed.copy(),
+                                  self.end_heading, self.filled)
+            if best_state is not None:
+                self.points, self.speed, self.end_heading, self.filled = best_state
+        else:
+            init = (int(np.clip(self.cfg["routeInitSegments"], 1, max_seg))
+                    if self.cfg["routeLazyExtend"] else max_seg)
+            self._build(init, True, origin, forward)
         return self.update(origin)
+
+    def _self_clearance(self):
+        """Smallest spatial distance between route points farther apart than the
+        clearance window along the route (inf when the route is short)."""
+        ds = self.cfg["routeSegmentLength"]
+        window = int(self.cfg["routeClearanceWindowM"] / ds)
+        pts = self.points[: self.filled + 1]
+        if len(pts) <= window + 1:
+            return np.inf
+        dist = np.hypot(*(pts[None, :, :] - pts[:, None, :]).transpose(2, 0, 1))
+        index = np.arange(len(pts))
+        far = np.abs(index[None, :] - index[:, None]) > window
+        return float(dist[far].min())
 
     def update(self, ball_xy):
         self._extend(); ball_xy = np.asarray(ball_xy, float)
@@ -275,6 +317,7 @@ class Route:
             theta = np.arctan2(forward[1], forward[0])
             self.h_sign = 1.0 if self._u(0, 1) < 0.5 else -1.0
             self.big_remain = 0.0; self.big_sign = 1.0; self.points[0] = org
+            self.heading_cum = 0.0   # net signed heading for the loop governor
         if self.const_kappa is not None:
             # constant-curvature arc (capability axis): straight lead-in so the
             # reset transient settles before the turn starts, then constant kappa
@@ -303,17 +346,32 @@ class Route:
     def _human_kappa(self, num):
         cap = self.cfg["routeHumanKappaCap"]; ds = self.cfg["routeSegmentLength"]
         amin = np.deg2rad(self.cfg["routeHumanBigAngleMinDeg"]); amax = np.deg2rad(self.cfg["routeHumanBigAngleMaxDeg"])
+        cum_cap = np.deg2rad(self.cfg["routeHumanCumCapDeg"])
         out = np.zeros(num)
         for i in range(num):
             in_big = self.big_remain > 0.0
             if not in_big and self._u(0, 1) < self.cfg["routeHumanBigProbability"]:
-                self.big_remain = max(2.0, np.ceil(self._u(amin, amax) / (cap * ds)))
-                self.big_sign = 1.0 if self._u(0, 1) < 0.5 else -1.0; in_big = True
+                angle = self._u(amin, amax)
+                self.big_remain = max(2.0, np.ceil(angle / (cap * ds)))
+                sign = 1.0 if self._u(0, 1) < 0.5 else -1.0
+                # loop GOVERNOR (as in the training route builder): flip the turn
+                # direction when a same-direction turn would push the net signed
+                # heading past +/-cum_cap -> the route can never close a loop.
+                cum_sign = np.sign(self.heading_cum)
+                if (abs(self.heading_cum) + angle) > cum_cap and sign == cum_sign != 0.0:
+                    sign = -cum_sign
+                self.big_sign = sign; in_big = True
             if self._u(0, 1) > self.cfg["routeHumanPersist"]:
                 self.h_sign = -self.h_sign
+            # weave-side governor: this generator's weave is strong (0.4-1.0 x cap,
+            # unlike the near-straight cruise of the new training one), so weave
+            # drift alone can wind past the cap — beyond it, weave only back to 0
+            if abs(self.heading_cum) > cum_cap and self.h_sign == np.sign(self.heading_cum):
+                self.h_sign = -np.sign(self.heading_cum)
             mag = self._u(self.cfg["routeHumanWeaveMin"], self.cfg["routeHumanWeaveMax"]) * cap
             out[i] = self.big_sign * cap if in_big else self.h_sign * mag
             if in_big: self.big_remain -= 1.0
+            self.heading_cum += out[i] * ds
         return out
 
     def _extend(self):
@@ -531,6 +589,9 @@ class Robot:
         else:
             self.route.vmax_range = None
             route_cfg["routeVmax"] = ROUTE_CFG["routeVmax"] if vmax is None else float(vmax)
+        route_cfg["routeHumanKappaCap"] = (ROUTE_CFG["routeHumanKappaCap"]
+                                           if condition["human_kappa_cap"] is None
+                                           else float(condition["human_kappa_cap"]))
         route_cfg["routeLength"] = (ROUTE_CFG["routeLength"] if condition["route_len_m"] is None
                                     else float(condition["route_len_m"]))
         self.route.const_kappa = condition["arc_kappa"]

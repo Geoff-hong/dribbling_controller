@@ -37,10 +37,10 @@ EPISODES_PER_CONDITION = 24
 # steep it is — chosen only so the curves LOOK like plausible benchmark output
 CLIFF_CENTER = dict(baseline=99, dr_scale=1.5, base_push=0.8, ball_push=1.8,
                     obs_latency=4.5, act_latency=28, straight_speed=2.8,
-                    corner_turn=0.75, u_turn=3.0, speed_tracking=99)
+                    corner_turn=0.75, u_turn=3.0, human_dribble=0.85, speed_tracking=99)
 CLIFF_STEEPNESS = dict(baseline=1, dr_scale=3.5, base_push=4.5, ball_push=2.5,
                        obs_latency=1.6, act_latency=0.18, straight_speed=3.5,
-                       corner_turn=7, u_turn=1.4, speed_tracking=1)
+                       corner_turn=7, u_turn=1.4, human_dribble=4.0, speed_tracking=1)
 
 
 def sigmoid(x):
@@ -64,7 +64,7 @@ def fake_control_trace(rng, vmax, gain, noise, steps=1000):
     return cmd, along_cmd, speed_abs
 
 
-def write_fake_run(run_dir, cliff_shift, tracking_gain, tracking_noise):
+def write_fake_run(run_dir, cliff_shift, tracking_gain, tracking_noise, make_traces=True):
     """One fake experiment: robustness.csv + capability.csv (+ pairs & traces)."""
     os.makedirs(run_dir, exist_ok=True)
     rng = np.random.default_rng(abs(hash(run_dir)) % 2**32)
@@ -110,7 +110,7 @@ def write_fake_run(run_dir, cliff_shift, tracking_gain, tracking_noise):
                             if cmds.std() > 1e-2 else float("nan"))
                     pair_rows.extend((condition["axis"], float(c), float(a))
                                      for c, a in zip(cmds[::5], actual[::5]))
-                    if rep < 8:
+                    if make_traces and rep < 8:
                         trace = fake_control_trace(rng, vmax, tracking_gain, tracking_noise)
                         trace_rows.extend(
                             (condition["axis"], rep, step, float(c), float(p), float(a))
@@ -139,7 +139,9 @@ def main():
         run_a = os.path.join(tmp, "demo_expA")
         run_b = os.path.join(tmp, "demo_expB")
         write_fake_run(run_a, cliff_shift=-0.1, tracking_gain=0.82, tracking_noise=0.18)
-        write_fake_run(run_b, cliff_shift=+0.1, tracking_gain=0.90, tracking_noise=0.10)
+        # traces only for one mock experiment — the real run makes one per checkpoint
+        write_fake_run(run_b, cliff_shift=+0.1, tracking_gain=0.90, tracking_noise=0.10,
+                       make_traces=False)
         sys.argv = ["plot", "--run-dirs", run_a, run_b,
                     "--labels", "expA-mock", "expB-mock",
                     "--out-dir", DEMO_DIR]
