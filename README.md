@@ -259,8 +259,13 @@ The default table has one *group* per matrix axis:
   `obs_latency` (ball-obs lag, steps), `act_latency` (action lag, ms);
 - capability axes (clean nominal env + small reset jitter):
   `straight_speed` (straight route, sweep commanded vmax) and
-  `arc_kappa` (single constant-curvature arc, both turn directions; commanded
-  speed follows the trained law `min(2, sqrt(0.75/|kappa|))`).
+  `arc_kappa` — the turn-into-corner test: a random straight lead-in
+  (0.5-2 m), ONE arc of 150-180 deg (random) at constant kappa, then a straight
+  exit; both turn directions; commanded speed follows the trained law
+  `min(2, sqrt(0.75/|kappa|))`; the episode ends as a failure if the ball gets
+  more than 0.8 m off the route; 10 s budget; the reported metric is the
+  SUCCESS RATE (completed the turn, no fall, never off-route).  kappa < 0.4 is
+  not swept: a 150-180 deg arc at the trained speed law cannot finish in 10 s.
 
 All conditions pin latency to the deployment-nominal (ball lag 2 steps, action
 lag 10 ms) unless the axis varies it.  Per-episode metrics: fell, duration,
