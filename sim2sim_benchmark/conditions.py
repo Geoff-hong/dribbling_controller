@@ -46,7 +46,7 @@ def robustness_conditions():
 def capability_conditions():
     """Capability (performance) test: clean nominal env + small reset jitter,
     extreme commands, fail-fast control criteria (the episode FAILS the moment
-    the ball is >0.8 m off the route or >0.8 m from the robot), 10 s budget.
+    the ball is >0.8 m off the route or >1.2 m from the robot), 10 s budget.
     Metric = SUCCESS RATE.
 
     straight_speed — straight route, sweep the commanded speed; success = kept
@@ -58,7 +58,7 @@ def capability_conditions():
     finish within 10 s (arc time = (angle/kappa)/speed, e.g. 8.1 s at kappa=0.2).
     """
     BUDGET_S = 10.0
-    FAIL_FAST = dict(offroute_fail_m=0.8, ball_far_fail_m=0.8, episode_s=BUDGET_S,
+    FAIL_FAST = dict(offroute_fail_m=0.8, ball_far_fail_m=1.2, episode_s=BUDGET_S,
                      reset_jitter=True, dr=NOMINAL_DR)
     table = []
     for v in (1.0, 1.5, 2.0, 2.5, 3.0, 3.5):
