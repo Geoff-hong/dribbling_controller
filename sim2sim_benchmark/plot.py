@@ -206,7 +206,7 @@ def capability_figure(experiments, labels, out_path):
                          row == len(metrics) - 1, col == 0, row_label)
     _collect_legend(fig, [panels[0, c] for c in range(len(groups))], len(labels))
     fig.suptitle("Sim2sim benchmark — CAPABILITY (10 s, fail if ball >0.8 m off route "
-                 "or from robot); corner: solid = L, dashed = R", fontsize=12)
+                 "or >1.2 m from robot); corner: solid = L, dashed = R", fontsize=12)
     fig.tight_layout(rect=(0, 0.05, 1, 0.94))
     fig.savefig(out_path, dpi=115)
     print(f"saved {out_path}")

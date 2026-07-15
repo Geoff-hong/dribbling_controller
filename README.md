@@ -263,7 +263,7 @@ truncation bias) with one CSV row per episode:
   the pelvis for >2 s = lost), achieved/commanded speed ratio, cross-track.
 - **Capability** — clean nominal env (+ small reset jitter), extreme commands,
   fail-fast control criteria: the episode FAILS the moment the ball is >0.8 m
-  off the route or >0.8 m from the robot; 10 s budget; metric = SUCCESS RATE.
+  off the route or >1.2 m from the robot; 10 s budget; metric = SUCCESS RATE.
   `straight_speed` sweeps the commanded speed on a straight route (success =
   kept control for the whole 10 s).  `corner_turn` is the turn-into-corner
   test: a random straight lead-in (0.5-2 m), ONE arc of 150-180 deg (random) at
