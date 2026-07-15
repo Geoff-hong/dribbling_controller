@@ -1,24 +1,25 @@
 #!/usr/bin/env bash
 # DR robustness sweep for the C++ ROS 2 deployment stack.
 #
-# For each domain-randomized MJCF variant (from tools/gen_dr_mjcf.py) this:
+# For each domain-randomized MJCF variant (from gen_dr_mjcf.py in this folder):
 #   1. launches the SoftTouch dribble MuJoCo sim2sim with that model + a matching
 #      ball_angular_damping (= 4*I) + a per-variant route seed,
-#   2. runs tools/fall_monitor.py for a fixed window to judge stayed-up vs fell,
+#   2. runs fall_monitor.py for a fixed window to judge stayed-up vs fell,
 #   3. tears the sim down and moves on,
 # then writes eval_result/<out>/summary.csv joining DR params with the verdict.
 #
 # NOTE: mujoco_sim_ros2 has no headless mode here, so a MuJoCo window pops per run
-# (it closes on teardown). That is expected. This is a sequential robustness probe,
-# not a large Monte-Carlo eval (use tools/dribble_pysim_multi.py for statistics).
+# (it closes on teardown). That is expected. This is a sequential smoke test of the
+# DEPLOYMENT STACK, not a statistical eval (that is `python -m sim2sim_benchmark`).
 #
-#   POLICY=/abs/....onnx RESET=/abs/..._standby.txt ./tools/dr_robustness_sweep.sh
+#   POLICY=/abs/....onnx RESET=/abs/..._standby.txt ./tools/ros2_dr_sweep/dr_robustness_sweep.sh
 #
 # Env overrides: N (variants, default 16), DUR (monitor seconds, 30), STARTUP (8),
 #                OUT (eval_result/dr_robustness), SEED (sampling seed, 0).
 set -o pipefail
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$SCRIPT_DIR"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SWEEP_DIR="$REPO_DIR/tools/ros2_dr_sweep"
+cd "$REPO_DIR"
 
 POLICY="${POLICY:-/home/aldebaran/Desktop/SoftTouch-multiagent/checkpoints/g1_dribble_s3_human_dr_iter80000/softtouch_dribble_deploy.onnx}"
 RESET="${RESET:-$HOME/softtouch_ros2_ws/install/motion_tracking_controller/share/motion_tracking_controller/config/g1/softtouch_mujoco_reset_standby.txt}"
@@ -52,7 +53,7 @@ mkdir -p "$OUT"
 RESULTS="$OUT/results"; mkdir -p "$RESULTS"
 
 echo "[sweep] generating $N DR variants (seed $SEED)..."
-python3 tools/gen_dr_mjcf.py --n "$N" --seed "$SEED" || { echo "[sweep] gen failed"; exit 1; }
+python3 "$SWEEP_DIR/gen_dr_mjcf.py" --n "$N" --seed "$SEED" || { echo "[sweep] gen failed"; exit 1; }
 MANIFEST="mjcf/dr_variants/manifest.csv"
 [[ -f "$MANIFEST" ]] || { echo "[sweep] ERROR: manifest missing: $MANIFEST"; exit 1; }
 
@@ -61,7 +62,7 @@ MANIFEST="mjcf/dr_variants/manifest.csv"
 # (the launch resolves mujoco_model_file relative to the package share).
 SHARE_MJCF="$WS/install/motion_tracking_controller/share/motion_tracking_controller/mjcf"
 if [[ -d "$SHARE_MJCF" ]]; then
-  ln -sfn "$SCRIPT_DIR/mjcf/dr_variants" "$SHARE_MJCF/dr_variants"
+  ln -sfn "$REPO_DIR/mjcf/dr_variants" "$SHARE_MJCF/dr_variants"
   echo "[sweep] linked variants into $SHARE_MJCF/dr_variants"
 else
   echo "[sweep] WARNING: $SHARE_MJCF not found; is the workspace built?"
@@ -109,7 +110,7 @@ tail -n +2 "$MANIFEST" | tr -d '\r' | while IFS=, read -r variant mjcf rel mass 
     launch_rviz:=false > "$LOG" 2>&1 &
   CUR_PGID=$!   # setsid makes the child its own process-group leader (pgid == pid)
   sleep "$STARTUP"
-  python3 tools/fall_monitor.py --seconds "$DUR" --out "$RESULTS/verdict_$variant.json" --label "$variant" \
+  python3 "$SWEEP_DIR/fall_monitor.py" --seconds "$DUR" --out "$RESULTS/verdict_$variant.json" --label "$variant" \
       || echo "[sweep] monitor error on $variant"
   kill_run "$CUR_PGID"; CUR_PGID=""
 done

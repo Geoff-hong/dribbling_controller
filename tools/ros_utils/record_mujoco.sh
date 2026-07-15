@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Record a window to mp4 via ffmpeg x11grab. Click the MuJoCo window when prompted.
 #
-#   tools/record_mujoco.sh [output.mp4] [fps]
+#   tools/ros_utils/record_mujoco.sh [output.mp4] [fps]
 #
 # Run this in your own terminal (so it has your X session DISPLAY/xauth), in a
 # second terminal while the sim is running. Press q (in this terminal) or Ctrl+C

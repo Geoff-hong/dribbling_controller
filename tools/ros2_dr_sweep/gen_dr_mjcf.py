@@ -5,7 +5,7 @@ robustness testing.
 The ROS 2 sim2sim path loads a single MJCF. To probe robustness we bake the DR
 into physical MJCF variants and sweep them with a bash loop (dr_robustness_sweep.sh),
 so NO controller/plugin code changes are needed. Ranges mirror the training DR
-used in tools/dribble_pysim_multi.py (verified against dribble_env_cfg.py):
+used in sim2sim_benchmark/engine.py (verified against dribble_env_cfg.py):
 
     ball_mass      [0.352, 0.430] kg   (0.391 x [0.9, 1.1])   -> ball geom mass
     foot_friction  [0.50, 1.00]        (foot/floor dynamic)   -> foot-floor pairs
@@ -27,7 +27,7 @@ import random
 import re
 from pathlib import Path
 
-# Training DR ranges (match tools/dribble_pysim_multi.py DR dict).
+# Training DR ranges (match sim2sim_benchmark/engine.py DR dict).
 DR = dict(
     ball_mass=(0.352, 0.430),
     ball_radius=(0.09, 0.11),
@@ -73,7 +73,7 @@ def make_variant(base_text: str, mass: float, radius: float, foot: float, ball: 
 
 
 def main() -> None:
-    here = Path(__file__).resolve().parent.parent
+    here = Path(__file__).resolve().parents[2]   # repo root (tools/ros2_dr_sweep/..)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--base", default=str(here / "mjcf" / "g1_softtouch_dribble.xml"),
                     help="base MJCF to randomize")

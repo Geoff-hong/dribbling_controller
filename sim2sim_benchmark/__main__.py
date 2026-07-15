@@ -7,6 +7,7 @@ comparison figures afterwards with `python -m sim2sim_benchmark.plot`.
 import argparse
 import os
 
+from . import engine
 from .conditions import robustness_conditions, capability_conditions, load_conditions_json
 from .runner import run_condition_table
 from .report import report
@@ -22,8 +23,8 @@ def main():
                          "control criteria; metric = success rate")
     ap.add_argument("--conditions", default="",
                     help="run a custom JSON condition table instead of the built-in ones")
-    ap.add_argument("--onnx", required=True, help="deployment policy ONNX")
-    ap.add_argument("--reset", required=True,
+    ap.add_argument("--onnx", default=engine.DEFAULT_ONNX, help="deployment policy ONNX")
+    ap.add_argument("--reset", default=engine.DEFAULT_RESET,
                     help="reset-state file (standby-trained policies need the standby reset)")
     ap.add_argument("--robots", type=int, default=32)
     ap.add_argument("--seed", type=int, default=0)
@@ -51,6 +52,7 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     for title, table in tables:
         episode_rows = []
+        speed_pair_rows = []
         csv_path = os.path.join(args.out_dir, f"{title}.csv")
         try:
             run_condition_table(table, title, episode_rows,
@@ -58,10 +60,11 @@ def main():
                                 n_robots=args.robots, seed=args.seed,
                                 route_bank=args.route_bank, reps=args.reps,
                                 episode_s=args.episode_s,
-                                standby_hold_s=args.standby_hold_s)
+                                standby_hold_s=args.standby_hold_s,
+                                speed_pair_rows=speed_pair_rows)
         finally:
             # partial results survive a crash / Ctrl-C — never lose completed episodes
-            report(episode_rows, csv_path, title)
+            report(episode_rows, csv_path, title, speed_pair_rows)
 
 
 if __name__ == "__main__":

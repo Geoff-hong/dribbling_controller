@@ -17,17 +17,10 @@ Two separate tests, run from the repo root:
   python -m sim2sim_benchmark.plot --run-dirs eval_result/m80000 eval_result/m90000 \
       --labels iter80000 iter90000 --out-dir eval_result
 
-Modules: conditions (the tables), runner (queue execution on the pysim engine),
-report (CSV + console summary), plot (comparison figures; engine-independent).
+Modules: engine (Route / Robot / MuJoCo model composition — the pysim core),
+conditions (the tables), runner (queue execution on the engine), report (CSV +
+console summary), plot (comparison figures; engine-independent), pysim (the
+interactive / legacy CLI: viewer, --record, --headless, --eval, --sweep).
 
-The simulation engine (Route / Robot / model composition) lives in
-tools/dribble_pysim_multi.py; this package drives it per-episode through
-Robot.reset(condition=...).
+The runner drives the engine per-episode through Robot.reset(condition=...).
 """
-import os
-import sys
-
-# the pysim engine is a standalone script under tools/, not an installed package
-_TOOLS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools")
-if _TOOLS_DIR not in sys.path:
-    sys.path.insert(0, _TOOLS_DIR)

@@ -6,7 +6,7 @@ window, tracks the base height. It then writes a one-line JSON verdict (fell yes
 min height, survival time) so the DR sweep can aggregate pass/fail across variants
 without a GUI.
 
-    ros2 run ... (or) python tools/fall_monitor.py --seconds 35 --out result.json --label dr_003
+    ros2 run ... (or) python tools/ros2_dr_sweep/fall_monitor.py --seconds 35 --out result.json --label dr_003
 
 The robot stands at ~0.75 m; a fall is min base height dropping below --fall-z after
 an initial --settle-s window (which skips the reset/hold transient).

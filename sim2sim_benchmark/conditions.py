@@ -6,7 +6,7 @@ three bookkeeping keys: name, group (one X axis of the figures), and axis
 """
 import numpy as np
 
-from dribble_pysim_multi import make_condition, route_cmd_mode
+from .engine import make_condition, route_cmd_mode
 
 NOMINAL_DR = dict(mass=0.391, radius=0.10, foot=0.8, ball=0.5)   # deploy nominal
 # every condition pins latency to the deployment nominal (= training DR midpoints:
@@ -56,6 +56,11 @@ def capability_conditions():
     min(2, sqrt(0.75/|kappa|)); success additionally requires finishing the turn.
     kappa < 0.4 is not swept: a 150-180 deg arc at the trained speed law cannot
     finish within 10 s (arc time = (angle/kappa)/speed, e.g. 8.1 s at kappa=0.2).
+
+    speed_tracking — speed CONTROLLABILITY on nominal human-dribble routes
+    (curvature naturally varies the commanded speed): per-step (commanded, actual)
+    speed pairs are recorded, the actual speed smoothed over 0.5 s, and the
+    per-episode Pearson r is written to the CSV; no fail-fast, 20 s episodes.
     """
     BUDGET_S = 10.0
     FAIL_FAST = dict(offroute_fail_m=0.8, ball_far_fail_m=1.2, episode_s=BUDGET_S,
@@ -73,6 +78,11 @@ def capability_conditions():
                                        arc_kappa=sign * kappa, lead_in_m=[0.5, 2.0],
                                        arc_angle_deg=[150.0, 180.0],
                                        route_len_m=route_len, **FAIL_FAST))
+    for vmax in (1.5, 2.0):
+        table.append(condition_row(f"tracking_{vmax:g}", "speed_tracking", vmax,
+                                   route_mode="human", route_vmax=vmax,
+                                   route_len_m=50.0, episode_s=20.0,
+                                   dr=NOMINAL_DR, record_speed_pairs=True))
     return table
 
 
