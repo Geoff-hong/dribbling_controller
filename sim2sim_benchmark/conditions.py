@@ -51,16 +51,27 @@ def capability_conditions():
 
     straight_speed — straight route, sweep the commanded speed; success = kept
     control for the whole 10 s.
-    corner_turn — random straight lead-in U(0.5, 2) m, ONE arc of U(150, 180) deg
-    at constant kappa, straight exit; speed follows the trained law
-    min(2, sqrt(0.75/|kappa|)); success additionally requires finishing the turn.
-    kappa < 0.4 is not swept: a 150-180 deg arc at the trained speed law cannot
-    finish within 10 s (arc time = (angle/kappa)/speed, e.g. 8.1 s at kappa=0.2).
+    corner_turn — random straight lead-in U(1.5, 4) m (enough runway to reach the
+    commanded pace before the turn), ONE arc of U(150, 180) deg at constant
+    kappa, straight exit; speed follows the trained law min(2, sqrt(0.75/|kappa|));
+    success additionally requires finishing the turn; 12 s budget (a kappa=0.4
+    turn with the full 4 m lead-in commands ~8 s). kappa < 0.4 is not swept —
+    the arc alone would not finish in time (arc time = (angle/kappa)/speed).
 
-    speed_tracking — speed CONTROLLABILITY on nominal human-dribble routes
-    (curvature naturally varies the commanded speed): per-step (commanded, actual)
-    speed pairs are recorded, the actual speed smoothed over 0.5 s, and the
-    per-episode Pearson r is written to the CSV; no fail-fast, 20 s episodes.
+    u_turn — the about-face drill matching the training u_turn mode
+    (SoftTouch-multiagent: ROUTE_UTURN_CRUISE_M (1.5, 4.0), ROUTE_UTURN_ANGLE_DEG
+    (160, 200), ROUTE_UTURN_KAPPA (2.0, 4.0) -> turn radius 0.25-0.5 m):
+    straight run-in U(1.5, 4) m, ONE constant-kappa turn of U(160, 200) deg,
+    straight exit; kappa swept over 1.5-4.0 both directions. Same fail-fast
+    and success semantics as corner_turn; its own figure (uturn_compare.png).
+
+    speed_tracking — speed CONTROLLABILITY on nominal human-dribble routes with
+    the TRAINING command distribution: the cruise pace is sampled per episode
+    from U(1.2, 2.0) m/s exactly like the training-side ROUTE_CRUISE_RANGE
+    (SoftTouch-multiagent dribble_env.py), and route curvature modulates it
+    further — pooled over route_bank x reps episodes the command covers the
+    trained range. Per-step (commanded, actual) pairs with the actual speed
+    smoothed over 0.5 s, per-episode Pearson r; no fail-fast, 20 s episodes.
     """
     BUDGET_S = 10.0
     FAIL_FAST = dict(offroute_fail_m=0.8, ball_far_fail_m=1.2, episode_s=BUDGET_S,
@@ -71,18 +82,26 @@ def capability_conditions():
                                    route_mode="straight", route_vmax=v,
                                    route_len_m=v * BUDGET_S * 1.2 + 5.0, **FAIL_FAST))
     for kappa in (0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0):
-        route_len = 2.0 + np.pi / kappa + 3.0   # max lead + 180 deg arc + exit & margin
+        route_len = 4.0 + np.pi / kappa + 3.0   # max lead + 180 deg arc + exit & margin
         for sign, tag in ((1.0, "L"), (-1.0, "R")):
             table.append(condition_row(f"corner_{tag}_{kappa:g}", "corner_turn",
                                        sign * kappa, route_mode="arc",
-                                       arc_kappa=sign * kappa, lead_in_m=[0.5, 2.0],
+                                       arc_kappa=sign * kappa, lead_in_m=[1.5, 4.0],
                                        arc_angle_deg=[150.0, 180.0],
+                                       route_len_m=route_len,
+                                       **{**FAIL_FAST, "episode_s": 12.0}))
+    for kappa in (1.5, 2.0, 2.5, 3.0, 3.5, 4.0):
+        route_len = 4.0 + np.deg2rad(200.0) / kappa + 3.0   # max run-in + turn + exit
+        for sign, tag in ((1.0, "L"), (-1.0, "R")):
+            table.append(condition_row(f"uturn_{tag}_{kappa:g}", "u_turn",
+                                       sign * kappa, route_mode="arc",
+                                       arc_kappa=sign * kappa, lead_in_m=[1.5, 4.0],
+                                       arc_angle_deg=[160.0, 200.0],
                                        route_len_m=route_len, **FAIL_FAST))
-    for vmax in (1.5, 2.0):
-        table.append(condition_row(f"tracking_{vmax:g}", "speed_tracking", vmax,
-                                   route_mode="human", route_vmax=vmax,
-                                   route_len_m=50.0, episode_s=20.0,
-                                   dr=NOMINAL_DR, record_speed_pairs=True))
+    table.append(condition_row("tracking", "speed_tracking", 1.6,
+                               route_mode="human", route_vmax=[1.2, 2.0],
+                               route_len_m=50.0, episode_s=20.0,
+                               dr=NOMINAL_DR, record_speed_pairs=True))
     return table
 
 
@@ -107,6 +126,8 @@ def load_conditions_json(path):
             if condition["arc_angle_deg"] is not None and (
                     len(condition["arc_angle_deg"]) != 2 or condition["arc_kappa"] is None):
                 raise ValueError("arc_angle_deg must be [min_deg, max_deg] and requires 'arc_kappa'")
+            if isinstance(condition["route_vmax"], (list, tuple)) and len(condition["route_vmax"]) != 2:
+                raise ValueError("route_vmax must be a scalar or a [min, max] per-episode range")
             for key in ("episode_s", "offroute_fail_m", "ball_far_fail_m"):
                 if condition[key] is not None and float(condition[key]) <= 0:
                     raise ValueError(f"{key} must be > 0")

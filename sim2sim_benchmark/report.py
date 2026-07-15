@@ -75,7 +75,19 @@ def write_speed_pairs_csv(speed_pair_rows, csv_path):
             writer.writerow([f"{axis_value:.4f}", f"{cmd:.4f}", f"{actual:.4f}"])
 
 
-def report(episode_rows, csv_path, title, speed_pair_rows=None):
+def write_speed_traces_csv(speed_trace_rows, csv_path):
+    """Full-rate (50 Hz) per-step traces of the first episodes of each
+    speed-tracking condition, for the control trace plots."""
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["axis_value", "episode", "step", "cmd_speed_mps",
+                         "ball_speed_along_cmd_mps", "ball_speed_abs_mps"])
+        for axis_value, episode, step, cmd, along_cmd, speed_abs in speed_trace_rows:
+            writer.writerow([f"{axis_value:.4f}", episode, step, f"{cmd:.4f}",
+                             f"{along_cmd:.4f}", f"{speed_abs:.4f}"])
+
+
+def report(episode_rows, csv_path, title, speed_pair_rows=None, speed_trace_rows=None):
     if not episode_rows:
         print(f"[{title}] no episodes completed")
         return
@@ -86,4 +98,8 @@ def report(episode_rows, csv_path, title, speed_pair_rows=None):
         pairs_path = csv_path.replace(".csv", "_speed_pairs.csv")
         write_speed_pairs_csv(speed_pair_rows, pairs_path)
         print(f"[{title}] saved {pairs_path} ({len(speed_pair_rows)} pairs)")
+    if speed_trace_rows and csv_path:
+        traces_path = csv_path.replace(".csv", "_speed_traces.csv")
+        write_speed_traces_csv(speed_trace_rows, traces_path)
+        print(f"[{title}] saved {traces_path} ({len(speed_trace_rows)} steps)")
     print_summary(episode_rows, title)

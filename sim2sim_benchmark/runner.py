@@ -13,12 +13,15 @@ from . import engine
 
 def run_condition_table(table, title, episode_rows, *, onnx, reset_file,
                         n_robots=32, seed=0, route_bank=12, reps=4,
-                        episode_s=20.0, standby_hold_s=0.0, speed_pair_rows=None):
+                        episode_s=20.0, standby_hold_s=0.0, speed_pair_rows=None,
+                        speed_trace_rows=None):
     """Run every condition in `table` for route_bank x reps episodes, appending one
     metrics dict per completed episode into `episode_rows` (the caller owns the
     list so partial results survive a crash or Ctrl-C). Conditions that record
     speed pairs additionally append (axis_value, cmd, actual) rows, downsampled
-    to 10 Hz, into `speed_pair_rows` when given."""
+    to 10 Hz, into `speed_pair_rows`, and — for the first EIGHT episodes of each
+    such condition — full-rate (50 Hz) trace rows into `speed_trace_rows` for
+    the per-episode control trace plots."""
     # isolate the robots: no route may reach a neighbour's workspace mid-episode
     max_route_len = max([engine.ROUTE_CFG["routeLength"]]
                         + [c["route_len_m"] for c in table if c["route_len_m"]])
@@ -73,6 +76,13 @@ def run_condition_table(table, title, episode_rows, *, onnx, reset_file,
                         speed_pair_rows.extend(
                             (condition["axis"], float(c), float(a))
                             for c, a in zip(cmd[::5], actual[::5]))   # 50 Hz -> 10 Hz
+                if speed_trace_rows is not None and episode < 8:
+                    trace = rb.speed_trace()
+                    if trace is not None:
+                        cmd, along_cmd, speed_abs = trace
+                        speed_trace_rows.extend(
+                            (condition["axis"], episode, step, float(c), float(p), float(a))
+                            for step, (c, p, a) in enumerate(zip(cmd, along_cmd, speed_abs)))
                 done += 1
             assign_next_episode(rb, data.time)
         if not np.all(np.isfinite(data.qpos)):

@@ -178,8 +178,11 @@ class Route:
         self.const_kappa = None   # not None -> constant-curvature arc (signed 1/m)
         self.lead_segments = 0    # straight lead-in before the arc starts
         self.lead_range = None    # (min,max) m -> lead length drawn per episode from route rng
+        self.vmax_range = None    # (min,max) m/s -> per-episode cruise pace, like the
+                                  # training ROUTE_CRUISE_RANGE sampling
         self.arc_deg = None       # (min,max) deg -> FINITE arc, angle drawn per episode;
         self.arc_segments = None  #                  None -> infinite arc (full circles)
+        self.arc_kappa_eff = None  # back-solved effective curvature of a finite arc
         self.arc_end_s = None     # arc-exit arc length (lead + arc), for completion checks
         self._alloc()
         self.filled = 0; self.end_heading = 0.0; self.last_seg = -1
@@ -202,6 +205,10 @@ class Route:
         self.last_seg = -1; self.filled = 0
         self.last_s = 0.0; self.max_s = 0.0
         self._alloc()   # condition overrides may have changed routeLength
+        # per-episode cruise pace (training samples ROUTE_CRUISE_RANGE the same way);
+        # drawn from the route rng -> route_seed reproduces the pace too
+        if self.vmax_range is not None:
+            self.cfg["routeVmax"] = float(self._u(*self.vmax_range))
         # turn-into-corner test: draw per-episode lead length / arc angle from the
         # route rng (route_seed-controlled -> the same seed reproduces the same
         # lead+angle across conditions and experiments, pairing the comparisons)
@@ -210,11 +217,18 @@ class Route:
             if self.lead_range is not None:
                 self.lead_segments = max(0, int(round(self._u(*self.lead_range) / ds)))
             if self.arc_deg is not None:
+                # sharp turns span only a few coarse segments (kappa*ds up to
+                # 1 rad/segment), so keeping the sampled kappa would skew the
+                # swept angle by up to ~kappa*ds/2. Same fix as the training
+                # route builder: ceil the segment count, then back-solve the
+                # EFFECTIVE kappa = angle/(nseg*ds) — the swept angle is exact
+                # and |kappa_eff| <= sampled (never tighter).
                 th = np.deg2rad(self._u(*self.arc_deg))
-                self.arc_segments = max(1, int(np.ceil(th / (abs(self.const_kappa) * ds))))
+                self.arc_segments = max(3, int(np.ceil(th / (abs(self.const_kappa) * ds))))
+                self.arc_kappa_eff = np.sign(self.const_kappa) * th / (self.arc_segments * ds)
                 self.arc_end_s = (self.lead_segments + self.arc_segments) * ds
             else:
-                self.arc_segments = None; self.arc_end_s = None
+                self.arc_segments = None; self.arc_kappa_eff = None; self.arc_end_s = None
         max_seg = len(self.speed)
         init = int(np.clip(self.cfg["routeInitSegments"], 1, max_seg)) if self.cfg["routeLazyExtend"] else max_seg
         self._build(init, True, np.asarray(origin, float), self._unit(np.asarray(forward, float)))
@@ -266,12 +280,13 @@ class Route:
             # reset transient settles before the turn starts, then constant kappa
             # (finite arc_segments -> straight exit tail after the turn).
             # Speed still follows the trained law min(vmax, sqrt(kv/|kappa|)).
+            arc_kappa = self.const_kappa if self.arc_segments is None else self.arc_kappa_eff
             kappa = np.zeros(num)
             for i in range(num):
                 gi = seg_off + i
                 if gi >= self.lead_segments and (self.arc_segments is None
                                                  or gi < self.lead_segments + self.arc_segments):
-                    kappa[i] = self.const_kappa
+                    kappa[i] = arc_kappa
         elif self.cmd_mode == 4:
             kappa = self._human_kappa(num)
         else:
@@ -506,10 +521,16 @@ class Robot:
         if route_seed is not None:
             self.route.rng = np.random.Generator(np.random.PCG64(int(route_seed)))
         condition = condition if condition is not None else self.default_condition
-        # route-shape overrides (capability conditions); None -> global defaults
+        # route-shape overrides (capability conditions); None -> global defaults.
+        # route_vmax: scalar pins the pace; [min,max] samples it per episode from
+        # the route rng (the training-side ROUTE_CRUISE_RANGE behavior).
         route_cfg = self.route.cfg
-        route_cfg["routeVmax"] = (ROUTE_CFG["routeVmax"] if condition["route_vmax"] is None
-                                  else float(condition["route_vmax"]))
+        vmax = condition["route_vmax"]
+        if isinstance(vmax, (list, tuple)):
+            self.route.vmax_range = tuple(float(x) for x in vmax)
+        else:
+            self.route.vmax_range = None
+            route_cfg["routeVmax"] = ROUTE_CFG["routeVmax"] if vmax is None else float(vmax)
         route_cfg["routeLength"] = (ROUTE_CFG["routeLength"] if condition["route_len_m"] is None
                                     else float(condition["route_len_m"]))
         self.route.const_kappa = condition["arc_kappa"]
@@ -668,9 +689,12 @@ class Robot:
         self.ct_sum += self.cmd["crosstrack"]; self.ct_count += 1
         self.cmd_speed_sum += self.cmd["target_speed"]
         if self.speed_pairs is not None:
-            # actual speed = ball velocity projected on the commanded direction
-            ball_speed = float(data.qvel[self.ballv:self.ballv + 2] @ self.cmd["target_dir"])
-            self.speed_pairs.append((self.cmd["target_speed"], ball_speed))
+            # actual speed both ways: projected on the commanded direction (the
+            # tracking signal) and the raw planar magnitude (for trace plots)
+            ball_vel = data.qvel[self.ballv:self.ballv + 2]
+            self.speed_pairs.append((self.cmd["target_speed"],
+                                     float(ball_vel @ self.cmd["target_dir"]),
+                                     float(np.hypot(*ball_vel))))
         ball_dist = float(np.hypot(*(data.qpos[self.ballq:self.ballq + 2]
                                      - data.qpos[self.bq:self.bq + 2])))
         self.ball_dist_sum += ball_dist; self.ball_dist_count += 1
@@ -737,6 +761,14 @@ class Robot:
         window = min(25, len(pairs))   # 25 policy steps = 0.5 s at 50 Hz
         smoothed = np.convolve(pairs[:, 1], np.ones(window) / window, mode="same")
         return pairs[:, 0], smoothed
+
+    def speed_trace(self):
+        """Raw per-step (cmd, v-along-cmd, |v|) arrays at the policy rate (50 Hz)
+        for the controllability trace plots; None when recording is off."""
+        if not self.speed_pairs:
+            return None
+        pairs = np.asarray(self.speed_pairs)
+        return pairs[:, 0], pairs[:, 1], pairs[:, 2]
 
     def episode_metrics(self, data, t):
         # everything one episode contributes to a CSV row (fall, tracking, progress,
