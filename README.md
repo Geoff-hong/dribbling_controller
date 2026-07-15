@@ -219,7 +219,6 @@ Common `dribble_pysim_multi.py` flags:
 --robots N         number of robots simulated in parallel
 --eval             batch random-DR eval (no window), prints stats + CSV
 --sweep            systematic 1-param-at-a-time DR sweep on fixed routes
---matrix           eval-matrix condition table (see below)
 --latency          replicate the v2 training-time latency DR (see below)
 --seconds S        wall-clock eval duration; --episode-s = per-episode length
 --out-dir DIR      folder for all outputs; --csv / --plot / --record name them
@@ -229,9 +228,11 @@ Common `dribble_pysim_multi.py` flags:
 
 Single-run knobs (also usable with the viewer for eyeballing): `--cmd-mode 0`
 (straight route), `--route-kappa K` (constant-curvature arc, signed; speed
-follows the trained law `min(vmax, sqrt(0.75/|kappa|))`), `--route-vmax`,
-`--push-dv` / `--ball-push-dv` / `--push-interval-s` (velocity kicks),
-`--ball-delay-steps` / `--act-delay-ms` (pin latency), `--jitter` (reset noise).
+follows the trained law `min(vmax, sqrt(0.75/|kappa|))`), `--arc-angle-deg MIN
+MAX` (one finite turn instead of endless circles), `--route-vmax`, `--push-dv` /
+`--ball-push-dv` / `--push-interval-s` (velocity kicks), `--ball-delay-steps` /
+`--act-delay-ms` (pin latency), `--offroute-fail-m` / `--ball-far-fail-m`
+(fail-fast criteria), `--jitter` (reset noise).
 
 Domain randomization (`--eval`, matches the training DR):
 
@@ -247,41 +248,46 @@ envelope.  `--latency` (v2 policies) adds, per episode: a ball-observation lag o
 1-3 policy steps, and an action lag of 0-4 sim sub-steps (0-20 ms at dt=0.005),
 with 30% of episodes forced to zero action lag.
 
-### Eval matrix (`--matrix`)
+## Sim2Sim Standard Benchmark (`sim2sim_benchmark/`)
 
-`--matrix` runs a fixed condition table (queue-based like `--sweep`: every queued
-episode completes, `--seconds` is ignored) and writes one CSV row per episode.
-The default table has one *group* per matrix axis:
+The standard batch evaluation lives in the top-level `sim2sim_benchmark/`
+package (the pysim engine above is only the simulator it drives).  It has two
+separate tests, each a fixed condition table run to completion (queue-based, no
+truncation bias) with one CSV row per episode:
 
-- robustness axes (nominal human routes, fixed route bank):
-  `dr_scale` (all DR params jointly, centered training ranges x alpha),
-  `base_push` / `ball_push` (velocity kicks every 5 s, random direction/phase),
-  `obs_latency` (ball-obs lag, steps), `act_latency` (action lag, ms);
-- capability axes (clean nominal env + small reset jitter):
-  `straight_speed` (straight route, sweep commanded vmax) and
-  `arc_kappa` — the turn-into-corner test: a random straight lead-in
-  (0.5-2 m), ONE arc of 150-180 deg (random) at constant kappa, then a straight
-  exit; both turn directions; commanded speed follows the trained law
-  `min(2, sqrt(0.75/|kappa|))`; the episode ends as a failure if the ball gets
-  more than 0.8 m off the route; 10 s budget; the reported metric is the
-  SUCCESS RATE (completed the turn, no fall, never off-route).  kappa < 0.4 is
-  not swept: a 150-180 deg arc at the trained speed law cannot finish in 10 s.
+- **Robustness** — perturb the environment, keep the nominal command (human
+  routes, fixed route bank).  Axes: `dr_scale` (all DR params jointly, centered
+  training ranges x alpha), `base_push` / `ball_push` (velocity kicks every 5 s,
+  random direction/phase), `obs_latency` (ball-obs lag, steps), `act_latency`
+  (action lag, ms).  Metrics: survival rate, ball possession (ball >1.5 m from
+  the pelvis for >2 s = lost), achieved/commanded speed ratio, cross-track.
+- **Capability** — clean nominal env (+ small reset jitter), extreme commands,
+  fail-fast control criteria: the episode FAILS the moment the ball is >0.8 m
+  off the route or >0.8 m from the robot; 10 s budget; metric = SUCCESS RATE.
+  `straight_speed` sweeps the commanded speed on a straight route (success =
+  kept control for the whole 10 s).  `corner_turn` is the turn-into-corner
+  test: a random straight lead-in (0.5-2 m), ONE arc of 150-180 deg (random) at
+  constant kappa, then a straight exit, both turn directions, speed following
+  the trained law `min(2, sqrt(0.75/|kappa|))`; success additionally requires
+  finishing the turn.  kappa < 0.4 is not swept (a 150-180 deg arc at the
+  trained speed law cannot finish in 10 s).
 
-All conditions pin latency to the deployment-nominal (ball lag 2 steps, action
-lag 10 ms) unless the axis varies it.  Per-episode metrics: fell, duration,
-cross-track, route progress (arc length), achieved route speed, commanded speed,
-lost-ball flag (ball >1.5 m from the pelvis for >2 s), mean ball distance.
-Episodes per condition = `--route-bank` (12) x `--matrix-reps` (4).  A custom
-table can be given as `--conditions table.json` (a JSON list of condition dicts).
+All conditions pin latency to the deployment nominal (ball lag 2 steps, action
+lag 10 ms) unless the axis varies it.  Episodes per condition = `--route-bank`
+(12) x `--reps` (4); every condition cycles the same route seeds, so routes and
+the corner lead/angle draws are paired across conditions and experiments.
+A custom table can be run with `--conditions table.json`.
 
 ```bash
-$PY tools/dribble_pysim_multi.py --matrix --onnx "$ONNX" --reset "$RESET" \
-    --robots 32 --out-dir "$OUT" --csv matrix.csv
+# from the repo root, SoftTouch python env
+$PY -m sim2sim_benchmark --robustness --capability \
+    --onnx "$ONNX" --reset "$RESET" --robots 32 --out-dir eval_result/m80000
+# -> eval_result/m80000/robustness.csv + capability.csv (+ console summaries)
 
-# matrix figure: columns = axes, rows = metrics, one color per experiment
-$PY tools/plot_eval_matrix.py --csv eval_result/m80000/matrix.csv \
-    eval_result/m90000/matrix.csv --labels iter80000 iter90000 \
-    --out eval_result/matrix_compare.png
+# comparison figures: one color per experiment
+$PY -m sim2sim_benchmark.plot --run-dirs eval_result/m80000 eval_result/m90000 \
+    --labels iter80000 iter90000 --out-dir eval_result
+# -> eval_result/robustness_compare.png + capability_compare.png
 ```
 
 Example — batch eval + DR sweep + demo video for the `iter80000` v2 policy:
@@ -454,13 +460,14 @@ Leaving `motion_action_command_mode` empty uses the original
   (no ROS 2), used to validate the obs/route/PD port against the C++ path.
 
 - `tools/dribble_pysim_multi.py`
-  Multi-robot version with batch DR eval, DR sweep, the `--matrix` eval-matrix
-  runner, latency DR, and offscreen video recording (see *Standalone Python
-  Sim*).
+  Multi-robot pysim engine (Route/Robot/model composition) with batch DR eval,
+  DR sweep, latency DR, and offscreen video recording (see *Standalone Python
+  Sim*).  The sim2sim benchmark drives it per episode.
 
-- `tools/plot_eval_matrix.py`
-  Renders the eval-matrix figure from one or more `--matrix` CSVs (columns =
-  axes, rows = metrics, one color per experiment).
+- `sim2sim_benchmark/`
+  The sim2sim standard benchmark package: condition tables (`conditions.py`),
+  queue runner (`runner.py`), CSV/console report (`report.py`), and comparison
+  figures (`plot.py`).  See *Sim2Sim Standard Benchmark*.
 
 - `tools/gen_dr_mjcf.py`, `tools/fall_monitor.py`,
   `tools/dr_robustness_sweep.sh`, `tools/kill_sim.sh`
