@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-shot: kill every process the SoftTouch dribble MuJoCo sim2sim spawns.
 # ros2 launch's child nodes do NOT die on Ctrl+C, so run this to clean up.
-#   ./tools/kill_sim.sh
+#   ./tools/ros2_dr_sweep/kill_sim.sh
 for pat in \
   'ros2 launch motion_tracking_controller' \
   'mujoco_sim' \

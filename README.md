@@ -85,7 +85,7 @@ from the SoftTouch Python environment:
 
 ```bash
 cd ~/softtouch_ros2_ws/src/motion_tracking_controller
-python tools/export_softtouch_dribble_policy.py \
+python tools/onnx_export/export_softtouch_dribble_policy.py \
   --checkpoint ~/SoftTouch/checkpoints/g1_dribble_s3_human_iter35000/model_35000.pt \
   --artifact ~/SoftTouch/checkpoints/g1_dribble_s3_human_iter35000/stage2_decoder_dim8.pt \
   --output ~/SoftTouch/checkpoints/g1_dribble_s3_human_iter35000/softtouch_dribble_deploy.onnx
@@ -205,12 +205,13 @@ deployment stack (controller, StateEstimator, real-time loop) — for that, use 
 ros2_control sim2sim above.  Run it from the SoftTouch Python env (torch / onnx /
 mujoco), not the ROS 2 env.
 
-- `tools/dribble_pysim.py` — single robot, viewer or `--headless`.  Port
-  validation: the robot should stay up ~0.7 m and move forward.
-- `tools/dribble_pysim_multi.py` — many robots at once, with batch eval, DR
-  sweep, the eval matrix, latency DR, and offscreen video recording.
+The simulation core lives in `sim2sim_benchmark/engine.py` (Route / Robot /
+multi-robot model composition); `python -m sim2sim_benchmark.pysim` is the
+interactive CLI on top of it: live viewer, `--record` mp4, `--headless` smoke
+test, `--eval` random-DR Monte Carlo and the `--sweep` single-param DR
+diagnostic.
 
-Common `dribble_pysim_multi.py` flags:
+Common `sim2sim_benchmark.pysim` flags:
 
 ```text
 --onnx PATH        policy ONNX to evaluate
@@ -270,7 +271,14 @@ truncation bias) with one CSV row per episode:
   constant kappa, then a straight exit, both turn directions, speed following
   the trained law `min(2, sqrt(0.75/|kappa|))`; success additionally requires
   finishing the turn.  kappa < 0.4 is not swept (a 150-180 deg arc at the
-  trained speed law cannot finish in 10 s).
+  trained speed law cannot finish in 10 s).  `speed_tracking` measures speed
+  CONTROLLABILITY on nominal human-dribble routes (curvature naturally varies
+  the command between ~1.2 and 2.0 m/s): per-step (commanded, actual) speed
+  pairs are recorded — actual = ball velocity projected on the commanded
+  direction, smoothed over 0.5 s — the per-episode Pearson r goes into the CSV
+  (`speed_corr_r`), and the 10 Hz pairs land in `capability_speed_pairs.csv`
+  for the cmd-vs-actual figure (`speed_tracking_compare.png`); no fail-fast,
+  20 s episodes, vmax 1.5 / 2.0.
 
 All conditions pin latency to the deployment nominal (ball lag 2 steps, action
 lag 10 ms) unless the axis varies it.  Episodes per condition = `--route-bank`
@@ -288,22 +296,23 @@ $PY -m sim2sim_benchmark --robustness --capability \
 $PY -m sim2sim_benchmark.plot --run-dirs eval_result/m80000 eval_result/m90000 \
     --labels iter80000 iter90000 --out-dir eval_result
 # -> eval_result/robustness_compare.png + capability_compare.png
+#    + speed_tracking_compare.png (cmd vs actual speed, pooled Pearson r)
 ```
 
-Example — batch eval + DR sweep + demo video for the `iter80000` v2 policy:
+Example — random-DR eval + DR sweep + demo video for the `iter80000` v2 policy
+(the defaults already point at `checkpoints/g1_dribble_s3_human_dr_iter80000` +
+the standby reset, so `--onnx/--reset` are only needed for other policies):
 
 ```bash
-# from the SoftTouch python env (e.g. conda multiagentsim), NOT the ROS 2 env
+# from the repo root, SoftTouch python env (e.g. conda multiagentsim), NOT the ROS 2 env
 PY=~/miniconda3/envs/multiagentsim/bin/python
-ONNX=/abs/path/g1_dribble_s3_human_dr_iter80000/softtouch_dribble_deploy.onnx
-RESET=config/g1/softtouch_mujoco_reset_standby.txt
 OUT=eval_result/m80000
 
-$PY tools/dribble_pysim_multi.py --eval  --latency --onnx "$ONNX" --reset "$RESET" \
+$PY -m sim2sim_benchmark.pysim --eval  --latency \
     --robots 32 --seconds 300 --out-dir "$OUT" --csv eval.csv --plot eval_plot.png
-$PY tools/dribble_pysim_multi.py --sweep --latency --onnx "$ONNX" --reset "$RESET" \
+$PY -m sim2sim_benchmark.pysim --sweep --latency \
     --robots 32 --out-dir "$OUT" --csv sweep.csv --plot sweep.png
-MUJOCO_GL=glx $PY tools/dribble_pysim_multi.py --latency --onnx "$ONNX" --reset "$RESET" \
+MUJOCO_GL=glx $PY -m sim2sim_benchmark.pysim --latency \
     --robots 4 --seconds 35 --out-dir "$OUT" --record dribble_4up.mp4
 ```
 
@@ -320,7 +329,7 @@ changes): each variant randomizes ball mass, ball radius, and foot/ball friction
 over the training DR ranges, with the ball angular damping (`= 4*I`) recomputed to
 match.
 
-Tools (`tools/`):
+Tools (`tools/ros2_dr_sweep/`):
 
 - `gen_dr_mjcf.py` — writes N MJCF variants + `manifest.csv` into
   `mjcf/dr_variants/` (git-ignored).  `--n` is the TOTAL count; variant `000` is
@@ -340,7 +349,7 @@ opens per variant):
 ```bash
 POLICY=/abs/path/g1_dribble_s3_human_dr_iter80000/softtouch_dribble_deploy.onnx \
 RESET=/abs/path/config/g1/softtouch_mujoco_reset_standby.txt \
-N=16 DUR=10 ./tools/dr_robustness_sweep.sh
+N=16 DUR=10 ./tools/ros2_dr_sweep/dr_robustness_sweep.sh
 ```
 
 Env knobs: `N` (total variants), `DUR` (dribble seconds recorded, counted from the
@@ -354,8 +363,9 @@ Notes:
   the one term outside the trained envelope, and since the `ball_radius`
   observation is held at nominal it also injects a small obs-error probe.
 - This is a sequential robustness probe (stayed-up / fell), not a statistical
-  fall-rate; use `tools/dribble_pysim_multi.py` for statistics.
-- If a run is interrupted and leaves stray windows, run `./tools/kill_sim.sh`.
+  fall-rate; use `python -m sim2sim_benchmark` for statistics.
+- If a run is interrupted and leaves stray windows, run
+  `./tools/ros2_dr_sweep/kill_sim.sh`.
 
 ## Real Robot / Mocap Usage
 
@@ -445,35 +455,39 @@ Leaving `motion_action_command_mode` empty uses the original
   MuJoCo physics plugin for ball/base state publishing, ball damping, and
   reset-state application.
 
-- `tools/bridge_softtouch_mocap_ball.py`
-  Converts mocap ball pose into SoftTouch ball pose/twist topics.
+- `sim2sim_benchmark/`
+  The sim2sim standard benchmark package: simulation engine (`engine.py` —
+  Route/Robot/multi-robot model composition), condition tables
+  (`conditions.py`), queue runner (`runner.py`), CSV/console report
+  (`report.py`), comparison figures (`plot.py`), and the interactive/legacy CLI
+  (`pysim.py` — viewer, `--record`, `--headless`, `--eval`, `--sweep`).  See
+  *Sim2Sim Standard Benchmark* and *Standalone Python Sim*.
 
-- `tools/export_softtouch_dribble_policy.py`
+- `tools/ros2_dr_sweep/`
+  C++ deployment-stack DR robustness sweep (`gen_dr_mjcf.py`,
+  `dr_robustness_sweep.sh`, `fall_monitor.py`, `kill_sim.sh`): generate DR MJCF
+  variants, run each through the ROS 2 sim2sim, judge stayed-up/fell, and clean
+  up spawned processes (see *C++ Deployment-Stack DR Robustness Sweep*).
+
+- `tools/onnx_export/export_softtouch_dribble_policy.py`
   Exports the SoftTouch Stage-3 actor plus Stage-2 decoder into one deployment
   ONNX.
 
-- `tools/export_softtouch_mujoco_reset_state.py`
-  Generates reset-state text files from SoftTouch motion clips.
+- `tools/reset_export/`
+  Reset-state file generators: `export_softtouch_mujoco_reset_state.py` (from
+  SoftTouch motion clips) and `export_standby_reset_state.py` (from the
+  StandbyController default pose).
 
-- `tools/dribble_pysim.py`
-  Standalone single-robot MuJoCo sim that runs the exported ONNX directly
-  (no ROS 2), used to validate the obs/route/PD port against the C++ path.
+- `tools/calibration/`
+  One-off physics-calibration experiments whose conclusions are baked into the
+  MJCF: `ball_roll_test.py` (ball angular damping vs the PhysX roll/decay
+  reference) and `friction_slip_test.py` (contact-solver impratio/cone vs
+  stance creep).
 
-- `tools/dribble_pysim_multi.py`
-  Multi-robot pysim engine (Route/Robot/model composition) with batch DR eval,
-  DR sweep, latency DR, and offscreen video recording (see *Standalone Python
-  Sim*).  The sim2sim benchmark drives it per episode.
-
-- `sim2sim_benchmark/`
-  The sim2sim standard benchmark package: condition tables (`conditions.py`),
-  queue runner (`runner.py`), CSV/console report (`report.py`), and comparison
-  figures (`plot.py`).  See *Sim2Sim Standard Benchmark*.
-
-- `tools/gen_dr_mjcf.py`, `tools/fall_monitor.py`,
-  `tools/dr_robustness_sweep.sh`, `tools/kill_sim.sh`
-  C++ deployment-stack DR robustness sweep: generate DR MJCF variants, run each
-  through the ROS 2 sim2sim, judge stayed-up/fell, and clean up spawned processes
-  (see *C++ Deployment-Stack DR Robustness Sweep*).
+- `tools/ros_utils/`
+  Helpers run alongside experiments: `bridge_softtouch_mocap_ball.py` (mocap
+  ball pose -> SoftTouch topic contract), `base_tf_broadcaster.py`
+  (world->pelvis TF for RViz), `record_mujoco.sh` (x11grab screen capture).
 
 ## Notes
 

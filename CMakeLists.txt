@@ -29,9 +29,9 @@ ament_target_dependencies(${PROJECT_NAME} mujoco_ament)
 
 install(
     PROGRAMS
-    tools/bridge_softtouch_mocap_ball.py
-    tools/export_softtouch_dribble_policy.py
-    tools/export_softtouch_mujoco_reset_state.py
+    tools/ros_utils/bridge_softtouch_mocap_ball.py
+    tools/onnx_export/export_softtouch_dribble_policy.py
+    tools/reset_export/export_softtouch_mujoco_reset_state.py
     DESTINATION lib/${PROJECT_NAME}
 )
 
