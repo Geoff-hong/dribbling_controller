@@ -267,18 +267,23 @@ truncation bias) with one CSV row per episode:
   off the route or >1.2 m from the robot; 10 s budget; metric = SUCCESS RATE.
   `straight_speed` sweeps the commanded speed on a straight route (success =
   kept control for the whole 10 s).  `corner_turn` is the turn-into-corner
-  test: a random straight lead-in (0.5-2 m), ONE arc of 150-180 deg (random) at
+  test: a random straight lead-in (1.5-4 m), ONE arc of 150-180 deg (random) at
   constant kappa, then a straight exit, both turn directions, speed following
   the trained law `min(2, sqrt(0.75/|kappa|))`; success additionally requires
-  finishing the turn.  kappa < 0.4 is not swept (a 150-180 deg arc at the
-  trained speed law cannot finish in 10 s).  `speed_tracking` measures speed
-  CONTROLLABILITY on nominal human-dribble routes (curvature naturally varies
-  the command between ~1.2 and 2.0 m/s): per-step (commanded, actual) speed
-  pairs are recorded — actual = ball velocity projected on the commanded
-  direction, smoothed over 0.5 s — the per-episode Pearson r goes into the CSV
-  (`speed_corr_r`), and the 10 Hz pairs land in `capability_speed_pairs.csv`
-  for the cmd-vs-actual figure (`speed_tracking_compare.png`); no fail-fast,
-  20 s episodes, vmax 1.5 / 2.0.
+  finishing the turn; 12 s budget.  kappa < 0.4 is not swept (the arc alone
+  cannot finish in time at the trained speed law).  `u_turn` is the about-face drill
+  matching the training u_turn mode (run-in 1.5-4 m, ONE 160-200 deg turn,
+  kappa swept 1.5-4.0 = turn radius down to 0.25 m, both directions; same
+  fail-fast/success semantics, its own figure).  `speed_tracking` measures speed
+  CONTROLLABILITY on nominal human-dribble routes with the TRAINING command
+  distribution: the cruise pace is sampled per episode from U(1.2, 2.0) m/s
+  (matching the training-side `ROUTE_CRUISE_RANGE`) and route curvature
+  modulates it further, over route-bank x reps episodes.
+  Per-step (commanded, actual) speed pairs are recorded — actual = ball
+  velocity projected on the commanded direction, smoothed over 0.5 s — the
+  per-episode Pearson r goes into the CSV (`speed_corr_r`), the 10 Hz pairs
+  into `capability_speed_pairs.csv`, and the first 8 episodes dump full-rate
+  traces into `capability_speed_traces.csv`; no fail-fast, 20 s episodes.
 
 All conditions pin latency to the deployment nominal (ball lag 2 steps, action
 lag 10 ms) unless the axis varies it.  Episodes per condition = `--route-bank`
@@ -295,9 +300,15 @@ $PY -m sim2sim_benchmark --robustness --capability \
 # comparison figures: one color per experiment
 $PY -m sim2sim_benchmark.plot --run-dirs eval_result/m80000 eval_result/m90000 \
     --labels iter80000 iter90000 --out-dir eval_result
-# -> eval_result/robustness_compare.png + capability_compare.png
-#    + speed_tracking_compare.png (cmd vs actual speed, pooled Pearson r)
+# -> robustness_compare.png                     (perturbation axes)
+#    speed_compare.png                          (max speed + controllability, pooled r)
+#    route_compare.png                          (corner turn)
+#    uturn_compare.png                          (u-turn about-face drill)
+#    speed_traces_<label>.png per experiment    (ball speed vs cmd target traces)
 ```
+
+Preview what the figures look like (mock data, real plotting code):
+`sim2sim_benchmark/demo/`.
 
 Example — random-DR eval + DR sweep + demo video for the `iter80000` v2 policy
 (the defaults already point at `checkpoints/g1_dribble_s3_human_dr_iter80000` +
