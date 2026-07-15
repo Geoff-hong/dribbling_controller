@@ -53,6 +53,7 @@ def main():
     for title, table in tables:
         episode_rows = []
         speed_pair_rows = []
+        speed_trace_rows = []
         csv_path = os.path.join(args.out_dir, f"{title}.csv")
         try:
             run_condition_table(table, title, episode_rows,
@@ -61,10 +62,11 @@ def main():
                                 route_bank=args.route_bank, reps=args.reps,
                                 episode_s=args.episode_s,
                                 standby_hold_s=args.standby_hold_s,
-                                speed_pair_rows=speed_pair_rows)
+                                speed_pair_rows=speed_pair_rows,
+                                speed_trace_rows=speed_trace_rows)
         finally:
             # partial results survive a crash / Ctrl-C — never lose completed episodes
-            report(episode_rows, csv_path, title, speed_pair_rows)
+            report(episode_rows, csv_path, title, speed_pair_rows, speed_trace_rows)
 
 
 if __name__ == "__main__":
