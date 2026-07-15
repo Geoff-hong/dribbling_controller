@@ -208,7 +208,7 @@ mujoco), not the ROS 2 env.
 - `tools/dribble_pysim.py` — single robot, viewer or `--headless`.  Port
   validation: the robot should stay up ~0.7 m and move forward.
 - `tools/dribble_pysim_multi.py` — many robots at once, with batch eval, DR
-  sweep, latency DR, and offscreen video recording.
+  sweep, the eval matrix, latency DR, and offscreen video recording.
 
 Common `dribble_pysim_multi.py` flags:
 
@@ -219,12 +219,19 @@ Common `dribble_pysim_multi.py` flags:
 --robots N         number of robots simulated in parallel
 --eval             batch random-DR eval (no window), prints stats + CSV
 --sweep            systematic 1-param-at-a-time DR sweep on fixed routes
+--matrix           eval-matrix condition table (see below)
 --latency          replicate the v2 training-time latency DR (see below)
 --seconds S        wall-clock eval duration; --episode-s = per-episode length
 --out-dir DIR      folder for all outputs; --csv / --plot / --record name them
 --record FILE.mp4  offscreen N-up demo video (no window)
 --headless         step without a viewer
 ```
+
+Single-run knobs (also usable with the viewer for eyeballing): `--cmd-mode 0`
+(straight route), `--route-kappa K` (constant-curvature arc, signed; speed
+follows the trained law `min(vmax, sqrt(0.75/|kappa|))`), `--route-vmax`,
+`--push-dv` / `--ball-push-dv` / `--push-interval-s` (velocity kicks),
+`--ball-delay-steps` / `--act-delay-ms` (pin latency), `--jitter` (reset noise).
 
 Domain randomization (`--eval`, matches the training DR):
 
@@ -239,6 +246,38 @@ ball_radius    [0.09, 0.11] m      (NOT randomized in training; +/-10% band)
 envelope.  `--latency` (v2 policies) adds, per episode: a ball-observation lag of
 1-3 policy steps, and an action lag of 0-4 sim sub-steps (0-20 ms at dt=0.005),
 with 30% of episodes forced to zero action lag.
+
+### Eval matrix (`--matrix`)
+
+`--matrix` runs a fixed condition table (queue-based like `--sweep`: every queued
+episode completes, `--seconds` is ignored) and writes one CSV row per episode.
+The default table has one *group* per matrix axis:
+
+- robustness axes (nominal human routes, fixed route bank):
+  `dr_scale` (all DR params jointly, centered training ranges x alpha),
+  `base_push` / `ball_push` (velocity kicks every 5 s, random direction/phase),
+  `obs_latency` (ball-obs lag, steps), `act_latency` (action lag, ms);
+- capability axes (clean nominal env + small reset jitter):
+  `straight_speed` (straight route, sweep commanded vmax) and
+  `arc_kappa` (single constant-curvature arc, both turn directions; commanded
+  speed follows the trained law `min(2, sqrt(0.75/|kappa|))`).
+
+All conditions pin latency to the deployment-nominal (ball lag 2 steps, action
+lag 10 ms) unless the axis varies it.  Per-episode metrics: fell, duration,
+cross-track, route progress (arc length), achieved route speed, commanded speed,
+lost-ball flag (ball >1.5 m from the pelvis for >2 s), mean ball distance.
+Episodes per condition = `--route-bank` (12) x `--matrix-reps` (4).  A custom
+table can be given as `--conditions table.json` (a JSON list of condition dicts).
+
+```bash
+$PY tools/dribble_pysim_multi.py --matrix --onnx "$ONNX" --reset "$RESET" \
+    --robots 32 --out-dir "$OUT" --csv matrix.csv
+
+# matrix figure: columns = axes, rows = metrics, one color per experiment
+$PY tools/plot_eval_matrix.py --csv eval_result/m80000/matrix.csv \
+    eval_result/m90000/matrix.csv --labels iter80000 iter90000 \
+    --out eval_result/matrix_compare.png
+```
 
 Example — batch eval + DR sweep + demo video for the `iter80000` v2 policy:
 
@@ -410,8 +449,13 @@ Leaving `motion_action_command_mode` empty uses the original
   (no ROS 2), used to validate the obs/route/PD port against the C++ path.
 
 - `tools/dribble_pysim_multi.py`
-  Multi-robot version with batch DR eval, DR sweep, latency DR, and offscreen
-  video recording (see *Standalone Python Sim*).
+  Multi-robot version with batch DR eval, DR sweep, the `--matrix` eval-matrix
+  runner, latency DR, and offscreen video recording (see *Standalone Python
+  Sim*).
+
+- `tools/plot_eval_matrix.py`
+  Renders the eval-matrix figure from one or more `--matrix` CSVs (columns =
+  axes, rows = metrics, one color per experiment).
 
 - `tools/gen_dr_mjcf.py`, `tools/fall_monitor.py`,
   `tools/dr_robustness_sweep.sh`, `tools/kill_sim.sh`
