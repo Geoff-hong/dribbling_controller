@@ -58,6 +58,12 @@ def capability_conditions():
     turn with the full 4 m lead-in commands ~8 s). kappa < 0.4 is not swept —
     the arc alone would not finish in time (arc time = (angle/kappa)/speed).
 
+    human_dribble — the nominal task itself as a route test: human-dribble
+    routes with the turn aggressiveness swept via route_human_kappa_cap (weave
+    magnitude and big-turn curvature both scale with the cap; the old policies
+    trained at 0.5, the new command generator uses 1.0); fail-fast control
+    criteria, 20 s episodes, success = kept control the whole episode.
+
     u_turn — the about-face drill matching the training u_turn mode
     (SoftTouch-multiagent: ROUTE_UTURN_CRUISE_M (1.5, 4.0), ROUTE_UTURN_ANGLE_DEG
     (160, 200), ROUTE_UTURN_KAPPA (2.0, 4.0) -> turn radius 0.25-0.5 m):
@@ -90,6 +96,11 @@ def capability_conditions():
                                        arc_angle_deg=[150.0, 180.0],
                                        route_len_m=route_len,
                                        **{**FAIL_FAST, "episode_s": 12.0}))
+    for kappa_cap in (0.3, 0.5, 0.7, 0.9, 1.1):
+        table.append(condition_row(f"human_{kappa_cap:g}", "human_dribble", kappa_cap,
+                                   route_mode="human", human_kappa_cap=kappa_cap,
+                                   route_len_m=50.0,
+                                   **{**FAIL_FAST, "episode_s": 20.0}))
     for kappa in (1.5, 2.0, 2.5, 3.0, 3.5, 4.0):
         route_len = 4.0 + np.deg2rad(200.0) / kappa + 3.0   # max run-in + turn + exit
         for sign, tag in ((1.0, "L"), (-1.0, "R")):

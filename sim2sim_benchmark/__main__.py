@@ -6,10 +6,16 @@ comparison figures afterwards with `python -m sim2sim_benchmark.plot`.
 """
 import argparse
 import os
+import sys
+
+if "--videos" in sys.argv:
+    # the offscreen renderer needs a headless GL backend; must be set before
+    # the first mujoco import (pulled in by the engine below)
+    os.environ.setdefault("MUJOCO_GL", "egl")
 
 from . import engine
 from .conditions import robustness_conditions, capability_conditions, load_conditions_json
-from .runner import run_condition_table
+from .runner import run_condition_table, record_condition_videos
 from .report import report
 
 
@@ -37,6 +43,9 @@ def main():
     ap.add_argument("--standby-hold-s", type=float, default=0.0)
     ap.add_argument("--out-dir", default="eval_result/benchmark",
                     help="output folder for the per-episode CSVs")
+    ap.add_argument("--videos", action="store_true",
+                    help="after each table's statistics, record one mp4 per condition "
+                         "(the rep-0 route, chase camera) under <out-dir>/videos/<test>/")
     args = ap.parse_args()
 
     tables = []
@@ -67,6 +76,11 @@ def main():
         finally:
             # partial results survive a crash / Ctrl-C — never lose completed episodes
             report(episode_rows, csv_path, title, speed_pair_rows, speed_trace_rows)
+        if args.videos:
+            record_condition_videos(table, title, os.path.join(args.out_dir, "videos", title),
+                                    onnx=args.onnx, reset_file=args.reset, seed=args.seed,
+                                    episode_s=args.episode_s,
+                                    standby_hold_s=args.standby_hold_s)
 
 
 if __name__ == "__main__":
