@@ -7,7 +7,11 @@ __pycache__/
 
 # Sim2sim evaluation artifacts (large media / generated)
 eval_result/
+sim2sim_eval_results/
 *.mp4
+
+# Local checkpoint symlink to external SoftTouch dir
+/checkpoints
 
 # DR sweep generated MJCF variants
 mjcf/dr_variants/

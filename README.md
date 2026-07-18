@@ -298,17 +298,31 @@ function of (benchmark seed, condition, rep), so independently-run experiments
 compare on IDENTICAL paired episodes; pick any set of run dirs to merge at
 plot time.  A custom table can be run with `--conditions table.json`.
 
+Benchmark outputs live under `sim2sim_eval_results/`: `runs/<node>/` holds one
+checkpoint's eval artifacts (CSVs, logs, `videos/<test>/`), `compare/` holds
+cross-experiment artifacts (the HTML report, PNG figures).
+
 ```bash
 # from the repo root, SoftTouch python env
 $PY -m sim2sim_benchmark --robustness --capability \
-    --onnx "$ONNX" --reset "$RESET" --robots 32 --out-dir eval_result/m80000
-# -> eval_result/m80000/robustness.csv + capability.csv (+ console summaries)
+    --onnx "$ONNX" --reset "$RESET" --robots 32 --out-dir sim2sim_eval_results/runs/m80000
+# -> runs/m80000/robustness.csv + capability.csv (+ console summaries)
 # add --videos to also record one mp4 per condition (rep-0 route, chase camera)
-# under eval_result/m80000/videos/<test>/ (offscreen; needs MUJOCO_GL=egl-capable box)
+# under runs/m80000/videos/<test>/ (offscreen; needs MUJOCO_GL=egl-capable box)
+# add --shard i/n to split a table across n parallel processes (same out-dir;
+# per-episode seeding keeps FULL-table condition indices, so the union of shards
+# is the same paired episode set; merge: one header + concatenated shard rows)
 
-# comparison figures: one color per experiment
-$PY -m sim2sim_benchmark.plot --run-dirs eval_result/m80000 eval_result/m90000 \
-    --labels iter80000 iter90000 --out-dir eval_result
+# interactive single-file HTML report (tensorboard-style): experiment checkboxes,
+# robustness/capability panels, control traces, per-condition video index
+$PY -m sim2sim_benchmark.html_report \
+    --run-dirs sim2sim_eval_results/runs/m80000 sim2sim_eval_results/runs/m90000 \
+    --labels iter80000 iter90000 --out sim2sim_eval_results/compare/report.html
+
+# static comparison figures (PNG): one color per experiment
+$PY -m sim2sim_benchmark.plot --run-dirs sim2sim_eval_results/runs/m80000 \
+    sim2sim_eval_results/runs/m90000 \
+    --labels iter80000 iter90000 --out-dir sim2sim_eval_results/compare
 # -> robustness_compare.png                     (perturbation axes)
 #    speed_compare.png                          (max speed + controllability, pooled r)
 #    route_compare.png                          (corner turn)
