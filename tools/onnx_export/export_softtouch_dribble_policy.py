@@ -313,18 +313,21 @@ ACTOR_HISTORY_LENGTH_V2 = 10
 class SoftTouchActor(nn.Module):
     def __init__(self, state_dict: dict[str, torch.Tensor]) -> None:
         super().__init__()
-        # Infer the actor input width from the checkpoint so this serves both the
-        # 82-dim single-frame policy and the 830-dim (83x10 history) policy.
-        in_dim = int(state_dict["actor.0.weight"].shape[1])
-        self.net = nn.Sequential(
-            nn.Linear(in_dim, 512),
-            nn.ELU(),
-            nn.Linear(512, 256),
-            nn.ELU(),
-            nn.Linear(256, 128),
-            nn.ELU(),
-            nn.Linear(128, 8),
-        )
+        # Rebuild the exact MLP from the checkpoint weight shapes so one exporter
+        # serves every actor variant (512/256/128->8 dim8, 1024/512/256/128->16
+        # bignet, single-frame or history input widths).
+        weights = {
+            int(key.split(".")[1]): value
+            for key, value in state_dict.items()
+            if key.startswith("actor.") and key.endswith(".weight")
+        }
+        layers: list[nn.Module] = []
+        for i, idx in enumerate(sorted(weights)):
+            out_dim, in_dim = weights[idx].shape
+            if i > 0:
+                layers.append(nn.ELU())
+            layers.append(nn.Linear(int(in_dim), int(out_dim)))
+        self.net = nn.Sequential(*layers)
         self.net.load_state_dict(
             {
                 key.removeprefix("actor."): value
@@ -332,6 +335,7 @@ class SoftTouchActor(nn.Module):
                 if key.startswith("actor.")
             }
         )
+        self.latent_dim = int(self.net[-1].out_features)
 
     def forward(self, obs: torch.Tensor) -> torch.Tensor:
         return self.net(obs)
@@ -418,16 +422,23 @@ class SoftTouchDribbleDeployPolicy(nn.Module):
 
 
 def attach_metadata(onnx_path: Path, checkpoint_path: Path, artifact_path: Path, lab_lambda: float,
-                    obs_layout: str = "v1") -> None:
+                    obs_layout: str = "v1", latent_dim: int = 8) -> None:
     model = onnx.load(str(onnx_path))
     if obs_layout == "v2":
         actor_names = ACTOR_SINGLE_FRAME_NAMES_V2
-        actor_dims = ACTOR_SINGLE_FRAME_DIMS_V2
+        actor_dims = list(ACTOR_SINGLE_FRAME_DIMS_V2)
+        actor_history = ACTOR_HISTORY_LENGTH_V2
+    elif obs_layout == "v2_noballvel":
+        # v2 with the ball_lin_vel_b term removed (noballvel runs): 88-d frame.
+        keep = [i for i, n in enumerate(ACTOR_SINGLE_FRAME_NAMES_V2) if n != "ball_lin_vel_b"]
+        actor_names = [ACTOR_SINGLE_FRAME_NAMES_V2[i] for i in keep]
+        actor_dims = [ACTOR_SINGLE_FRAME_DIMS_V2[i] for i in keep]
         actor_history = ACTOR_HISTORY_LENGTH_V2
     else:
         actor_names = ACTOR_OBSERVATION_NAMES
-        actor_dims = DEPLOY_OBSERVATION_DIMS[: len(ACTOR_OBSERVATION_NAMES)]
+        actor_dims = list(DEPLOY_OBSERVATION_DIMS[: len(ACTOR_OBSERVATION_NAMES)])
         actor_history = 1
+    actor_dims[actor_names.index("last_latent_action")] = latent_dim
     obs_names = actor_names + DECODER_OBSERVATION_NAMES
     obs_dims = list(actor_dims) + DECODER_OBSERVATION_DIMS
     history_lengths = [actor_history] * len(actor_names) + [1] * len(DECODER_OBSERVATION_NAMES)
@@ -449,7 +460,7 @@ def attach_metadata(onnx_path: Path, checkpoint_path: Path, artifact_path: Path,
         "observation_history_lengths": history_lengths,
         "actor_observation_dim": actor_obs_dim,
         "decoder_state_dim": 90,
-        "latent_dim": 8,
+        "latent_dim": latent_dim,
         "action_dim": 29,
         "obs_normalizer_eps": 1.0e-2,
         "onnx_input_layout": (
@@ -499,9 +510,10 @@ def main() -> None:
     )
     parser.add_argument("--lab-lambda", type=float, default=2.5)
     parser.add_argument("--opset", type=int, default=11)
-    parser.add_argument("--obs-layout", choices=["v1", "v2"], default="v1",
+    parser.add_argument("--obs-layout", choices=["v1", "v2", "v2_noballvel"], default="v1",
                         help="v1 = 82-dim single-frame actor; v2 = 83-dim single frame "
-                             "(+ball_radius) x 10-frame history = 830-dim actor (2026-06-21 run)")
+                             "(+ball_radius) x 10-frame history = 830-dim actor (2026-06-21 run); "
+                             "v2_noballvel = v2 without ball_lin_vel_b (80-dim frame + latent)")
     args = parser.parse_args()
 
     checkpoint_path = Path(os.path.expanduser(args.checkpoint)).resolve()
@@ -513,6 +525,11 @@ def main() -> None:
     artifact = torch.load(artifact_path, map_location="cpu", weights_only=False)
     policy = SoftTouchDribbleDeployPolicy(checkpoint, artifact, args.lab_lambda)
     policy.eval()
+
+    latent_dim = policy.actor.latent_dim
+    artifact_latent = int(artifact["architecture"]["latent_dim"])
+    if latent_dim != artifact_latent:
+        raise RuntimeError(f"actor latent dim {latent_dim} != artifact latent dim {artifact_latent}")
 
     obs_dim = policy.actor_obs_dim + policy.decoder_state_dim
     dummy_obs = torch.zeros(1, obs_dim, dtype=torch.float32)
@@ -531,7 +548,8 @@ def main() -> None:
         output_names=["actions", "latent_action", "latent_z", "prior_mu", "prior_logvar"],
         dynamic_axes={},
     )
-    attach_metadata(output_path, checkpoint_path, artifact_path, args.lab_lambda, args.obs_layout)
+    attach_metadata(output_path, checkpoint_path, artifact_path, args.lab_lambda, args.obs_layout,
+                    latent_dim=latent_dim)
     onnx.checker.check_model(str(output_path))
     print(f"[export] wrote {output_path}")
 
