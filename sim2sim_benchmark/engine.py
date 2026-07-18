@@ -42,6 +42,9 @@ ROUTE_CFG = dict(
     routeMinClearanceM=1.8, routeClearanceWindowM=5.0,
     routeKvScale=0.75, routeVmax=2.0, routeLazyExtend=True, routeInitSegments=9,
     routeExtendChunk=1, routeExtendAheadMarginSegments=10,
+    # optional training-style velocity onset (vfix planner): accel-limited speed
+    # profile from routeStartSpeed along arc length. None -> legacy step commands.
+    routeStartSpeed=None, routeAccelLimit=None,
 )
 CMD_MODE = 4
 JOINT_LIMIT_FACTOR = 0.9
@@ -153,7 +156,8 @@ DEFAULT_CONDITION = dict(
     offroute_fail_m=None, ball_far_fail_m=None, episode_s=None,
     push_dv=0.0, ball_push_dv=0.0, push_interval_s=5.0,
     ball_obs_delay_steps=None, action_delay_ms=None, reset_jitter=False,
-    dr=None, dr_scale=None, record_speed_pairs=False)
+    dr=None, dr_scale=None, record_speed_pairs=False,
+    route_start_speed=None, route_accel_limit=None)
 
 
 def make_condition(**overrides):
@@ -191,6 +195,7 @@ class Route:
         self.arc_segments = None  #                  None -> infinite arc (full circles)
         self.arc_kappa_eff = None  # back-solved effective curvature of a finite arc
         self.arc_end_s = None     # arc-exit arc length (lead + arc), for completion checks
+        self._ramp_v = None       # accel-limited speed carried across lazy extensions
         self._alloc()
         self.filled = 0; self.end_heading = 0.0; self.last_seg = -1
         self.h_sign = 1.0; self.big_remain = 0.0; self.big_sign = 1.0
@@ -335,11 +340,20 @@ class Route:
         else:
             kappa = np.zeros(num)   # mode 0: straight line, speed = constant vmax
         heading = theta; point = np.asarray(org, float).copy()
+        if init:
+            # ramp state restarts on every fresh build (incl. clearance re-draws);
+            # lazy extension continues from the stored end-of-route speed
+            self._ramp_v = self.cfg.get("routeStartSpeed")
         for i in range(num):
             point = point + np.array([np.cos(heading), np.sin(heading)]) * ds
             self.points[seg_off + 1 + i] = point
             kabs = max(abs(kappa[i]), 1e-3)
-            self.speed[seg_off + i] = min(self.cfg["routeVmax"], np.sqrt(self.cfg["routeKvScale"] / kabs))
+            v = min(self.cfg["routeVmax"], np.sqrt(self.cfg["routeKvScale"] / kabs))
+            if self.cfg.get("routeAccelLimit"):
+                v0 = v if self._ramp_v is None else self._ramp_v
+                v = min(v, np.sqrt(v0 * v0 + 2.0 * self.cfg["routeAccelLimit"] * ds))
+                self._ramp_v = v
+            self.speed[seg_off + i] = v
             heading += kappa[i] * ds
         self.end_heading = heading; self.filled = seg_off + num
 
@@ -388,7 +402,13 @@ def build_world(n_robots, spacing, onnx_path, reset_path, seed):
     model, grid = compose(n_robots, spacing)
     data = mujoco.MjData(model)
     print(f"[multi] policy: {onnx_path}")
-    session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
+    # tiny batch-1 MLPs: ORT's default core-count threadpool only spin-waits
+    # (inflating CPU% ~10x for zero speedup) -> pin it small
+    so = ort.SessionOptions()
+    so.intra_op_num_threads = 2
+    so.inter_op_num_threads = 1
+    session = ort.InferenceSession(onnx_path, sess_options=so,
+                                   providers=["CPUExecutionProvider"])
     meta = session.get_modelmeta().custom_metadata_map
     reset_state = parse_reset(reset_path)
     robots = [Robot(model, k, grid[k], session, meta, reset_state, seed)
@@ -522,7 +542,8 @@ class Robot:
             (self.ball_pairs if "ball" in nm else self.foot_pairs).append(pid)
         self.rs = rs
         self.route = Route(ROUTE_CFG, seed * 100 + k)
-        self.prev_latent = np.zeros(8, np.float32); self.prev_decoded = np.zeros(29, np.float32)
+        self.prev_latent = np.zeros(int(meta.get("latent_dim", "8")), np.float32)
+        self.prev_decoded = np.zeros(29, np.float32)
         self.target = np.zeros(29); self.ep_start = 0.0; self.dr = {}
         self.ct_sum = 0.0; self.ct_count = 0   # cross-track (ball deviation from route) accumulators
         self.default_condition = make_condition()  # main() fills from the single-run CLI knobs
@@ -592,6 +613,10 @@ class Robot:
         route_cfg["routeHumanKappaCap"] = (ROUTE_CFG["routeHumanKappaCap"]
                                            if condition["human_kappa_cap"] is None
                                            else float(condition["human_kappa_cap"]))
+        for cond_key, cfg_key in (("route_start_speed", "routeStartSpeed"),
+                                  ("route_accel_limit", "routeAccelLimit")):
+            route_cfg[cfg_key] = (None if condition[cond_key] is None
+                                  else float(condition[cond_key]))
         route_cfg["routeLength"] = (ROUTE_CFG["routeLength"] if condition["route_len_m"] is None
                                     else float(condition["route_len_m"]))
         self.route.const_kappa = condition["arc_kappa"]

@@ -52,9 +52,11 @@ def run_condition_table(table, title, episode_rows, *, onnx, reset_file,
             # phases/directions — on top of the already route-seeded geometry) is
             # a pure function of (benchmark seed, condition, rep): experiments run
             # independently yet compare on IDENTICAL, paired episodes, regardless
-            # of robot count or queue timing.
-            rb.rng = np.random.Generator(np.random.PCG64(
-                np.random.SeedSequence((seed, index, episode))))
+            # of robot count or queue timing. _seed_index (set by --shard) keeps
+            # the FULL-table condition index, so sharded runs stay bit-identical
+            # to unsharded ones.
+            rb.rng = np.random.Generator(np.random.PCG64(np.random.SeedSequence(
+                (seed, table[index].get("_seed_index", index), episode))))
             rb.reset(model, data, t, route_seed=route_seed, condition=table[index])
         else:
             rb.assignment = None
@@ -130,8 +132,8 @@ def record_condition_videos(table, title, video_dir, *, onnx, reset_file, seed=0
     for index, condition in enumerate(table):
         # same per-episode stream as the statistics run -> the video is an exact
         # replay of the rep-0 episode in the CSV
-        rb.rng = np.random.Generator(np.random.PCG64(
-            np.random.SeedSequence((seed, index, 0))))
+        rb.rng = np.random.Generator(np.random.PCG64(np.random.SeedSequence(
+            (seed, condition.get("_seed_index", index), 0))))
         rb.reset(model, data, data.time, route_seed=0, condition=condition)
         mujoco.mj_forward(model, data)
         video_path = os.path.join(video_dir, f"{condition['name']}.mp4")

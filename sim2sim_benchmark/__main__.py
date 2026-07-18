@@ -46,7 +46,23 @@ def main():
     ap.add_argument("--videos", action="store_true",
                     help="after each table's statistics, record one mp4 per condition "
                          "(the rep-0 route, chase camera) under <out-dir>/videos/<test>/")
+    ap.add_argument("--shard", default="",
+                    help="'i/n': run only every n-th condition starting at i (0-based) — "
+                         "launch n parallel processes with the same out-dir to split a "
+                         "table across cores. Per-episode seeding keeps the FULL-table "
+                         "condition index, so the union of shards is bit-identical to an "
+                         "unsharded run; each shard writes <test>.shardI.csv (merge: keep "
+                         "one header, concatenate rows into <test>.csv)")
     args = ap.parse_args()
+
+    shard_i, shard_n = 0, 1
+    if args.shard:
+        try:
+            shard_i, shard_n = (int(x) for x in args.shard.split("/"))
+        except ValueError:
+            ap.error("--shard must be 'i/n'")
+        if not 0 <= shard_i < shard_n:
+            ap.error("--shard must be 'i/n' with 0 <= i < n")
 
     tables = []
     if args.conditions:
@@ -60,10 +76,12 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     for title, table in tables:
+        table = [{**c, "_seed_index": j} for j, c in enumerate(table)][shard_i::shard_n]
         episode_rows = []
         speed_pair_rows = []
         speed_trace_rows = []
-        csv_path = os.path.join(args.out_dir, f"{title}.csv")
+        suffix = f".shard{shard_i}" if args.shard else ""
+        csv_path = os.path.join(args.out_dir, f"{title}{suffix}.csv")
         try:
             run_condition_table(table, title, episode_rows,
                                 onnx=args.onnx, reset_file=args.reset,
