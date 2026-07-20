@@ -15,3 +15,9 @@ sim2sim_eval_results/
 
 # DR sweep generated MJCF variants
 mjcf/dr_variants/
+
+# Local scratch data (report smoke tests, browser profiles)
+data/
+
+# Local checkpoint scratch dir
+temp_checkpoints/

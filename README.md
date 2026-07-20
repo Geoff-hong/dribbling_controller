@@ -312,6 +312,10 @@ $PY -m sim2sim_benchmark --robustness --capability \
 # add --shard i/n to split a table across n parallel processes (same out-dir;
 # per-episode seeding keeps FULL-table condition indices, so the union of shards
 # is the same paired episode set; merge: one header + concatenated shard rows)
+# each finished episode is flushed to the CSV immediately, and the CSV is the
+# progress record: re-running with the same out-dir (and shard layout) RESUMES,
+# skipping episodes already recorded — a killed run loses nothing; --fresh
+# ignores the existing CSVs and starts over
 
 # interactive single-file HTML report (tensorboard-style): experiment checkboxes,
 # robustness/capability panels, control traces, per-condition video index

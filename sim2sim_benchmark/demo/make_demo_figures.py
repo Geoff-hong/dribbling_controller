@@ -108,7 +108,7 @@ def write_fake_run(run_dir, cliff_shift, tracking_gain, tracking_noise, make_tra
                     actual = tracking_gain * cmds + rng.normal(0, tracking_noise, 190)
                     corr = (float(np.corrcoef(cmds, actual)[0, 1])
                             if cmds.std() > 1e-2 else float("nan"))
-                    pair_rows.extend((condition["axis"], float(c), float(a))
+                    pair_rows.extend((condition["axis"], rep, float(c), float(a))
                                      for c, a in zip(cmds[::5], actual[::5]))
                     if make_traces and rep < 8:
                         trace = fake_control_trace(rng, vmax, tracking_gain, tracking_noise)

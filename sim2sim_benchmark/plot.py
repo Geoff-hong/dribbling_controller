@@ -90,9 +90,14 @@ def _draw_route_examples(panel, routes, title):
 
 SCHEMATIC_COLORS = ["#9dc3e6", "#4f81bd", "#1f3864"]
 
-ROBUSTNESS_GROUPS = ["dr_scale", "base_push", "ball_push", "obs_latency", "act_latency"]
+ROBUSTNESS_GROUPS = ["ball_mass", "ball_radius", "foot_friction", "ball_friction",
+                     "base_push", "ball_push", "obs_latency", "act_latency"]
 GROUP_LABEL = {
-    "dr_scale": "DR scale alpha",
+    "ball_mass": "ball mass (kg)",
+    "ball_radius": "ball radius (m)",
+    "foot_friction": "foot friction",
+    "ball_friction": "ball friction",
+    "dr_scale": "DR scale alpha",   # legacy CSVs only
     "base_push": "base push dv (m/s)",
     "ball_push": "ball push dv (m/s)",
     "obs_latency": "ball-obs latency (steps)",
@@ -581,13 +586,23 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
 
     # robustness figure (robustness.csv per run dir)
-    experiments, kept_labels = [], []
+    experiments, kept_labels, fingerprints = [], [], {}
     for run_dir, label in zip(args.run_dirs, labels):
         csv_path = os.path.join(run_dir, "robustness.csv")
         if os.path.exists(csv_path):
             experiments.append(load_rows(csv_path)); kept_labels.append(label)
+            fp_path = os.path.join(run_dir, "robustness.fingerprint.json")
+            if os.path.exists(fp_path):
+                import json
+                fingerprints[label] = json.load(open(fp_path))["fingerprint"]
         else:
             print(f"[plot] {csv_path} missing -> skipping {label} in the robustness figure")
+    if len(set(fingerprints.values())) > 1:
+        print("[plot] WARNING: run dirs were recorded with DIFFERENT robustness condition "
+              "tables (fingerprints differ) — curves share axes only where values overlap "
+              "and are NOT route-paired; re-run with a common --dr-from for a fair comparison:")
+        for label, fp in fingerprints.items():
+            print(f"[plot]   {label}: {fp[:12]}")
     if experiments:
         robustness_figure(experiments, kept_labels,
                           os.path.join(args.out_dir, "robustness_compare.png"))

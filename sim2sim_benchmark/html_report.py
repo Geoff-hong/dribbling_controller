@@ -5,45 +5,90 @@
       --labels iter80000 iter90000 \
       --out sim2sim_eval_results/compare/report.html
 
+  python -m sim2sim_benchmark.html_report --serve      # live mode: refresh (F5)
+      # re-discovers runs and re-reads the CSVs on every page load
+
 One HTML file, no external assets: experiment checkboxes in the sidebar select
-which runs are drawn; sections mirror the PNG figures (robustness axes, corner
-turn, human dribble, u-turn, speed, control traces) plus a per-condition video
-index (links resolve relative to the report location, so keep the report under
+which runs are drawn. A topline summary table leads; sections mirror the PNG
+figures (robustness axes, corner turn, human dribble, u-turn, speed, control
+traces) with hover tooltips, +/-1 SE bands on rate metrics, failure-mode
+breakdowns, and a per-condition video index with a side-by-side lightbox
+(links resolve relative to the report location, so keep the report under
 sim2sim_eval_results/compare/ with runs under sim2sim_eval_results/runs/).
-All aggregation happens here in Python; the embedded JS only toggles and draws.
+All aggregation happens here in Python; the embedded JS only toggles and
+draws. Light/dark theme; colorblind-validated palette (grays are reserved for
+reference lines).
 """
 import argparse
 import csv
+import datetime
+import html as html_lib
 import json
 import os
+import re
+import shlex
+import sys
 
 import numpy as np
 
-PALETTE = ["#d62728", "#1f77b4", "#555555", "#2ca02c", "#9467bd", "#ff7f0e",
-           "#8c564b", "#e377c2"]
+# CVD-validated 8-slot categorical order (adjacent-pair simulated dE >= 8 in
+# both modes); slot index i is stored per run, hex lives in the CSS as --sI.
+SERIES_LIGHT = ["#2a78d6", "#008300", "#e87ba4", "#eda100",
+                "#1baf7a", "#eb6834", "#4a3aa7", "#e34948"]
+SERIES_DARK = ["#3987e5", "#008300", "#d55181", "#c98500",
+               "#199e70", "#d95926", "#9085e9", "#e66767"]
 
-ROB_METRICS = [("survival", "survival rate (%)"), ("possession", "ball possession (%)"),
-               ("speed_ratio", "speed ratio (achieved/cmd)"), ("cross_track", "cross-track (m, survivors)")]
-ROB_GROUPS = [("dr_scale", "DR scale alpha"), ("base_push", "base push dv (m/s)"),
-              ("ball_push", "ball push dv (m/s)"), ("obs_latency", "ball-obs latency (steps)"),
-              ("act_latency", "action latency (ms)")]
-CAP_METRICS = [("success", "success rate (%)"), ("survival", "survival rate (%)"),
-               ("cross_track", "cross-track (m, survivors)")]
+ROB_METRICS = [("survival", "survival rate (%)", "up"),
+               ("possession", "ball possession (%)", "up"),
+               ("speed_ratio", "speed ratio (achieved/cmd)", "one"),
+               ("cross_track", "cross-track (m, survivors)", "down"),
+               ("mean_duration", "mean episode duration (s)", "up")]
+ROB_GROUPS = [("ball_mass", "ball mass (kg)"), ("ball_radius", "ball radius (m)"),
+              ("foot_friction", "foot friction"), ("ball_friction", "ball friction"),
+              ("base_push", "base push dv (m/s)"),
+              ("ball_push", "ball push dv (m/s)"),
+              ("obs_latency", "ball-obs latency (steps @ 50 Hz)"),
+              ("act_latency", "action latency (ms)"),
+              ("dr_scale", "DR scale alpha")]   # legacy CSVs only
+CAP_METRICS = [("success", "success rate (%)", "up"),
+               ("survival", "survival rate (%)", "up"),
+               ("possession", "ball possession (%)", "up"),
+               ("cross_track", "cross-track (m, survivors)", "down")]
+
+
+def _f(value):
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if np.isfinite(v) else None
 
 
 def read_rows(path):
     if not os.path.exists(path):
         return []
-    out = []
-    for r in csv.DictReader(open(path)):
-        out.append(dict(
-            condition=r["condition"], group=r["group"], axis=float(r["axis_value"]),
-            fell=float(r["fell"]), ball_lost=float(r["ball_lost"]),
-            success=float(r["success"]) if r["success"] else None,
-            ach=float(r["ach_speed_mps"]) if r["ach_speed_mps"] else None,
-            cmd=float(r["cmd_speed_mps"]) if r["cmd_speed_mps"] else None,
-            ct=float(r["cross_track_m"]) if r["cross_track_m"] else None,
-            r=float(r["speed_corr_r"]) if r["speed_corr_r"] else None))
+    out, bad = [], 0
+    with open(path, newline="") as f:
+        reader = csv.DictReader(f)
+        tail_col = reader.fieldnames[-1] if reader.fieldnames else None
+        for r in reader:
+            if tail_col is not None and r.get(tail_col) is None:
+                bad += 1                     # truncated line from a hard-killed run
+                continue
+            fell, lost, axis = _f(r.get("fell")), _f(r.get("ball_lost")), _f(r.get("axis_value"))
+            if None in (fell, lost, axis) or not r.get("condition"):
+                bad += 1
+                continue
+            out.append(dict(
+                condition=r["condition"], group=r.get("group", ""), axis=axis,
+                fell=fell, ball_lost=lost,
+                success=_f(r.get("success")),
+                ach=_f(r.get("ach_speed_mps")), cmd=_f(r.get("cmd_speed_mps")),
+                ct=_f(r.get("cross_track_m")), r=_f(r.get("speed_corr_r")),
+                duration=_f(r.get("duration_s")),
+                reason=(r.get("fail_reason") or "").strip()))
+    if bad:
+        print(f"[html_report] {path}: skipped {bad} malformed rows")
     return out
 
 
@@ -53,22 +98,35 @@ def finite(values):
 
 def condition_stats(rows):
     """rows of one condition -> point stats used by every panel."""
-    surv = 100.0 * (1.0 - np.mean([r["fell"] for r in rows]))
-    poss = 100.0 * (1.0 - np.mean([r["ball_lost"] for r in rows]))
+    n = len(rows)
+    surv_p = 1.0 - float(np.mean([r["fell"] for r in rows]))
+    poss_p = 1.0 - float(np.mean([r["ball_lost"] for r in rows]))
+
+    def rate_se(p, m):
+        return round(100.0 * (max(p * (1.0 - p), 0.0) / m) ** 0.5, 2) if m else None
+
     succ_vals = finite([r["success"] for r in rows])
-    succ = 100.0 * np.mean(succ_vals) if succ_vals else None
+    succ_p = float(np.mean(succ_vals)) if succ_vals else None
     ratios = [r["ach"] / r["cmd"] for r in rows
-              if r["ach"] is not None and r["cmd"] not in (None, 0) and r["cmd"] > 0.05]
-    ratio = float(np.mean(ratios)) if ratios else None
+              if r["ach"] is not None and r["cmd"] is not None and r["cmd"] > 0.05]
     ct_vals = finite([r["ct"] for r in rows if r["fell"] < 0.5])
-    ct = float(np.mean(ct_vals)) if ct_vals else None
     ach_vals = finite([r["ach"] for r in rows])
-    ach = float(np.mean(ach_vals)) if ach_vals else None
-    return dict(survival=round(surv, 2), possession=round(poss, 2),
-                success=None if succ is None else round(succ, 2),
-                speed_ratio=None if ratio is None else round(ratio, 4),
-                cross_track=None if ct is None else round(ct, 4),
-                ach_speed=None if ach is None else round(ach, 4))
+    dur_vals = finite([r["duration"] for r in rows])
+    reasons = {}
+    for r in rows:
+        key = r["reason"] or "completed"
+        reasons[key] = reasons.get(key, 0) + 1
+    return dict(
+        n=n,
+        survival=round(100.0 * surv_p, 2), survival_se=rate_se(surv_p, n),
+        possession=round(100.0 * poss_p, 2), possession_se=rate_se(poss_p, n),
+        success=None if succ_p is None else round(100.0 * succ_p, 2),
+        success_se=None if succ_p is None else rate_se(succ_p, len(succ_vals)),
+        speed_ratio=round(float(np.mean(ratios)), 4) if ratios else None,
+        cross_track=round(float(np.mean(ct_vals)), 4) if ct_vals else None,
+        ach_speed=round(float(np.mean(ach_vals)), 4) if ach_vals else None,
+        mean_duration=round(float(np.mean(dur_vals)), 2) if dur_vals else None,
+        reasons=reasons)
 
 
 def group_series(rows, group, split_sign=False):
@@ -87,45 +145,71 @@ def group_series(rows, group, split_sign=False):
 
 
 def binned_pairs(path, nbins=16):
-    """capability_speed_pairs.csv -> binned cmd-vs-actual curve + pooled r."""
+    """capability_speed_pairs.csv -> binned cmd-vs-actual curve (mean +/- sd
+    per bin) plus pooled r, least-squares slope, and pair count."""
     if not os.path.exists(path):
         return None
     cmd, act = [], []
     for r in csv.DictReader(open(path)):
-        cmd.append(float(r["cmd_speed_mps"])); act.append(float(r["ball_speed_mps"]))
+        c, a = _f(r.get("cmd_speed_mps")), _f(r.get("ball_speed_mps"))
+        if c is not None and a is not None:
+            cmd.append(c); act.append(a)
     cmd = np.array(cmd); act = np.array(act)
     if len(cmd) < 100 or cmd.std() < 1e-3:
         return None
-    r = float(np.corrcoef(cmd, act)[0, 1])
+    r = float(np.corrcoef(cmd, act)[0, 1]) if act.std() > 1e-9 else float("nan")
+    slope = float(np.polyfit(cmd, act, 1)[0])
     edges = np.linspace(cmd.min(), cmd.max(), nbins + 1)
     pts = []
     for i in range(nbins):
         m = (cmd >= edges[i]) & (cmd < edges[i + 1] if i < nbins - 1 else cmd <= edges[i + 1])
         if m.sum() >= 20:
             pts.append(dict(x=round(float(0.5 * (edges[i] + edges[i + 1])), 4),
-                            y=round(float(act[m].mean()), 4)))
-    return dict(r=round(r, 3), points=pts)
+                            y=round(float(act[m].mean()), 4),
+                            sd=round(float(act[m].std()), 4)))
+    return dict(r=round(r, 3) if np.isfinite(r) else None,
+                slope=round(slope, 4), n=int(len(cmd)), points=pts)
 
 
 def traces(path, smooth_steps=25, keep_every=5):
     """capability_speed_traces.csv -> per-episode downsampled cmd + smoothed
-    along-command speed (50 Hz -> 10 Hz after a 0.5 s moving average)."""
+    along-command speed (50 Hz -> 10 Hz after a 0.5 s moving average). Only
+    the first axis_value present is kept (one traced condition per run)."""
     if not os.path.exists(path):
         return None
-    eps = {}
+    rows = []
     for r in csv.DictReader(open(path)):
-        eps.setdefault(int(r["episode"]), []).append(
-            (int(r["step"]), float(r["cmd_speed_mps"]), float(r["ball_speed_along_cmd_mps"])))
+        try:
+            rows.append((r["axis_value"], int(r["episode"]), int(r["step"]),
+                         float(r["cmd_speed_mps"]), float(r["ball_speed_along_cmd_mps"])))
+        except (KeyError, ValueError, TypeError):
+            continue
+    if not rows:
+        return None
+    axes = sorted({r[0] for r in rows})
+    if len(axes) > 1:
+        print(f"[html_report] {path}: {len(axes)} axis values, keeping {rows[0][0]}")
+    first_axis = rows[0][0]
+    eps = {}
+    for axis, ep, step, cmd, along in rows:
+        if axis == first_axis:
+            eps.setdefault(ep, []).append((step, cmd, along))
+
+    def clean(values):
+        return [round(float(v), 3) if np.isfinite(v) else None for v in values]
+
     out = {}
     for ep, items in sorted(eps.items()):
         items.sort()
         cmd = np.array([i[1] for i in items]); along = np.array([i[2] for i in items])
-        k = np.ones(smooth_steps) / smooth_steps
-        along_s = np.convolve(along, k, mode="same")
+        w = max(1, min(smooth_steps, len(along)))
+        k = np.ones(w)
+        along_s = np.convolve(along, k, mode="same") / np.convolve(np.ones(len(along)), k, mode="same")
         out[str(ep)] = dict(
             dt=0.02 * keep_every,
-            cmd=[round(float(v), 3) for v in cmd[::keep_every]],
-            act=[round(float(v), 3) for v in along_s[::keep_every]])
+            mean_cmd=round(float(np.mean(finite(cmd))), 3) if finite(cmd) else None,
+            mean_act=round(float(np.mean(finite(along_s))), 3) if finite(along_s) else None,
+            cmd=clean(cmd[::keep_every]), act=clean(along_s[::keep_every]))
     return out
 
 
@@ -145,68 +229,328 @@ def video_index(run_dir, report_dir):
     return out
 
 
-def collect_run(run_dir, label, color, report_dir):
+def toplines(straight, corner, human, uturn, cap_rows, pairs):
+    """Scalar headline numbers for the summary table."""
+    def passing(series, threshold=50.0):
+        best = None
+        for p in series:                     # sorted by x; stop at the first failure
+            if p.get("success") is None:
+                continue
+            if p["success"] < threshold:
+                break
+            best = p["x"]
+        return best
+
+    tr = finite([r["r"] for r in cap_rows if r["group"] == "speed_tracking"])
+    return dict(
+        max_speed=passing(straight),
+        corner_L=passing(corner["L"]), corner_R=passing(corner["R"]),
+        uturn_L=passing(uturn["L"]), uturn_R=passing(uturn["R"]),
+        human_cap=passing(human),
+        tracking_r=round(float(np.mean(tr)), 3) if tr else None)
+
+
+def collect_run(run_dir, label, index, report_dir):
     rob = read_rows(os.path.join(run_dir, "robustness.csv"))
     cap = read_rows(os.path.join(run_dir, "capability.csv"))
     nominal = [r for r in rob if r["group"] == "baseline"]
-    data = dict(
-        label=label, color=color,
+    corner = group_series(cap, "corner_turn", split_sign=True)
+    human = group_series(cap, "human_dribble")
+    uturn = group_series(cap, "u_turn", split_sign=True)
+    straight = group_series(cap, "straight_speed")
+    csv_paths = [os.path.join(run_dir, f) for f in
+                 ("robustness.csv", "capability.csv",
+                  "capability_speed_pairs.csv", "capability_speed_traces.csv")]
+    mtimes = [os.path.getmtime(p) for p in csv_paths if os.path.exists(p)]
+    pairs = binned_pairs(os.path.join(run_dir, "capability_speed_pairs.csv"))
+    return dict(
+        label=label, color=index % 8,
+        info=dict(dir=os.path.relpath(run_dir), n_rob=len(rob), n_cap=len(cap),
+                  data_time=datetime.datetime.fromtimestamp(max(mtimes)).strftime("%Y-%m-%d %H:%M")
+                  if mtimes else None),
         nominal=condition_stats(nominal) if nominal else None,
         robustness={g: group_series(rob, g) for g, _ in ROB_GROUPS},
-        straight=group_series(cap, "straight_speed"),
-        corner=group_series(cap, "corner_turn", split_sign=True),
-        human=group_series(cap, "human_dribble"),
-        uturn=group_series(cap, "u_turn", split_sign=True),
+        straight=straight, corner=corner, human=human, uturn=uturn,
         tracking=group_series(cap, "speed_tracking"),
-        pairs=binned_pairs(os.path.join(run_dir, "capability_speed_pairs.csv")),
+        pairs=pairs,
         traces=traces(os.path.join(run_dir, "capability_speed_traces.csv")),
-        videos=video_index(run_dir, report_dir))
-    return data
+        videos=video_index(run_dir, report_dir),
+        top=toplines(straight, corner, human, uturn, cap, pairs))
 
 
-HTML_TEMPLATE = """<!DOCTYPE html>
+HTML_TEMPLATE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>sim2sim benchmark report</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16" rx="4" fill="%232a78d6"/><circle cx="8" cy="8" r="3.2" fill="white"/></svg>'>
 <style>
-  :root { --bg:#fafafa; --panel:#ffffff; --border:#dddddd; --text:#222222; --muted:#777777; }
+  :root {
+    color-scheme: light;
+    --page:#f6f6f2; --panel:#fdfdfc;
+    --border:rgba(20,18,12,.09); --border2:rgba(20,18,12,.18);
+    --rowhover:rgba(20,18,12,.03);
+    --text:#151412; --text2:#4e4c47; --muted:#6f6d66;
+    --grid:#e8e7e1; --axis:#c6c5bd;
+    --accent:#2159a8; --wash:rgba(42,120,214,.10);
+    --dgood:#0a6b0a; --dbad:#c22f2f;
+    --shadow:0 1px 2px rgba(24,22,16,.05), 0 3px 12px rgba(24,22,16,.05);
+    --shadow2:0 2px 6px rgba(24,22,16,.08), 0 10px 26px rgba(24,22,16,.09);
+    --s0:#2a78d6; --s1:#008300; --s2:#e87ba4; --s3:#eda100;
+    --s4:#1baf7a; --s5:#eb6834; --s6:#4a3aa7; --s7:#e34948;
+    --rz-fell:#d03b3b; --rz-off:#ec835a; --rz-far:#fab219; --rz-done:#d9d8d1;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --page:#111110; --panel:#1c1c1a;
+      --border:rgba(255,255,255,.09); --border2:rgba(255,255,255,.20);
+      --rowhover:rgba(255,255,255,.045);
+      --text:#f5f4f0; --text2:#c6c5bc; --muted:#98968d;
+      --grid:#2a2a28; --axis:#3d3d39;
+      --accent:#7fb0e8; --wash:rgba(107,156,224,.14);
+      --dgood:#0ca30c; --dbad:#e05d5d;
+      --shadow:0 1px 2px rgba(0,0,0,.4);
+      --shadow2:0 4px 16px rgba(0,0,0,.5);
+      --s0:#3987e5; --s1:#008300; --s2:#d55181; --s3:#c98500;
+      --s4:#199e70; --s5:#d95926; --s6:#9085e9; --s7:#e66767;
+      --rz-done:#3a3a37;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:#111110; --panel:#1c1c1a;
+    --border:rgba(255,255,255,.09); --border2:rgba(255,255,255,.20);
+    --rowhover:rgba(255,255,255,.045);
+    --text:#f5f4f0; --text2:#c6c5bc; --muted:#98968d;
+    --grid:#2a2a28; --axis:#3d3d39;
+    --accent:#7fb0e8; --wash:rgba(107,156,224,.14);
+    --dgood:#0ca30c; --dbad:#e05d5d;
+    --shadow:0 1px 2px rgba(0,0,0,.4);
+    --shadow2:0 4px 16px rgba(0,0,0,.5);
+    --s0:#3987e5; --s1:#008300; --s2:#d55181; --s3:#c98500;
+    --s4:#199e70; --s5:#d95926; --s6:#9085e9; --s7:#e66767;
+    --rz-done:#3a3a37;
+  }
   * { box-sizing: border-box; }
-  body { margin:0; font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
-         background:var(--bg); color:var(--text); }
+  html { scroll-behavior: smooth; scrollbar-width:thin; scrollbar-color:var(--axis) transparent; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         font-size:14px; background:var(--page); color:var(--text);
+         -webkit-font-smoothing:antialiased; }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:4px; }
   #layout { display:flex; min-height:100vh; }
-  #sidebar { width:250px; padding:14px; border-right:1px solid var(--border);
+
+  #sidebar { width:268px; padding:16px 14px; border-right:1px solid var(--border);
              background:var(--panel); position:sticky; top:0; height:100vh; overflow-y:auto;
-             flex-shrink:0; }
-  #sidebar h1 { font-size:15px; margin:0 0 12px; }
-  #sidebar h2 { font-size:12px; text-transform:uppercase; color:var(--muted); margin:16px 0 6px; }
-  .runrow { display:flex; align-items:center; gap:7px; padding:3px 0; font-size:13px; cursor:pointer; }
-  .swatch { width:14px; height:14px; border-radius:3px; flex-shrink:0; }
-  .navlink { display:block; font-size:13px; color:#2159a8; text-decoration:none; padding:2px 0; }
-  #main { flex:1; padding:18px 24px; min-width:0; }
-  section { margin-bottom:34px; }
-  section > h2 { font-size:17px; border-bottom:1px solid var(--border); padding-bottom:6px; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(340px, 1fr)); gap:14px; }
-  .panel { background:var(--panel); border:1px solid var(--border); border-radius:6px; padding:8px 10px 4px; }
-  .panel h3 { font-size:12.5px; margin:2px 0 4px; font-weight:600; color:#333; }
-  svg text { font-size:10px; fill:#555; }
-  svg .axisline { stroke:#999; stroke-width:1; }
-  svg .gridline { stroke:#eee; stroke-width:1; }
-  table.videos { border-collapse:collapse; font-size:12.5px; }
-  table.videos th, table.videos td { border:1px solid var(--border); padding:3px 8px; text-align:left; }
-  table.videos th { background:#f0f0f0; position:sticky; top:0; }
-  table.videos a { color:#2159a8; text-decoration:none; }
-  .note { font-size:12px; color:var(--muted); margin:4px 0 10px; }
-  .rbadge { display:inline-block; padding:1px 7px; border-radius:9px; color:#fff; font-size:11.5px; margin-right:6px;}
+             flex-shrink:0; scrollbar-width:thin; }
+  #dragbar { width:9px; margin:0 -4px; flex-shrink:0; position:sticky; top:0; height:100vh;
+             cursor:col-resize; z-index:5; }
+  #dragbar:hover, #dragbar.dragging {
+    background:linear-gradient(to right, transparent 3px, var(--accent) 3px,
+               var(--accent) 6px, transparent 6px); }
+  body.resizing { cursor:col-resize; user-select:none; }
+  #sidebar h1 { font-size:14.5px; margin:0 0 12px; display:flex; align-items:center; gap:8px;
+                letter-spacing:-.01em; }
+  .brandmark { width:13px; height:13px; border-radius:4px; flex-shrink:0;
+               background:linear-gradient(135deg, var(--s0), var(--s4)); }
+  #sidebar h2 { font-size:10.5px; text-transform:uppercase; letter-spacing:.09em;
+                color:var(--muted); margin:20px 0 7px; display:flex; align-items:center;
+                justify-content:space-between; font-weight:600; }
+  #sidebar button { font:inherit; font-size:11.5px; color:var(--accent); background:none;
+                    border:1px solid var(--border); border-radius:6px; padding:2px 9px;
+                    cursor:pointer; transition:background .12s, border-color .12s; }
+  #sidebar button:hover { background:var(--wash); border-color:var(--accent); }
+  .runrow { display:flex; align-items:center; gap:7px; padding:4px 6px; font-size:13px;
+            border-radius:7px; transition:background .12s; }
+  .runrow:hover { background:var(--rowhover); }
+  .runrow input { cursor:pointer; accent-color:var(--accent); margin:0; }
+  #sidebar button.runname { all:unset; cursor:pointer; flex:1; overflow:hidden;
+                            text-overflow:ellipsis; white-space:nowrap; font-size:13px;
+                            color:var(--text); }
+  #sidebar button.runname:hover { color:var(--accent); text-decoration:underline dotted; }
+  #sidebar button.runname:focus-visible { outline:2px solid var(--accent);
+                                          outline-offset:1px; border-radius:3px; }
+  .runn { font-size:11px; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .swatch { width:12px; height:12px; border-radius:4px; flex-shrink:0; }
+  .navlink { display:block; font-size:13px; color:var(--text2); text-decoration:none;
+             padding:3px 10px; border-radius:7px; transition:background .12s, color .12s; }
+  .navlink:hover { color:var(--accent); background:var(--rowhover); }
+  .navlink.active { color:var(--accent); background:var(--wash); font-weight:600; }
+
+  #main { flex:1; padding:22px 28px 70px; min-width:0; }
+  #pagehead { display:flex; justify-content:space-between; align-items:flex-end;
+              gap:16px 24px; flex-wrap:wrap; margin:2px 0 28px; }
+  #pagehead h1 { margin:0; font-size:24px; letter-spacing:-.015em; }
+  .eyebrow { font-size:10.5px; font-weight:600; text-transform:uppercase;
+             letter-spacing:.1em; color:var(--accent); }
+  #pagehead .eyebrow { margin-bottom:3px; }
+  .headmeta { display:flex; gap:8px; flex-wrap:wrap; font-size:12.5px; color:var(--muted); }
+  .mchip { border:1px solid var(--border); background:var(--panel); border-radius:999px;
+           padding:3px 12px; font-variant-numeric:tabular-nums; }
+  .mchip.live { border-color:var(--accent); color:var(--accent); }
+
+  section { margin-bottom:44px; scroll-margin-top:10px; }
+  section > h2 { font-size:19px; letter-spacing:-.012em; border-bottom:1px solid var(--border);
+                 padding-bottom:9px; margin:0 0 10px; }
+  section > h2 .eyebrow { display:block; margin-bottom:3px; }
+  .note { font-size:12.5px; color:var(--muted); margin:4px 0 12px; max-width:960px;
+          line-height:1.45; }
+
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(310px, 1fr)); gap:16px; }
+  .robrow { display:grid; grid-template-columns:repeat(auto-fill, minmax(250px, 1fr));
+            gap:14px; margin:10px 0 6px; }
+  details.robgroup { margin-bottom:14px; }
+  details.robgroup > summary { cursor:pointer; font-size:13.5px; font-weight:600;
+                               padding:5px 8px; color:var(--text2); list-style:none;
+                               display:flex; align-items:center; gap:8px; border-radius:7px;
+                               transition:background .12s; width:fit-content; }
+  details.robgroup > summary::-webkit-details-marker { display:none; }
+  details.robgroup > summary::before { content:"\25B8"; font-size:11px; color:var(--muted);
+                                       transition:transform .15s; }
+  details.robgroup[open] > summary::before { transform:rotate(90deg); }
+  details.robgroup > summary:hover { background:var(--rowhover); }
+
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:11px;
+           padding:11px 13px 6px; box-shadow:var(--shadow); transition:box-shadow .18s; }
+  .panel:hover { box-shadow:var(--shadow2); }
+  .panel h3 { font-size:12.5px; margin:1px 0 5px; font-weight:600; color:var(--text2);
+              display:flex; justify-content:space-between; align-items:baseline; gap:6px; }
+  .panel h3 .dir { font-size:10.5px; font-weight:400; color:var(--muted); white-space:nowrap; }
+  .panelsub { font-size:11px; color:var(--muted); margin:-3px 0 3px; }
+
+  svg.chart { display:block; }
+  svg text { font-size:10px; fill:var(--muted); font-variant-numeric:tabular-nums; }
+  svg .axisline { stroke:var(--axis); stroke-width:1; }
+  svg .gridline { stroke:var(--grid); stroke-width:1; }
+  svg .crossline { stroke:var(--muted); stroke-width:1; }
+  #main [data-run] { transition:opacity .15s; }
+
+  .legend { display:flex; flex-wrap:wrap; gap:7px 8px; align-items:center;
+            font-size:12px; color:var(--text2); margin:2px 0 12px; }
+  .chip { display:inline-flex; align-items:center; gap:6px; border:1px solid var(--border);
+          background:var(--panel); border-radius:999px; padding:3px 11px;
+          transition:border-color .12s, background .12s; }
+  .chip input { margin:0; accent-color:var(--accent); cursor:pointer; }
+  .chip:has(input) { cursor:pointer; }
+  .chip:has(input:checked) { border-color:var(--accent); background:var(--wash); }
+  .filterrow { display:flex; flex-wrap:wrap; gap:6px 8px; font-size:12.5px;
+               color:var(--text2); margin:0 0 14px; }
+  .filterrow label { display:inline-flex; gap:6px; align-items:center; cursor:pointer;
+                     border:1px solid var(--border); background:var(--panel);
+                     border-radius:999px; padding:3px 11px;
+                     transition:border-color .12s, background .12s; }
+  .filterrow label:has(input:checked) { border-color:var(--accent); background:var(--wash); }
+  .filterrow input { margin:0; accent-color:var(--accent); }
+
+  table.summary { border-collapse:separate; border-spacing:0; font-size:13px;
+                  background:var(--panel); border:1px solid var(--border);
+                  border-radius:11px; overflow:hidden; box-shadow:var(--shadow); }
+  table.summary th, table.summary td { padding:6px 14px; text-align:right;
+                                       font-variant-numeric:tabular-nums;
+                                       border-bottom:1px solid var(--border); }
+  table.summary thead th { font-size:10.5px; font-weight:600; text-transform:uppercase;
+                           letter-spacing:.06em; color:var(--muted);
+                           background:var(--rowhover); }
+  table.summary tbody tr:last-child td { border-bottom:none; }
+  table.summary tbody tr:hover td { background:var(--rowhover); }
+  table.summary tr.sgroup td { font-size:10px; font-weight:600; text-transform:uppercase;
+                               letter-spacing:.08em; color:var(--accent);
+                               background:var(--rowhover); text-align:left;
+                               padding:5px 14px 4px; }
+  table.summary td.mname, table.summary th.mname { text-align:left;
+                                                   font-variant-numeric:normal; }
+  table.summary td.mname .dir { color:var(--muted); font-size:11px; margin-left:5px; }
+  table.summary .best { font-weight:650; }
+  table.summary .best::before { content:"\25CF"; color:var(--accent); font-size:7px;
+                                vertical-align:2px; margin-right:5px; }
+  table.summary .delta { font-size:11px; margin-left:5px; color:var(--muted); }
+  .dgood { color:var(--dgood); } .dbad { color:var(--dbad); }
+  .runth { display:inline-flex; align-items:center; gap:6px; }
+
+  #videos-host h3 { font-size:14px; margin:18px 0 10px; text-transform:uppercase;
+                    letter-spacing:.05em; color:var(--text2); }
+  .vcat { margin:0 0 16px; }
+  .vcat h4 { font-size:12.5px; font-weight:600; color:var(--text2); margin:0 0 6px;
+             display:flex; align-items:center; gap:7px; }
+  .vstrip { display:flex; gap:10px; overflow-x:auto; padding:2px 2px 8px;
+            scrollbar-width:thin; }
+  .vtile { flex:0 0 auto; width:216px; }
+  .vtile video { width:100%; display:block; border-radius:9px; background:#000;
+                 cursor:pointer; border:1px solid var(--border);
+                 transition:border-color .12s, box-shadow .12s; }
+  .vtile video:hover { border-color:var(--accent); box-shadow:var(--shadow); }
+  .vtile .vcap { font-size:11.5px; color:var(--muted); margin-top:3px;
+                 display:flex; justify-content:space-between; align-items:center;
+                 font-variant-numeric:tabular-nums; }
+  .vtile .vcap button { all:unset; cursor:pointer; color:var(--accent); font-size:12px;
+                        padding:0 4px; border-radius:4px; }
+  .vtile .vcap button:hover { background:var(--wash); }
+
+  #tip { position:fixed; z-index:30; display:none; background:var(--panel);
+         border:1px solid var(--border); border-radius:9px; padding:7px 10px;
+         font-size:12px; pointer-events:none; box-shadow:var(--shadow2);
+         max-width:340px; }
+  #tip .tip-h { color:var(--muted); margin-bottom:3px; font-size:11.5px; }
+  #tip .tip-row { display:flex; align-items:center; gap:6px; padding:1px 0; }
+  #tip .tip-v { font-weight:600; font-variant-numeric:tabular-nums; }
+  #tip .tip-l { color:var(--text2); overflow:hidden; text-overflow:ellipsis;
+                white-space:nowrap; }
+
+  #lightbox { position:fixed; inset:0; z-index:20; background:rgba(0,0,0,.66);
+              backdrop-filter:blur(3px); display:none; align-items:flex-start;
+              justify-content:center; overflow-y:auto; padding:30px 20px; }
+  #lightbox.open { display:flex; }
+  #lb-inner { background:var(--page); border-radius:14px; padding:16px 20px;
+              max-width:min(1500px, 96vw); width:100%; box-shadow:var(--shadow2); }
+  #lb-head { display:flex; justify-content:space-between; align-items:center;
+             margin-bottom:12px; }
+  #lb-head h3 { margin:0; font-size:15px; }
+  #lb-head button { font:inherit; font-size:12px; color:var(--accent); background:none;
+                    border:1px solid var(--border); border-radius:999px; padding:3px 12px;
+                    cursor:pointer; }
+  #lb-head button:hover { background:var(--wash); border-color:var(--accent); }
+  #lb-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr));
+             gap:14px; }
+  #lb-grid video { width:100%; border-radius:9px; background:#000; }
+  #lb-grid .vlabel { font-size:12.5px; margin-bottom:5px; display:flex; gap:6px;
+                     align-items:center; }
+
+  .emptynote { font-size:12.5px; color:var(--muted); font-style:italic; }
+  #nobanner { background:var(--panel); border:1px solid var(--border); border-radius:11px;
+              padding:14px 18px; margin-bottom:20px; font-size:13.5px; display:none;
+              box-shadow:var(--shadow); }
+
+  @media print {
+    :root, :root[data-theme="dark"] {
+      color-scheme: light;
+      --page:#ffffff; --panel:#ffffff; --border:rgba(0,0,0,.18); --rowhover:transparent;
+      --text:#000000; --text2:#333330; --muted:#55534e;
+      --grid:#dddcd6; --axis:#999790; --accent:#2159a8; --wash:transparent;
+      --shadow:none; --shadow2:none;
+      --s0:#2a78d6; --s1:#008300; --s2:#e87ba4; --s3:#eda100;
+      --s4:#1baf7a; --s5:#eb6834; --s6:#4a3aa7; --s7:#e34948;
+      --rz-done:#d9d8d1;
+    }
+    #sidebar, #dragbar, .filterrow, #tip, #lightbox, #nobanner { display:none !important; }
+    #layout { display:block; }
+    #main { padding:0; }
+    .panel, table.summary { break-inside:avoid; box-shadow:none; }
+    section { margin-bottom:18px; }
+  }
 </style>
 </head>
 <body>
+<noscript><p style="padding:20px">This report needs JavaScript (all data is embedded, nothing is fetched).</p></noscript>
 <div id="layout">
   <nav id="sidebar">
-    <h1>sim2sim benchmark</h1>
-    <h2>Experiments</h2>
+    <h1><span class="brandmark"></span>sim2sim benchmark</h1>
+    <button id="themebtn" title="cycle color theme">theme: auto</button>
+    <h2>Experiments <span><button id="btn-all">all</button> <button id="btn-none">none</button></span></h2>
     <div id="runboxes"></div>
+    <div class="note">1-8 toggle &middot; shift+digit solo &middot; 0 all &middot; click a name to solo</div>
     <h2>Sections</h2>
+    <a class="navlink" href="#sec-summary">Summary</a>
     <a class="navlink" href="#sec-robustness">Robustness</a>
     <a class="navlink" href="#sec-corner">Corner turn</a>
     <a class="navlink" href="#sec-human">Human dribble</a>
@@ -214,43 +558,113 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     <a class="navlink" href="#sec-speed">Speed</a>
     <a class="navlink" href="#sec-traces">Control traces</a>
     <a class="navlink" href="#sec-videos">Videos</a>
-    <h2>Episodes</h2>
-    <div class="note">__META__</div>
+    <h2>Run info</h2>
+    <div id="runinfo" class="note"></div>
   </nav>
+  <div id="dragbar" role="separator" aria-orientation="vertical" tabindex="0"
+       title="drag to resize the sidebar (double-click to reset)"></div>
   <main id="main">
-    <section id="sec-robustness"><h2>Robustness — perturbation axes, nominal human routes (20 s)</h2>
-      <div class="note">dotted horizontal line = each experiment's nominal baseline</div>
-      <div class="grid" id="rob-grid"></div></section>
-    <section id="sec-corner"><h2>Capability — corner turn (solid = L, dashed = R)</h2>
+    <header id="pagehead">
+      <div>
+        <div class="eyebrow">sim2sim benchmark</div>
+        <h1>Checkpoint comparison report</h1>
+      </div>
+      <div class="headmeta" id="headmeta"></div>
+    </header>
+    <div id="nobanner">No experiments selected &mdash; enable one in the sidebar.</div>
+
+    <section id="sec-summary"><h2><span class="eyebrow">overview</span>Summary</h2>
+      <div class="note">Headline numbers per run; <b>best of the selected runs</b> is underlined,
+        small &Delta; is vs the first selected run. Rates carry &plusmn;1 binomial SE.</div>
+      <div id="summary-host" style="overflow-x:auto"></div></section>
+
+    <section id="sec-robustness"><h2><span class="eyebrow">robustness</span>Perturbation axes &mdash; nominal human routes (20 s)</h2>
+      <div class="note">Each axis perturbs the nominal route bank; dotted line = that run's unperturbed
+        baseline. Shaded bands = &plusmn;1 binomial SE. Y scales are shared across axes per metric.</div>
+      <div class="legend" id="rob-legend"></div>
+      <div class="filterrow" id="rob-filter"></div>
+      <div id="rob-host"></div></section>
+
+    <section id="sec-corner"><h2><span class="eyebrow">capability</span>Corner turn</h2>
+      <div class="note">150&ndash;180&deg; arc, 12 s, fail-fast; success = finished the turn, no fall,
+        ball kept. Turn radius = 1/&kappa;.</div>
+      <div class="legend" id="corner-legend"></div>
       <div class="grid" id="corner-grid"></div></section>
-    <section id="sec-human"><h2>Capability — human dribble (kappa-cap sweep, 20 s fail-fast)</h2>
+
+    <section id="sec-human"><h2><span class="eyebrow">capability</span>Human dribble</h2>
+      <div class="note">Human-route generator with curvature capped at &kappa;<sub>cap</sub> (larger
+        = sharper routes), 20 s fail-fast; success = kept control for 20 s.</div>
+      <div class="legend" id="human-legend"></div>
       <div class="grid" id="human-grid"></div></section>
-    <section id="sec-uturn"><h2>Capability — u-turn about-face (solid = L, dashed = R)</h2>
+
+    <section id="sec-uturn"><h2><span class="eyebrow">capability</span>U-turn about-face</h2>
+      <div class="note">Run-in + 160&ndash;200&deg; turn, radius 1/&kappa;, 10 s, fail-fast.</div>
+      <div class="legend" id="uturn-legend"></div>
       <div class="grid" id="uturn-grid"></div></section>
-    <section id="sec-speed"><h2>Capability — speed</h2>
+
+    <section id="sec-speed"><h2><span class="eyebrow">capability</span>Speed</h2>
+      <div class="note">Straight-line max speed (10 s, fail-fast) + controllability on human routes
+        (trained command distribution; band = &plusmn;1 sd per bin).</div>
+      <div class="legend" id="speed-legend"></div>
       <div id="track-badges" class="note"></div>
       <div class="grid" id="speed-grid"></div></section>
-    <section id="sec-traces"><h2>Control traces — speed_tracking rep 0-7 (dashed = commanded)</h2>
+
+    <section id="sec-traces"><h2><span class="eyebrow">diagnostics</span>Control traces &mdash; speed_tracking episodes</h2>
+      <div class="note">Ball speed along the command direction (0.5 s smoothed) vs the commanded
+        target. &mu; = per-run mean ball speed over the episode.</div>
+      <div class="legend" id="traces-legend"></div>
       <div class="grid" id="traces-grid"></div></section>
-    <section id="sec-videos"><h2>Per-condition videos</h2>
-      <div class="note">one mp4 per condition: the rep-0 episode, chase camera (links open the local file)</div>
+
+    <section id="sec-videos"><h2><span class="eyebrow">media</span>Per-condition videos</h2>
+      <div class="note">One mp4 per condition (rep-0 episode, chase camera). Click to compare the
+        selected runs side by side; middle-click opens the raw file.</div>
       <div id="videos-host"></div></section>
   </main>
 </div>
+
+<div id="lightbox">
+  <div id="lb-inner">
+    <div id="lb-head"><h3 id="lb-title"></h3><button id="lb-close">close (esc)</button></div>
+    <div id="lb-grid"></div>
+  </div>
+</div>
+<div id="tip"></div>
+
 <script>
+"use strict";
 const DATA = __DATA__;
+const META = __META__;
 const ROB_GROUPS = __ROB_GROUPS__;
 const ROB_METRICS = __ROB_METRICS__;
 const CAP_METRICS = __CAP_METRICS__;
-const enabled = DATA.map(() => true);
 
-function visibleRuns() { return DATA.filter((_, i) => enabled[i]); }
+const DIRTXT = {up: "↑ better", down: "↓ better", one: "→ 1 ideal"};
+const DASH = {r: "6,3", ref: "2,3", cmd: "7,4", base: "1,3"};
+const RATE_KEYS = new Set(["survival", "possession", "success"]);
+const REASONS = [
+  ["completed", "completed", "var(--rz-done)"],
+  ["ball_far", "ball lost", "var(--rz-far)"],
+  ["off_route", "off route", "var(--rz-off)"],
+  ["fell", "fell", "var(--rz-fell)"],
+];
 
-function makeSVG(w, h) {
-  const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  s.setAttribute("viewBox", `0 0 ${w} ${h}`);
-  s.setAttribute("width", "100%");
-  return s;
+const state = {
+  on: DATA.map(() => true),
+  robMetrics: new Set(ROB_METRICS.slice(0, 4).map(m => m[0])),
+  robReasons: false,
+  turn: {corner: {L: true, R: true}, uturn: {L: true, R: true}},
+};
+let prevOn = null;
+
+function sv(i) { return `var(--s${i % 8})`; }
+function visible() { return DATA.map((r, i) => ({r, i})).filter(o => state.on[o.i]); }
+
+function h(tag, cls, text, parent) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  if (parent) parent.appendChild(e);
+  return e;
 }
 function el(tag, attrs, parent) {
   const e = document.createElementNS("http://www.w3.org/2000/svg", tag);
@@ -258,204 +672,1134 @@ function el(tag, attrs, parent) {
   if (parent) parent.appendChild(e);
   return e;
 }
+function makeSVG(w, hh) {
+  const s = el("svg", {viewBox: `0 0 ${w} ${hh}`, width: "100%", class: "chart"});
+  return s;
+}
+function fmtVal(v) {
+  if (v == null || !isFinite(v)) return "–";
+  const a = Math.abs(v);
+  const d = a >= 100 ? 0 : a >= 10 ? 1 : a >= 1 ? 2 : 3;
+  return String(+v.toFixed(d));
+}
 function niceTicks(lo, hi, n = 5) {
-  if (!(hi > lo)) { hi = lo + 1; }
+  if (!(hi > lo)) hi = lo + 1;
   const span = hi - lo, step0 = span / n;
   const mag = Math.pow(10, Math.floor(Math.log10(step0)));
   const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => span / s <= n) || mag * 10;
-  const t0 = Math.ceil(lo / step) * step, out = [];
-  for (let t = t0; t <= hi + 1e-9; t += step) out.push(+t.toFixed(10));
-  return out;
+  const t0 = Math.ceil(lo / step) * step, ticks = [];
+  for (let t = t0; t <= hi + 1e-9; t += step) ticks.push(+t.toFixed(10));
+  return {ticks, step};
+}
+function tickFmt(step) {
+  let dec = 0;
+  while (dec < 6 && Math.abs(Math.round(step * 10 ** dec) - step * 10 ** dec) > 1e-9) dec++;
+  return t => t.toFixed(dec);
 }
 
-// series: [{x[], y[], color, dash, label}], opts: {yDomain, xLabel, hlines:[{y,color}]}
+// ---- tooltip -------------------------------------------------------------
+const tip = document.getElementById("tip");
+function moveTip(ev) {
+  tip.style.left = "0px"; tip.style.top = "0px";
+  const r = tip.getBoundingClientRect();
+  let x = ev.clientX + 14, y = ev.clientY + 12;
+  if (x + r.width > innerWidth - 8) x = ev.clientX - r.width - 10;
+  if (y + r.height > innerHeight - 8) y = ev.clientY - r.height - 10;
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+}
+function keySVG(cvar, dash, parent) {
+  const s = el("svg", {viewBox: "0 0 20 8", width: 20, height: 8}, parent);
+  el("line", {x1: 1, x2: 19, y1: 4, y2: 4, "stroke-width": 2,
+              style: `stroke:${cvar}`, ...(dash ? {"stroke-dasharray": dash} : {})}, s);
+}
+function hideTip() { tip.style.display = "none"; }
+
+// ---- line chart ----------------------------------------------------------
+// series: {x[], y[], se[]?, n[]?, label, cvar, dash?, sw?, runIdx?, ref?}
+// opts: {yDomain, xLabel, yLabel, hlines:[{y,cvar,label}], zeroBase(!==false), xFmt}
 function lineChart(host, seriesList, opts = {}) {
-  const W = 340, H = 200, m = {l: 42, r: 10, t: 8, b: 30};
+  const W = 340, H = 210, m = {l: 46, r: 10, t: 8, b: opts.xLabel ? 32 : 20};
   const svg = makeSVG(W, H);
-  const xs = seriesList.flatMap(s => s.x), ysAll = seriesList.flatMap(s => s.y).filter(v => v != null);
-  if (!xs.length || !ysAll.length) { host.appendChild(svg); return; }
-  let xlo = Math.min(...xs), xhi = Math.max(...xs);
+  host.appendChild(svg);
+  const data = seriesList.filter(s => !s.ref);
+  const flat = [];
+  for (const s of data)
+    for (let i = 0; i < s.x.length; i++)
+      if (s.y[i] != null && isFinite(s.y[i]))
+        flat.push([s.x[i], s.y[i], (s.se && s.se[i]) || 0]);
+  if (!flat.length) {
+    el("text", {x: W / 2, y: H / 2, "text-anchor": "middle"}, svg)
+      .textContent = "no data for selected runs";
+    return;
+  }
+  let xlo, xhi;
+  if (opts.xDomain) { [xlo, xhi] = opts.xDomain; }
+  else { xlo = Math.min(...flat.map(p => p[0])); xhi = Math.max(...flat.map(p => p[0])); }
   if (xlo === xhi) { xlo -= 0.5; xhi += 0.5; }
-  let [ylo, yhi] = opts.yDomain || [Math.min(0, Math.min(...ysAll)), Math.max(...ysAll) * 1.08 + 1e-6];
+  let ylo, yhi;
+  if (opts.yDomain) { [ylo, yhi] = opts.yDomain; }
+  else {
+    let lo = Math.min(...flat.map(p => p[1] - p[2]));
+    let hi = Math.max(...flat.map(p => p[1] + p[2]));
+    for (const hl of opts.hlines || [])
+      if (hl.y != null) { lo = Math.min(lo, hl.y); hi = Math.max(hi, hl.y); }
+    if (opts.zeroBase !== false) lo = Math.min(0, lo);
+    let span = hi - lo;
+    if (span <= 0) span = Math.abs(hi) || 1;
+    yhi = hi + 0.06 * span;
+    ylo = (opts.zeroBase !== false && lo === 0) ? 0 : lo - 0.06 * span;
+  }
   const X = v => m.l + (v - xlo) / (xhi - xlo) * (W - m.l - m.r);
   const Y = v => H - m.b - (v - ylo) / (yhi - ylo) * (H - m.t - m.b);
-  for (const t of niceTicks(ylo, yhi)) {
+  const yt = niceTicks(ylo, yhi), yf = tickFmt(yt.step);
+  for (const t of yt.ticks) {
     el("line", {x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t), class: "gridline"}, svg);
-    const txt = el("text", {x: m.l - 5, y: Y(t) + 3, "text-anchor": "end"}, svg);
-    txt.textContent = +t.toFixed(3);
+    el("text", {x: m.l - 5, y: Y(t) + 3, "text-anchor": "end"}, svg).textContent = yf(t);
   }
-  for (const t of niceTicks(xlo, xhi)) {
-    const txt = el("text", {x: X(t), y: H - m.b + 14, "text-anchor": "middle"}, svg);
-    txt.textContent = +t.toFixed(3);
+  const xt = niceTicks(xlo, xhi), xf = opts.xFmt || tickFmt(xt.step);
+  for (const t of xt.ticks)
+    el("text", {x: X(t), y: H - m.b + 13, "text-anchor": "middle"}, svg).textContent = xf(t);
+  el("line", {x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b, class: "axisline"}, svg);
+  el("line", {x1: m.l, x2: m.l, y1: m.t, y2: H - m.b, class: "axisline"}, svg);
+  if (opts.xLabel)
+    el("text", {x: (m.l + W - m.r) / 2, y: H - 4, "text-anchor": "middle"}, svg)
+      .textContent = opts.xLabel;
+  if (opts.yLabel)
+    el("text", {x: 11, y: (m.t + H - m.b) / 2, "text-anchor": "middle",
+                transform: `rotate(-90 11 ${(m.t + H - m.b) / 2})`}, svg)
+      .textContent = opts.yLabel;
+
+  const clampY = v => Math.max(ylo, Math.min(yhi, v));
+  for (const s of data) {                       // SE / sd bands first
+    if (!s.se) continue;
+    let seg = [];
+    const flush = () => {
+      if (seg.length > 1) {
+        const up = seg.map((p, i) => `${i ? "L" : "M"}${X(p[0]).toFixed(1)},${Y(clampY(p[1] + p[2])).toFixed(1)}`).join("");
+        const dn = seg.slice().reverse().map(p => `L${X(p[0]).toFixed(1)},${Y(clampY(p[1] - p[2])).toFixed(1)}`).join("");
+        el("path", {d: up + dn + "Z", "fill-opacity": 0.13, stroke: "none",
+                    style: `fill:${s.cvar}`, "pointer-events": "none",
+                    ...(s.runIdx != null ? {"data-run": s.runIdx} : {})}, svg);
+      }
+      seg = [];
+    };
+    for (let i = 0; i < s.x.length; i++) {
+      if (s.y[i] == null || s.se[i] == null) flush();
+      else seg.push([s.x[i], s.y[i], s.se[i]]);
+    }
+    flush();
+  }
+  for (const hl of opts.hlines || []) {         // per-run reference levels
+    if (hl.y == null || hl.y < ylo || hl.y > yhi) continue;
+    el("line", {x1: m.l, x2: W - m.r, y1: Y(hl.y), y2: Y(hl.y),
+                "stroke-dasharray": DASH.base, "stroke-width": 1.4, opacity: 0.65,
+                style: `stroke:${hl.cvar}`,
+                ...(hl.runIdx != null ? {"data-run": hl.runIdx} : {})}, svg);
+  }
+  for (const s of seriesList.filter(q => q.ref)) {   // y=x style references
+    const d = s.x.map((x, i) => `${i ? "L" : "M"}${X(x).toFixed(1)},${Y(s.y[i]).toFixed(1)}`).join("");
+    el("path", {d, fill: "none", "stroke-width": 1.2, "stroke-dasharray": DASH.ref,
+                style: "stroke:var(--muted)"}, svg);
+  }
+  for (const s of data) {
+    const sw = s.sw || 2;
+    let seg = [];
+    const flush = () => {
+      if (seg.length) {
+        const d = seg.map((p, i) => `${i ? "L" : "M"}${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join("");
+        el("path", {d, fill: "none", "stroke-width": sw, "stroke-linejoin": "round",
+                    "stroke-linecap": "round", style: `stroke:${s.cvar}`,
+                    ...(s.dash ? {"stroke-dasharray": DASH[s.dash] || s.dash} : {}),
+                    ...(s.runIdx != null ? {"data-run": s.runIdx} : {})}, svg);
+      }
+      seg = [];
+    };
+    for (let i = 0; i < s.x.length; i++) {
+      if (s.y[i] == null || !isFinite(s.y[i])) flush();
+      else seg.push([s.x[i], s.y[i]]);
+    }
+    flush();
+    if (s.x.length <= 40) {
+      for (let i = 0; i < s.x.length; i++) {
+        if (s.y[i] == null || !isFinite(s.y[i])) continue;
+        el("circle", {cx: X(s.x[i]), cy: Y(s.y[i]), r: 3, "stroke-width": 1.5,
+                      style: `fill:${s.cvar};stroke:var(--panel)`,
+                      ...(s.runIdx != null ? {"data-run": s.runIdx} : {})}, svg);
+      }
+    }
+  }
+
+  // crosshair + shared tooltip listing every series at the snapped x
+  const cross = el("line", {y1: m.t, y2: H - m.b, class: "crossline",
+                            style: "display:none"}, svg);
+  const xsU = [...new Set(data.flatMap(s => s.x))].sort((a, b) => a - b);
+  const maps = data.map(s => {
+    const mp = new Map();
+    s.x.forEach((x, i) => { if (s.y[i] != null && isFinite(s.y[i])) mp.set(x, i); });
+    return mp;
+  });
+  const hit = el("rect", {x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b,
+                          fill: "transparent"}, svg);
+  hit.addEventListener("pointermove", ev => {
+    const box = svg.getBoundingClientRect();
+    const px = (ev.clientX - box.left) * (W / box.width);
+    let best = xsU[0], bd = Infinity;
+    for (const x of xsU) {
+      const d = Math.abs(X(x) - px);
+      if (d < bd) { bd = d; best = x; }
+    }
+    cross.setAttribute("x1", X(best)); cross.setAttribute("x2", X(best));
+    cross.style.display = "";
+    tip.textContent = "";
+    h("div", "tip-h", `${opts.xLabel || "x"} = ${fmtVal(best)}`, tip);
+    const rows = [];
+    data.forEach((s, si) => {
+      const i = maps[si].get(best);
+      if (i != null) rows.push({s, y: s.y[i], se: s.se ? s.se[i] : null,
+                                n: s.n ? s.n[i] : null});
+    });
+    if (!rows.length) { hideTip(); return; }
+    rows.sort((a, b) => b.y - a.y);
+    for (const r of rows) {
+      const row = h("div", "tip-row", null, tip);
+      keySVG(r.s.cvar, r.s.dash ? (DASH[r.s.dash] || r.s.dash) : null, row);
+      h("span", "tip-v", fmtVal(r.y) + (r.se != null ? ` ±${fmtVal(r.se)}` : ""), row);
+      h("span", "tip-l", r.s.label + (r.n != null ? ` (n=${r.n})` : ""), row);
+    }
+    tip.style.display = "block";
+    moveTip(ev);
+  });
+  hit.addEventListener("pointerleave", () => { cross.style.display = "none"; hideTip(); });
+}
+
+// ---- failure-mode stacked bars --------------------------------------------
+// perRun: [{label, runIdx, pts:[{x, reasons, n}]}]
+function reasonChart(host, perRun, opts = {}) {
+  const W = 340, H = 210, m = {l: 46, r: 10, t: 8, b: opts.xLabel ? 32 : 20};
+  const svg = makeSVG(W, H);
+  host.appendChild(svg);
+  const cats = [...new Set(perRun.flatMap(p => p.pts.map(q => q.x)))].sort((a, b) => a - b);
+  if (!cats.length) {
+    el("text", {x: W / 2, y: H / 2, "text-anchor": "middle"}, svg)
+      .textContent = "no data for selected runs";
+    return;
+  }
+  const plotW = W - m.l - m.r, band = plotW / cats.length;
+  const nRuns = perRun.length;
+  const barW = Math.min(22, Math.max(3, band * 0.72 / nRuns - 2));
+  const Y = v => H - m.b - v / 100 * (H - m.t - m.b);
+  for (const t of [0, 25, 50, 75, 100]) {
+    el("line", {x1: m.l, x2: W - m.r, y1: Y(t), y2: Y(t), class: "gridline"}, svg);
+    el("text", {x: m.l - 5, y: Y(t) + 3, "text-anchor": "end"}, svg).textContent = t;
   }
   el("line", {x1: m.l, x2: W - m.r, y1: H - m.b, y2: H - m.b, class: "axisline"}, svg);
   el("line", {x1: m.l, x2: m.l, y1: m.t, y2: H - m.b, class: "axisline"}, svg);
-  if (opts.xLabel) {
-    const t = el("text", {x: (m.l + W - m.r) / 2, y: H - 4, "text-anchor": "middle"}, svg);
-    t.textContent = opts.xLabel;
-  }
-  for (const hl of opts.hlines || []) {
-    if (hl.y == null || hl.y < ylo || hl.y > yhi) continue;
-    el("line", {x1: m.l, x2: W - m.r, y1: Y(hl.y), y2: Y(hl.y), stroke: hl.color,
-                "stroke-dasharray": "2,3", "stroke-width": 1, opacity: 0.7}, svg);
-  }
-  for (const s of seriesList) {
-    const pts = s.x.map((x, i) => [x, s.y[i]]).filter(p => p[1] != null);
-    if (!pts.length) continue;
-    const d = pts.map((p, i) => `${i ? "L" : "M"}${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join("");
-    el("path", {d, fill: "none", stroke: s.color, "stroke-width": 1.8,
-                ...(s.dash ? {"stroke-dasharray": "5,4"} : {})}, svg);
-    for (const p of pts) el("circle", {cx: X(p[0]), cy: Y(p[1]), r: 2.4, fill: s.color}, svg);
-  }
-  host.appendChild(svg);
+  cats.forEach((c, ci) => {
+    el("text", {x: m.l + (ci + 0.5) * band, y: H - m.b + 13, "text-anchor": "middle"}, svg)
+      .textContent = fmtVal(c);
+  });
+  if (opts.xLabel)
+    el("text", {x: (m.l + W - m.r) / 2, y: H - 4, "text-anchor": "middle"}, svg)
+      .textContent = opts.xLabel;
+  cats.forEach((c, ci) => {
+    const x0 = m.l + (ci + 0.5) * band - (nRuns * (barW + 2) - 2) / 2;
+    perRun.forEach((p, pi) => {
+      const pt = p.pts.find(q => q.x === c);
+      if (!pt || !pt.n) return;
+      const bx = x0 + pi * (barW + 2);
+      let yCur = 0;
+      for (const [key, , cvar] of REASONS) {
+        const cnt = pt.reasons[key] || 0;
+        if (!cnt) continue;
+        const hh = cnt / pt.n * 100;
+        const y1 = Y(yCur + hh), y2 = Y(yCur);
+        el("rect", {x: bx, y: y1 + 0.5, width: barW, height: Math.max(0.5, y2 - y1 - 1),
+                    style: `fill:${cvar}`,
+                    ...(p.runIdx != null ? {"data-run": p.runIdx} : {})}, svg);
+        yCur += hh;
+      }
+      el("rect", {x: bx, y: H - m.b + 1.5, width: barW, height: 3,
+                  style: `fill:${sv(p.runIdx)}`,
+                  ...(p.runIdx != null ? {"data-run": p.runIdx} : {})}, svg);
+      const hitr = el("rect", {x: bx - 1, y: m.t, width: barW + 2, height: H - m.t - m.b,
+                               fill: "transparent"}, svg);
+      hitr.addEventListener("pointermove", ev => {
+        tip.textContent = "";
+        h("div", "tip-h", `${p.label} — ${opts.xLabel || "x"} = ${fmtVal(c)} (n=${pt.n})`, tip);
+        for (const [key, lbl, cvar] of [...REASONS].reverse()) {
+          const cnt = pt.reasons[key] || 0;
+          if (!cnt) continue;
+          const row = h("div", "tip-row", null, tip);
+          const sq = h("span", null, null, row);
+          sq.style.cssText = `width:10px;height:10px;border-radius:2px;background:${cvar}`;
+          h("span", "tip-v", `${Math.round(cnt / pt.n * 100)}%`, row);
+          h("span", "tip-l", `${lbl} (${cnt})`, row);
+        }
+        tip.style.display = "block";
+        moveTip(ev);
+      });
+      hitr.addEventListener("pointerleave", hideTip);
+    });
+  });
 }
 
-function panel(host, title) {
-  const d = document.createElement("div");
-  d.className = "panel";
-  const h = document.createElement("h3");
-  h.textContent = title;
-  d.appendChild(h);
-  host.appendChild(d);
+// ---- helpers ---------------------------------------------------------------
+function panel(host, title, dir) {
+  const d = h("div", "panel", null, host);
+  const t = h("h3", null, title, d);
+  if (dir) h("span", "dir", DIRTXT[dir], t);
   return d;
 }
-function pick(pointList, metric) {
-  return {x: pointList.map(p => p.x), y: pointList.map(p => p[metric])};
+function runSeries(run, i, pts, metric, extra = {}) {
+  return {
+    x: pts.map(p => p.x), y: pts.map(p => p[metric] == null ? null : p[metric]),
+    se: RATE_KEYS.has(metric) ? pts.map(p => p[metric + "_se"]) : null,
+    n: pts.map(p => p.n),
+    label: run.label + (extra.suffix || ""), cvar: sv(i), runIdx: i,
+    dash: extra.dash,
+  };
 }
-function metricDomain(metric) {
-  return (metric === "survival" || metric === "possession" || metric === "success")
-    ? [0, 102] : null;
+function legendChips(host, items) {
+  host.textContent = "";
+  for (const it of items) {
+    const c = h("span", "chip", null, host);
+    if (it.toggle) {
+      const cb = document.createElement("input");
+      cb.type = "checkbox"; cb.checked = it.toggle.get();
+      cb.addEventListener("change", () => it.toggle.set(cb.checked));
+      c.appendChild(cb);
+    }
+    if (it.square) {
+      const sq = h("span", null, null, c);
+      sq.style.cssText = `width:10px;height:10px;border-radius:2px;background:${it.cvar}`;
+    } else {
+      keySVG(it.cvar, it.dash, c);
+    }
+    h("span", null, it.label, c);
+    if (it.runIdx != null) {
+      c.addEventListener("mouseenter", () => highlightRun(it.runIdx));
+      c.addEventListener("mouseleave", () => highlightRun(null));
+    }
+  }
+}
+function runChips(extra = []) {
+  return visible().map(({r, i}) => ({cvar: sv(i), label: r.label, runIdx: i})).concat(extra);
+}
+function highlightRun(idx) {
+  document.querySelectorAll("#main [data-run]").forEach(e => {
+    e.style.opacity = (idx == null || +e.dataset.run === idx) ? "" : "0.12";
+  });
+}
+function reasonPts(pts) {
+  return pts.map(p => ({x: p.x, reasons: p.reasons || {}, n: p.n}));
+}
+function mergeLR(d) {
+  const by = new Map();
+  for (const side of ["L", "R"]) {
+    for (const p of d[side] || []) {
+      const cur = by.get(p.x) || {x: p.x, reasons: {}, n: 0};
+      cur.n += p.n || 0;
+      for (const k in p.reasons || {}) cur.reasons[k] = (cur.reasons[k] || 0) + p.reasons[k];
+      by.set(p.x, cur);
+    }
+  }
+  return [...by.values()].sort((a, b) => a.x - b.x);
 }
 
-function renderRobustness() {
-  const g = document.getElementById("rob-grid");
-  g.innerHTML = "";
-  for (const [group, gLabel] of ROB_GROUPS)
-    for (const [metric, mLabel] of ROB_METRICS) {
-      const p = panel(g, `${gLabel} — ${mLabel}`);
-      const series = [], hlines = [];
-      for (const run of visibleRuns()) {
-        const pts = run.robustness[group] || [];
-        series.push({...pick(pts, metric), color: run.color});
-        if (run.nominal && run.nominal[metric] != null)
-          hlines.push({y: run.nominal[metric], color: run.color});
-      }
-      lineChart(p, series, {yDomain: metricDomain(metric), xLabel: gLabel, hlines});
-    }
+// ---- summary table ---------------------------------------------------------
+const SGROUPS = [
+  ["run data", [
+    ["episodes (rob + cap)", null, r => null, r => `${r.info.n_rob} + ${r.info.n_cap}`],
+  ]],
+  ["nominal — unperturbed human routes", [
+    ["survival (%)", "up", r => r.nominal && r.nominal.survival,
+     r => r.nominal ? `${fmtVal(r.nominal.survival)} ±${fmtVal(r.nominal.survival_se)}` : null],
+    ["possession (%)", "up", r => r.nominal && r.nominal.possession,
+     r => r.nominal ? `${fmtVal(r.nominal.possession)} ±${fmtVal(r.nominal.possession_se)}` : null],
+    ["speed ratio", "one", r => r.nominal && r.nominal.speed_ratio],
+    ["cross-track (m)", "down", r => r.nominal && r.nominal.cross_track],
+  ]],
+  ["speed & controllability", [
+    ["max straight speed @≥50% success (m/s)", "up", r => r.top.max_speed],
+    ["controllability pooled r", "up", r => r.pairs && r.pairs.r],
+    ["cmd→ball speed slope", "one", r => r.pairs && r.pairs.slope],
+    ["tracking mean per-episode r", "up", r => r.top.tracking_r],
+  ]],
+  ["turning", [
+    ["corner max |κ| left (1/m)", "up", r => r.top.corner_L],
+    ["corner max |κ| right (1/m)", "up", r => r.top.corner_R],
+    ["u-turn max |κ| left (1/m)", "up", r => r.top.uturn_L],
+    ["u-turn max |κ| right (1/m)", "up", r => r.top.uturn_R],
+    ["human κ-cap @≥50% success (1/m)", "up", r => r.top.human_cap],
+  ]],
+];
+function betterOf(a, b, dir) {
+  if (dir === "one") return Math.abs(a - 1) < Math.abs(b - 1);
+  return dir === "down" ? a < b : a > b;
 }
-
-function renderTurns(gridId, key, xLabel) {
-  const g = document.getElementById(gridId);
-  g.innerHTML = "";
-  for (const [metric, mLabel] of CAP_METRICS) {
-    const p = panel(g, mLabel);
-    const series = [];
-    for (const run of visibleRuns()) {
-      const d = run[key];
-      if (Array.isArray(d)) {                       // human dribble: plain series
-        series.push({...pick(d, metric), color: run.color});
-      } else if (d) {                               // corner / u-turn: L solid, R dashed
-        series.push({...pick(d.L, metric), color: run.color});
-        series.push({...pick(d.R, metric), color: run.color, dash: true});
-      }
+function renderSummary() {
+  const host = document.getElementById("summary-host");
+  host.textContent = "";
+  const vis = visible();
+  if (!vis.length) return;
+  const tb = h("table", "summary", null, host);
+  const hr = h("tr", null, null, h("thead", null, null, tb));
+  h("th", "mname", "metric", hr);
+  for (const {r, i} of vis) {
+    const th = h("th", null, null, hr);
+    const wrap = h("span", "runth", null, th);
+    const sw = h("span", "swatch", null, wrap);
+    sw.style.background = sv(i);
+    h("span", null, r.label, wrap);
+  }
+  const body = h("tbody", null, null, tb);
+  for (const [gLabel, rows] of SGROUPS) {
+    const gtr = h("tr", "sgroup", null, body);
+    const gtd = h("td", null, gLabel, gtr);
+    gtd.colSpan = vis.length + 1;
+    for (const [label, dir, get, fmt] of rows) {
+    const tr = h("tr", null, null, body);
+    const nm = h("td", "mname", label, tr);
+    if (dir) h("span", "dir", DIRTXT[dir], nm);
+    const vals = vis.map(({r}) => get(r));
+    let bestIdx = -1;
+    if (dir && vis.length > 1) {
+      vals.forEach((v, k) => {
+        if (v == null) return;
+        if (bestIdx < 0 || betterOf(v, vals[bestIdx], dir)) bestIdx = k;
+      });
+      if (bestIdx >= 0 && vals.some((v, j) =>       // no winner on a tie
+          j !== bestIdx && v != null &&
+          !betterOf(vals[bestIdx], v, dir) && !betterOf(v, vals[bestIdx], dir)))
+        bestIdx = -1;
     }
-    lineChart(p, series, {yDomain: metricDomain(metric), xLabel});
+    const ref = vals[0];
+    vis.forEach(({r}, k) => {
+      const td = h("td", null, null, tr);
+      const txt = fmt ? fmt(r) : null;
+      h("span", bestIdx === k ? "best" : null,
+        txt != null ? txt : fmtVal(vals[k]), td);
+      if (dir && k > 0 && vals[k] != null && ref != null) {
+        const dv = vals[k] - ref;
+        if (Math.abs(dv) < 1e-9) h("span", "delta", "±0", td);
+        else h("span", "delta " + (betterOf(vals[k], ref, dir) ? "dgood" : "dbad"),
+               (dv >= 0 ? "+" : "") + fmtVal(dv), td);
+      }
+    });
+    }
   }
 }
 
+// ---- sections ---------------------------------------------------------------
+function robDomains(vis) {
+  const dom = {survival: [0, 102], possession: [0, 102], speed_ratio: [0, 1.15]};
+  let ct = 0, du = 0;
+  for (const {r} of vis) {
+    for (const [g] of ROB_GROUPS)
+      for (const p of r.robustness[g] || []) {
+        if (p.cross_track != null) ct = Math.max(ct, p.cross_track);
+        if (p.mean_duration != null) du = Math.max(du, p.mean_duration);
+      }
+    if (r.nominal) {
+      ct = Math.max(ct, r.nominal.cross_track || 0);
+      du = Math.max(du, r.nominal.mean_duration || 0);
+    }
+  }
+  dom.cross_track = [0, ct * 1.08 + 1e-6];
+  dom.mean_duration = [0, du * 1.08 + 1e-6];
+  return dom;
+}
+function renderRobustness() {
+  const host = document.getElementById("rob-host");
+  const open = {};
+  host.querySelectorAll("details").forEach(d => { open[d.dataset.g] = d.open; });
+  host.textContent = "";
+  const vis = visible();
+  legendChips(document.getElementById("rob-legend"),
+              runChips([{cvar: "var(--muted)", dash: DASH.base, label: "nominal baseline"}]));
+  const dom = robDomains(vis);
+  for (const [group, gLabel] of ROB_GROUPS) {
+    const det = document.createElement("details");
+    det.className = "robgroup"; det.dataset.g = group;
+    det.open = open[group] !== undefined ? open[group] : true;
+    host.appendChild(det);
+    h("summary", null, gLabel, det);
+    const row = h("div", "robrow", null, det);
+    // full axis range even where a metric has no survivors (null points)
+    const gxs = vis.flatMap(({r}) => (r.robustness[group] || []).map(p => p.x));
+    const xDomain = gxs.length ? [Math.min(...gxs), Math.max(...gxs)] : null;
+    for (const [metric, mLabel, dir] of ROB_METRICS) {
+      if (!state.robMetrics.has(metric)) continue;
+      const p = panel(row, mLabel, dir);
+      const series = [], hlines = [];
+      for (const {r, i} of vis) {
+        series.push(runSeries(r, i, r.robustness[group] || [], metric));
+        if (r.nominal && r.nominal[metric] != null)
+          hlines.push({y: r.nominal[metric], cvar: sv(i), runIdx: i});
+      }
+      lineChart(p, series, {yDomain: dom[metric], xLabel: gLabel, hlines, xDomain});
+    }
+    if (state.robReasons) {
+      const p = panel(row, "failure modes (share of episodes)");
+      reasonChart(p, vis.map(({r, i}) =>
+        ({label: r.label, runIdx: i, pts: reasonPts(r.robustness[group] || [])})),
+        {xLabel: gLabel});
+    }
+  }
+}
+function capDomains(vis) {
+  const dom = {success: [0, 102], survival: [0, 102], possession: [0, 102]};
+  let ct = 0;
+  for (const {r} of vis)
+    for (const pts of [r.corner.L, r.corner.R, r.human, r.uturn.L, r.uturn.R])
+      for (const p of pts || [])
+        if (p.cross_track != null) ct = Math.max(ct, p.cross_track);
+  dom.cross_track = [0, ct * 1.08 + 1e-6];
+  return dom;
+}
+function renderTurns(gridId, key, xLabel, dom, legendId) {
+  const g = document.getElementById(gridId);
+  g.textContent = "";
+  const vis = visible();
+  const t = state.turn[key];
+  const extra = t ? [
+    {cvar: "var(--text2)", label: "left (solid)",
+     toggle: {get: () => t.L, set: v => { t.L = v; renderTurns(gridId, key, xLabel, dom, legendId); }}},
+    {cvar: "var(--text2)", dash: DASH.r, label: "right (dashed)",
+     toggle: {get: () => t.R, set: v => { t.R = v; renderTurns(gridId, key, xLabel, dom, legendId); }}},
+  ] : [];
+  legendChips(document.getElementById(legendId), runChips(extra));
+  const gxs = vis.flatMap(({r}) => {
+    const d = r[key];
+    return Array.isArray(d) ? d.map(p => p.x)
+                            : [...(d.L || []), ...(d.R || [])].map(p => p.x);
+  });
+  const xDomain = gxs.length ? [Math.min(...gxs), Math.max(...gxs)] : null;
+  for (const [metric, mLabel, dir] of CAP_METRICS) {
+    const p = panel(g, mLabel, dir);
+    const series = [];
+    for (const {r, i} of vis) {
+      const d = r[key];
+      if (Array.isArray(d)) {
+        series.push(runSeries(r, i, d, metric));
+      } else if (d) {
+        if (t.L) series.push(runSeries(r, i, d.L, metric, {suffix: " L"}));
+        if (t.R) series.push(runSeries(r, i, d.R, metric, {suffix: " R", dash: "r"}));
+      }
+    }
+    lineChart(p, series, {yDomain: dom[metric], xLabel, xDomain});
+  }
+  const p = panel(g, "failure modes (share of episodes)");
+  reasonChart(p, vis.map(({r, i}) => {
+    const d = r[key];
+    return {label: r.label, runIdx: i,
+            pts: Array.isArray(d) ? reasonPts(d) : mergeLR(d)};
+  }), {xLabel});
+}
 function renderSpeed() {
   const g = document.getElementById("speed-grid");
-  g.innerHTML = "";
-  for (const [metric, mLabel] of [["success", "max speed: success rate (%)"],
-                                  ["survival", "max speed: survival rate (%)"],
-                                  ["ach_speed", "achieved vs commanded (m/s)"]]) {
-    const p = panel(g, mLabel);
-    const series = visibleRuns().map(run => ({...pick(run.straight, metric), color: run.color}));
-    if (metric === "ach_speed") {
-      const xs = series.flatMap(s => s.x);
-      if (xs.length) series.push({x: [Math.min(...xs), Math.max(...xs)],
-                                  y: [Math.min(...xs), Math.max(...xs)],
-                                  color: "#aaa", dash: true});
-    }
-    lineChart(p, series, {yDomain: metricDomain(metric), xLabel: "commanded speed (m/s), straight"});
+  g.textContent = "";
+  const vis = visible();
+  legendChips(document.getElementById("speed-legend"),
+              runChips([{cvar: "var(--muted)", dash: DASH.ref, label: "achieved = commanded"}]));
+  for (const [metric, mLabel, dir] of [["success", "max speed: success rate (%)", "up"],
+                                       ["survival", "max speed: survival rate (%)", "up"]]) {
+    const p = panel(g, mLabel, dir);
+    const series = vis.map(({r, i}) => runSeries(r, i, r.straight, metric));
+    lineChart(p, series, {yDomain: [0, 102], xLabel: "commanded speed (m/s), straight"});
   }
-  const p = panel(g, "controllability: binned cmd vs actual (human routes)");
-  const series = [];
-  for (const run of visibleRuns())
-    if (run.pairs) series.push({x: run.pairs.points.map(q => q.x),
-                                y: run.pairs.points.map(q => q.y), color: run.color});
-  const xs = series.flatMap(s => s.x);
-  if (xs.length) series.push({x: [Math.min(...xs), Math.max(...xs)],
-                              y: [Math.min(...xs), Math.max(...xs)], color: "#aaa", dash: true});
-  lineChart(p, series, {xLabel: "commanded speed (m/s)"});
+  {
+    const p = panel(g, "achieved vs commanded: the plateau = measured max", "up");
+    const series = vis.map(({r, i}) => runSeries(r, i, r.straight, "ach_speed"));
+    const xs = series.flatMap(s => s.x);
+    if (xs.length) {
+      const lo = Math.min(...xs), hi = Math.max(...xs);
+      series.push({x: [lo, hi], y: [lo, hi], ref: true});
+    }
+    lineChart(p, series, {xLabel: "commanded speed (m/s), straight",
+                          yLabel: "achieved ball speed (m/s)", zeroBase: false});
+  }
+  {
+    const p = panel(g, "controllability: binned cmd vs actual (human routes)", "up");
+    const series = [];
+    for (const {r, i} of vis) {
+      if (!r.pairs) continue;
+      series.push({x: r.pairs.points.map(q => q.x), y: r.pairs.points.map(q => q.y),
+                   se: r.pairs.points.map(q => q.sd), label: r.label,
+                   cvar: sv(i), runIdx: i});
+    }
+    const xs = series.flatMap(s => s.x);
+    if (xs.length) {
+      const lo = Math.min(...xs), hi = Math.max(...xs);
+      series.push({x: [lo, hi], y: [lo, hi], ref: true});
+    }
+    lineChart(p, series, {xLabel: "commanded speed (m/s), human routes",
+                          yLabel: "ball speed along cmd (m/s)", zeroBase: false});
+  }
+  {
+    const p = panel(g, "failure modes: straight max speed");
+    reasonChart(p, vis.map(({r, i}) =>
+      ({label: r.label, runIdx: i, pts: reasonPts(r.straight)})),
+      {xLabel: "commanded speed (m/s)"});
+  }
   const b = document.getElementById("track-badges");
-  b.innerHTML = "pooled Pearson r: " + visibleRuns().map(run =>
-    `<span class="rbadge" style="background:${run.color}">${run.label}: ${run.pairs ? run.pairs.r : "-"}</span>`).join("");
+  b.textContent = "";
+  for (const {r, i} of vis) {
+    const chip = h("span", "chip", null, b);
+    chip.style.marginRight = "16px";
+    const sw = h("span", "swatch", null, chip);
+    sw.style.cssText += `;width:10px;height:10px;background:${sv(i)}`;
+    const track = r.tracking && r.tracking[0];
+    h("span", null,
+      `${r.label}: pooled r ${r.pairs ? fmtVal(r.pairs.r) : "–"}` +
+      `, slope ${r.pairs ? fmtVal(r.pairs.slope) : "–"}` +
+      `${r.pairs ? ` (n=${r.pairs.n})` : ""}` +
+      ` · tracking: surv ${track ? fmtVal(track.survival) : "–"}%` +
+      `, poss ${track ? fmtVal(track.possession) : "–"}%` +
+      `, mean r ${fmtVal(r.top.tracking_r)}`, chip);
+  }
 }
-
 function renderTraces() {
   const g = document.getElementById("traces-grid");
-  g.innerHTML = "";
-  for (let ep = 0; ep < 8; ep++) {
-    const key = String(ep);
-    const runsWith = visibleRuns().filter(r => r.traces && r.traces[key]);
+  g.textContent = "";
+  const vis = visible();
+  legendChips(document.getElementById("traces-legend"),
+              runChips([{cvar: "var(--text2)", dash: DASH.cmd, label: "commanded"}]));
+  const keys = [...new Set(vis.flatMap(({r}) => r.traces ? Object.keys(r.traces) : []))]
+    .sort((a, b) => +a - +b);
+  if (!keys.length) {
+    h("div", "emptynote", "no speed traces recorded for the selected runs", g);
+    return;
+  }
+  for (const key of keys) {
+    const runsWith = vis.filter(({r}) => r.traces && r.traces[key]);
     if (!runsWith.length) continue;
-    const p = panel(g, `episode ${ep}`);
-    const series = [];
-    const first = runsWith[0].traces[key];
-    const t = first.cmd.map((_, i) => +(i * first.dt).toFixed(2));
-    series.push({x: t, y: first.cmd, color: "#333", dash: true});
-    for (const run of runsWith) {
-      const tr = run.traces[key];
-      series.push({x: tr.act.map((_, i) => +(i * tr.dt).toFixed(2)), y: tr.act, color: run.color});
+    const p = panel(g, `episode ${key}`);
+    h("div", "panelsub",
+      runsWith.map(({r}) => `${r.label} μ=${fmtVal(r.traces[key].mean_act)}`).join(" · ")
+      + " m/s", p);
+    const longest = runsWith.reduce((a, b) =>
+      b.r.traces[key].cmd.length > a.r.traces[key].cmd.length ? b : a);
+    const cmdTr = longest.r.traces[key];
+    const series = [{
+      x: cmdTr.cmd.map((_, i) => +(i * cmdTr.dt).toFixed(2)), y: cmdTr.cmd,
+      label: "commanded", cvar: "var(--text2)", dash: "cmd", sw: 1.6,
+    }];
+    for (const {r, i} of runsWith) {
+      const tr = r.traces[key];
+      series.push({x: tr.act.map((_, j) => +(j * tr.dt).toFixed(2)), y: tr.act,
+                   label: r.label, cvar: sv(i), runIdx: i, sw: 1.6});
     }
-    lineChart(p, series, {xLabel: "t (s)"});
+    lineChart(p, series, {xLabel: "t (s)", yLabel: "m/s"});
   }
 }
 
+// ---- videos -----------------------------------------------------------------
+function natCmp(a, b) {
+  const split = s => s.split(/(\d+\.?\d*)/).filter(t => t !== "");
+  const ka = split(a), kb = split(b);
+  for (let i = 0; i < Math.max(ka.length, kb.length); i++) {
+    if (ka[i] === undefined) return -1;
+    if (kb[i] === undefined) return 1;
+    const na = parseFloat(ka[i]), nb = parseFloat(kb[i]);
+    if (!isNaN(na) && !isNaN(nb)) { if (na !== nb) return na - nb; }
+    else if (ka[i] !== kb[i]) return ka[i] < kb[i] ? -1 : 1;
+  }
+  return 0;
+}
+function openLightbox(test, cond) {
+  const grid = document.getElementById("lb-grid");
+  grid.textContent = "";
+  document.getElementById("lb-title").textContent = `${test} / ${cond}`;
+  for (const {r, i} of visible()) {
+    const v = r.videos[test] && r.videos[test][cond];
+    if (!v) continue;
+    const card = h("div", null, null, grid);
+    const lbl = h("div", "vlabel", null, card);
+    const sw = h("span", "swatch", null, lbl);
+    sw.style.background = sv(i);
+    h("span", null, r.label, lbl);
+    const vid = document.createElement("video");
+    vid.controls = true; vid.preload = "metadata";
+    vid.src = encodeURI(v);
+    card.appendChild(vid);
+  }
+  document.getElementById("lightbox").classList.add("open");
+}
+function closeLightbox() {
+  document.getElementById("lightbox").classList.remove("open");
+  document.querySelectorAll("#lb-grid video").forEach(v => v.pause());
+}
 function renderVideos() {
   const host = document.getElementById("videos-host");
-  host.innerHTML = "";
-  const tests = [...new Set(visibleRuns().flatMap(r => Object.keys(r.videos)))].sort();
+  host.textContent = "";
+  const vis = visible();
+  const tests = [...new Set(vis.flatMap(({r}) => Object.keys(r.videos)))].sort(natCmp);
+  if (!tests.length) {
+    h("div", "emptynote",
+      "no videos found for the selected runs (record with --videos)", host);
+    return;
+  }
+  // load first frames only when scrolled into view (there can be 100+ mp4s)
+  const lazy = new IntersectionObserver(entries => {
+    for (const e of entries)
+      if (e.isIntersecting) {
+        e.target.preload = "metadata";
+        e.target.load();
+        lazy.unobserve(e.target);
+      }
+  }, {rootMargin: "300px"});
   for (const test of tests) {
-    const runsWith = visibleRuns().filter(r => r.videos[test]);
+    const runsWith = vis.filter(({r}) => r.videos[test]);
     if (!runsWith.length) continue;
-    const conds = [...new Set(runsWith.flatMap(r => Object.keys(r.videos[test])))].sort();
-    const h = document.createElement("h3"); h.textContent = test; host.appendChild(h);
-    const tb = document.createElement("table"); tb.className = "videos";
-    tb.innerHTML = "<tr><th>condition</th>" +
-      runsWith.map(r => `<th style="color:${r.color}">${r.label}</th>`).join("") + "</tr>" +
-      conds.map(c => "<tr><td>" + c + "</td>" + runsWith.map(r => {
-        const v = r.videos[test][c];
-        return `<td>${v ? `<a href="${v}" target="_blank">▶ play</a>` : "-"}</td>`;
-      }).join("") + "</tr>").join("");
-    host.appendChild(tb);
+    h("h3", null, test, host);
+    const conds = [...new Set(runsWith.flatMap(({r}) => Object.keys(r.videos[test])))]
+      .sort(natCmp);
+    // split at the last "_": corner_L_0.4 -> corner_L / 0.4, dr_x0.25 -> dr / x0.25;
+    // a tail without digits (or no "_") keeps the whole name as its own category
+    const cats = new Map();
+    for (const c of conds) {
+      const idx = c.lastIndexOf("_");
+      const tail = idx >= 0 ? c.slice(idx + 1) : "";
+      const split = /\d/.test(tail);
+      const cat = split ? c.slice(0, idx) : c;
+      if (!cats.has(cat)) cats.set(cat, []);
+      cats.get(cat).push({cond: c, val: split ? tail : c});
+    }
+    for (const [cat, items] of cats) {
+      for (const {r, i} of runsWith) {
+        const has = items.filter(it => r.videos[test][it.cond]);
+        if (!has.length) continue;
+        const catDiv = h("div", "vcat", null, host);
+        const head = h("h4", null, null, catDiv);
+        if (runsWith.length > 1) {
+          const sw = h("span", "swatch", null, head);
+          sw.style.cssText = `width:10px;height:10px;background:${sv(i)}`;
+          h("span", null, `${cat} — ${r.label}`, head);
+        } else {
+          h("span", null, cat, head);
+        }
+        const strip = h("div", "vstrip", null, catDiv);
+        for (const it of has) {
+          const tile = h("div", "vtile", null, strip);
+          const vid = document.createElement("video");
+          vid.preload = "none";
+          vid.muted = true;
+          vid.playsInline = true;
+          vid.src = encodeURI(r.videos[test][it.cond]);
+          vid.title = `${it.cond} — click to play/pause`;
+          vid.addEventListener("click", () => {
+            if (vid.paused) { vid.controls = true; vid.play(); }
+            else vid.pause();
+          });
+          tile.appendChild(vid);
+          lazy.observe(vid);
+          const cap = h("div", "vcap", null, tile);
+          h("span", null, it.val, cap);
+          const big = h("button", null, "⛶", cap);
+          big.title = "open large / compare runs";
+          big.addEventListener("click", () => openLightbox(test, it.cond));
+        }
+      }
+    }
   }
 }
 
+// ---- sidebar / state ----------------------------------------------------------
+const DEFAULT_RM = ROB_METRICS.slice(0, 4).map(m => m[0]);
+function saveHash() {
+  const on = DATA.filter((_, i) => state.on[i]).map(r => encodeURIComponent(r.label));
+  const parts = [];
+  if (on.length < DATA.length) parts.push("on=" + on.join(","));
+  const rmDefault = state.robMetrics.size === DEFAULT_RM.length &&
+                    DEFAULT_RM.every(k => state.robMetrics.has(k));
+  if (!rmDefault)
+    parts.push("rm=" + ROB_METRICS.map(m => m[0])
+                        .filter(k => state.robMetrics.has(k)).join(","));
+  if (state.robReasons) parts.push("fm=1");
+  try {
+    history.replaceState(null, "", parts.length ? "#" + parts.join("&")
+                                                : location.href.split("#")[0]);
+  } catch (e) { /* file:// restrictions in some browsers */ }
+}
+function loadHash() {
+  if (!location.hash) return;
+  // parse raw: values were encodeURIComponent'd, so split BEFORE decoding
+  // (URLSearchParams would decode first and corrupt labels with ',' or '%')
+  const q = {};
+  for (const part of location.hash.slice(1).split("&")) {
+    const eq = part.indexOf("=");
+    if (eq > 0) q[part.slice(0, eq)] = part.slice(eq + 1);
+  }
+  const dec = s => { try { return decodeURIComponent(s); } catch (e) { return s; } };
+  if (q.on != null) {
+    const labels = new Set(q.on.split(",").map(dec));
+    DATA.forEach((r, i) => { state.on[i] = labels.has(r.label); });
+    if (!state.on.some(Boolean)) state.on = DATA.map(() => true);
+  }
+  if (q.rm != null) {
+    const keys = new Set(q.rm.split(",").map(dec));
+    const valid = ROB_METRICS.map(m => m[0]).filter(k => keys.has(k));
+    if (valid.length) state.robMetrics = new Set(valid);
+  }
+  if (q.fm === "1") state.robReasons = true;
+}
+function syncBoxes() {
+  document.querySelectorAll("#runboxes input").forEach((cb, i) => {
+    cb.checked = state.on[i];
+  });
+}
+function solo(i) {
+  const soloedMe = state.on[i] && state.on.filter(Boolean).length === 1;
+  if (soloedMe && prevOn) {
+    state.on = prevOn.slice();
+    prevOn = null;
+  } else {
+    // keep the original multi-selection across solo-to-solo switches
+    if (state.on.filter(Boolean).length !== 1) prevOn = state.on.slice();
+    state.on = DATA.map((_, j) => j === i);
+  }
+  syncBoxes();
+  renderAll();
+}
+function buildSidebar() {
+  const boxes = document.getElementById("runboxes");
+  DATA.forEach((run, i) => {
+    const row = h("div", "runrow", null, boxes);
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = state.on[i];
+    cb.addEventListener("change", () => { state.on[i] = cb.checked; renderAll(); });
+    row.appendChild(cb);
+    const sw = h("span", "swatch", null, row);
+    sw.style.background = sv(i);
+    const name = h("button", "runname", run.label, row);
+    name.type = "button";
+    name.title = `${run.info.dir}\nclick to solo`;
+    name.addEventListener("click", () => solo(i));
+    name.addEventListener("focus", () => highlightRun(i));
+    name.addEventListener("blur", () => highlightRun(null));
+    h("span", "runn", `${run.info.n_rob + run.info.n_cap}`, row);
+    row.addEventListener("mouseenter", () => highlightRun(i));
+    row.addEventListener("mouseleave", () => highlightRun(null));
+  });
+  document.getElementById("btn-all").addEventListener("click", () => {
+    state.on = DATA.map(() => true); syncBoxes(); renderAll();
+  });
+  document.getElementById("btn-none").addEventListener("click", () => {
+    state.on = DATA.map(() => false); syncBoxes(); renderAll();
+  });
+  const info = document.getElementById("runinfo");
+  DATA.forEach((run, i) => {
+    const d = h("div", null, null, info);
+    d.style.cssText = "margin-bottom:6px";
+    const sw = h("span", null, null, d);
+    sw.style.cssText = `display:inline-block;width:9px;height:9px;border-radius:2px;` +
+                       `background:${sv(i)};margin-right:5px`;
+    h("span", null, `${run.label} — ${run.info.dir}`, d);
+    h("div", null, `${run.info.n_rob} rob + ${run.info.n_cap} cap episodes` +
+      (run.info.data_time ? `, data ${run.info.data_time}` : ""), d);
+  });
+  h("div", null, `report generated ${META.generated}`, info).style.marginTop = "8px";
+  const cmd = h("div", null, META.cmd, info);
+  cmd.style.cssText = "word-break:break-all;opacity:.8";
+}
+function buildRobFilter() {
+  const host = document.getElementById("rob-filter");
+  for (const [key, label] of ROB_METRICS) {
+    const lb = h("label", null, null, host);
+    const cb = document.createElement("input");
+    cb.type = "checkbox"; cb.checked = state.robMetrics.has(key);
+    cb.addEventListener("change", () => {
+      cb.checked ? state.robMetrics.add(key) : state.robMetrics.delete(key);
+      renderRobustness(); saveHash();
+    });
+    lb.appendChild(cb);
+    h("span", null, label, lb);
+  }
+  const lb = h("label", null, null, host);
+  const cb = document.createElement("input");
+  cb.type = "checkbox"; cb.checked = state.robReasons;
+  cb.addEventListener("change", () => {
+    state.robReasons = cb.checked; renderRobustness(); saveHash();
+  });
+  lb.appendChild(cb);
+  h("span", null, "failure modes", lb);
+}
+function buildDragbar() {
+  const bar = document.getElementById("dragbar");
+  const sb = document.getElementById("sidebar");
+  const saved = parseInt(localStorage.getItem("s2s-sbw"), 10);
+  if (saved >= 200 && saved <= 560) sb.style.width = saved + "px";
+  const setW = w => {
+    w = Math.max(200, Math.min(560, w));
+    sb.style.width = w + "px";
+    localStorage.setItem("s2s-sbw", String(w));
+  };
+  bar.addEventListener("pointerdown", ev => {
+    ev.preventDefault();
+    bar.setPointerCapture(ev.pointerId);
+    bar.classList.add("dragging");
+    document.body.classList.add("resizing");
+  });
+  bar.addEventListener("pointermove", ev => {
+    if (bar.classList.contains("dragging")) setW(ev.clientX);
+  });
+  for (const type of ["pointerup", "pointercancel"])
+    bar.addEventListener(type, () => {
+      bar.classList.remove("dragging");
+      document.body.classList.remove("resizing");
+    });
+  bar.addEventListener("dblclick", () => {
+    sb.style.width = "";
+    localStorage.removeItem("s2s-sbw");
+  });
+  bar.addEventListener("keydown", ev => {
+    if (ev.key !== "ArrowLeft" && ev.key !== "ArrowRight") return;
+    ev.preventDefault();
+    setW(sb.getBoundingClientRect().width + (ev.key === "ArrowRight" ? 16 : -16));
+  });
+}
+function buildHeader() {
+  const hm = document.getElementById("headmeta");
+  const eps = DATA.reduce((a, r) => a + r.info.n_rob + r.info.n_cap, 0);
+  h("span", "mchip", `${DATA.length} experiment${DATA.length === 1 ? "" : "s"}`, hm);
+  h("span", "mchip", `${eps.toLocaleString("en-US")} episodes`, hm);
+  h("span", "mchip", `generated ${META.generated}`, hm);
+  if (META.live) h("span", "mchip live", "live — refresh re-reads runs", hm);
+}
+function buildTheme() {
+  const btn = document.getElementById("themebtn");
+  const seq = ["auto", "light", "dark"];
+  let cur = localStorage.getItem("s2s-theme") || "auto";
+  const apply = () => {
+    if (cur === "auto") delete document.documentElement.dataset.theme;
+    else document.documentElement.dataset.theme = cur;
+    btn.textContent = "theme: " + cur;
+  };
+  btn.addEventListener("click", () => {
+    cur = seq[(seq.indexOf(cur) + 1) % seq.length];
+    localStorage.setItem("s2s-theme", cur);
+    apply();
+  });
+  apply();
+}
+function buildScrollSpy() {
+  const links = [...document.querySelectorAll(".navlink")];
+  const byId = Object.fromEntries(links.map(l => [l.getAttribute("href").slice(1), l]));
+  const sections = [...document.querySelectorAll("#main section")];
+  const inview = new Set();
+  const obs = new IntersectionObserver(entries => {
+    for (const e of entries)
+      e.isIntersecting ? inview.add(e.target.id) : inview.delete(e.target.id);
+    const top = sections.find(s => inview.has(s.id));
+    if (top) {
+      links.forEach(l => l.classList.remove("active"));
+      byId[top.id].classList.add("active");
+    }
+  }, {rootMargin: "-10% 0px -55% 0px"});
+  sections.forEach(s => obs.observe(s));
+}
+document.addEventListener("keydown", ev => {
+  if (ev.key === "Escape") { closeLightbox(); return; }   // works even from <video>
+  if (/^(INPUT|TEXTAREA|VIDEO|SELECT|BUTTON)$/.test(ev.target.tagName)) return;
+  if (!ev.code || !ev.code.startsWith("Digit")) return;
+  const d = +ev.code.slice(5);              // ev.code survives shift ('!' etc.)
+  if (d === 0) {
+    state.on = DATA.map(() => true); syncBoxes(); renderAll(); return;
+  }
+  if (d >= 1 && d <= DATA.length) {
+    if (ev.shiftKey) solo(d - 1);
+    else { state.on[d - 1] = !state.on[d - 1]; syncBoxes(); renderAll(); }
+  }
+});
+document.getElementById("lb-close").addEventListener("click", closeLightbox);
+document.getElementById("lightbox").addEventListener("click", ev => {
+  if (ev.target.id === "lightbox") closeLightbox();
+});
+
 function renderAll() {
+  document.getElementById("nobanner").style.display =
+    state.on.some(Boolean) ? "none" : "block";
+  const dom = capDomains(visible());
+  renderSummary();
   renderRobustness();
-  renderTurns("corner-grid", "corner", "|kappa| (1/m)");
-  renderTurns("human-grid", "human", "route_human_kappa_cap");
-  renderTurns("uturn-grid", "uturn", "|kappa| (1/m)");
+  renderTurns("corner-grid", "corner", "|κ| (1/m)", dom, "corner-legend");
+  renderTurns("human-grid", "human", "κ-cap (1/m)", dom, "human-legend");
+  renderTurns("uturn-grid", "uturn", "|κ| (1/m)", dom, "uturn-legend");
   renderSpeed();
   renderTraces();
   renderVideos();
+  saveHash();
 }
 
-const boxes = document.getElementById("runboxes");
-DATA.forEach((run, i) => {
-  const row = document.createElement("label");
-  row.className = "runrow";
-  row.innerHTML = `<input type="checkbox" checked><span class="swatch" style="background:${run.color}"></span>${run.label}`;
-  row.querySelector("input").addEventListener("change", e => { enabled[i] = e.target.checked; renderAll(); });
-  boxes.appendChild(row);
-});
+loadHash();
+buildDragbar();
+buildHeader();
+buildSidebar();
+buildRobFilter();
+buildTheme();
+buildScrollSpy();
 renderAll();
 </script>
 </body>
 </html>
 """
+
+
+def js_embed(obj):
+    """JSON for inline <script> embedding: no bare NaN, no '</script>' escape."""
+    return json.dumps(obj, separators=(",", ":"), allow_nan=False).replace("<", "\\u003c")
+
+
+def resolve_runs(args, quiet=False):
+    if args.run_dirs is not None:
+        labels = args.labels or [os.path.basename(os.path.normpath(d))
+                                 for d in args.run_dirs]
+        if len(args.run_dirs) != len(labels):
+            raise RuntimeError("--labels must match --run-dirs")
+        return args.run_dirs, labels
+    run_dirs = sorted(
+        os.path.join(args.runs_root, d) for d in os.listdir(args.runs_root)
+        if os.path.exists(os.path.join(args.runs_root, d, "robustness.csv"))
+        or os.path.exists(os.path.join(args.runs_root, d, "capability.csv")))
+    if not run_dirs:
+        raise RuntimeError(f"no runs with CSVs found under {args.runs_root}")
+    if not quiet:
+        print(f"[html_report] discovered {len(run_dirs)} runs under {args.runs_root}")
+    return run_dirs, [os.path.basename(os.path.normpath(d)) for d in run_dirs]
+
+
+def generate(args, live=False, quiet=False):
+    """Aggregate the CSVs of every (re-)discovered run into the report HTML."""
+    run_dirs, labels = resolve_runs(args, quiet=quiet)
+    report_dir = os.path.dirname(os.path.abspath(args.out)) or "."
+    os.makedirs(report_dir, exist_ok=True)
+    runs = [collect_run(d, lab, i, report_dir)
+            for i, (d, lab) in enumerate(zip(run_dirs, labels))]
+    title = "sim2sim benchmark — " + (
+        ", ".join(labels) if len(labels) <= 5 else f"{len(labels)} runs")
+    meta = dict(
+        generated=datetime.datetime.now().isoformat(timespec="minutes", sep=" "),
+        live=live,
+        cmd="python -m sim2sim_benchmark.html_report "
+            + " ".join(shlex.quote(a) for a in sys.argv[1:]))
+    payload = {
+        "__TITLE__": html_lib.escape(title),
+        "__ROB_GROUPS__": js_embed(ROB_GROUPS),
+        "__ROB_METRICS__": js_embed(ROB_METRICS),
+        "__CAP_METRICS__": js_embed(CAP_METRICS),
+        "__META__": js_embed(meta),
+        "__DATA__": js_embed(runs),
+    }
+    # single pass so payload content can never corrupt a later substitution
+    return re.sub("|".join(map(re.escape, payload)),
+                  lambda mo: payload[mo.group(0)], HTML_TEMPLATE)
+
+
+def serve(args):
+    """Live mode: every page refresh re-discovers runs and re-aggregates the
+    CSVs server-side. Static assets (videos, CSVs) come straight from disk,
+    so the report's relative video links keep working."""
+    import functools
+    import http.server
+
+    root = os.getcwd()
+    out_abs = os.path.abspath(args.out)
+    rel = os.path.relpath(out_abs, root)
+    report_url = None if rel.startswith("..") else "/" + rel.replace(os.sep, "/")
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            try:
+                self._get()
+            except (BrokenPipeError, ConnectionResetError):
+                pass    # client hung up early — normal for video previews
+
+        def _get(self):
+            path = self.path.split("?", 1)[0]
+            if path == "/" and report_url:
+                self.send_response(302)
+                self.send_header("Location", report_url)
+                self.end_headers()
+                return
+            if path == report_url or (path == "/" and not report_url):
+                try:
+                    html = generate(args, live=True, quiet=True)
+                except Exception as exc:
+                    self.send_error(500, f"report generation failed: {exc}")
+                    return
+                try:
+                    with open(out_abs, "w") as f:   # keep the snapshot fresh too
+                        f.write(html)
+                except OSError:
+                    pass
+                body = html.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if self.headers.get("Range"):
+                self._serve_range(self.headers["Range"])
+                return
+            super().do_GET()
+
+        def _serve_range(self, range_header):
+            """Minimal byte-range support so <video> seeking works (the stdlib
+            handler always sends whole files and cannot resume)."""
+            try:
+                f = open(self.translate_path(self.path), "rb")
+            except OSError:
+                self.send_error(404)
+                return
+            with f:
+                size = os.fstat(f.fileno()).st_size
+                m = re.match(r"bytes=(\d*)-(\d*)$", range_header.strip())
+                if not m or (not m.group(1) and not m.group(2)):
+                    self.send_error(416)
+                    return
+                if not m.group(1):                     # suffix form: last N bytes
+                    start = max(0, size - int(m.group(2)))
+                    end = size - 1
+                else:
+                    start = int(m.group(1))
+                    end = min(int(m.group(2)), size - 1) if m.group(2) else size - 1
+                if start > end or start >= size:
+                    self.send_response(416)
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.end_headers()
+                    return
+                self.send_response(206)
+                self.send_header("Content-Type", self.guess_type(self.translate_path(self.path)))
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+                self.send_header("Content-Length", str(end - start + 1))
+                self.end_headers()
+                f.seek(start)
+                remaining = end - start + 1
+                while remaining > 0:
+                    chunk = f.read(min(65536, remaining))
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    remaining -= len(chunk)
+
+        def log_message(self, fmt, *fargs):
+            if self.path.split("?", 1)[0] in ("/", report_url):
+                sys.stderr.write(f"[html_report] {fmt % fargs}\n")
+
+    srv = http.server.ThreadingHTTPServer(
+        ("127.0.0.1", args.port), functools.partial(Handler, directory=root))
+    url = f"http://127.0.0.1:{args.port}" + (report_url or "/")
+    print(f"[html_report] live report at {url} — every refresh re-reads "
+          f"{args.runs_root if args.run_dirs is None else 'the given run dirs'}; "
+          f"Ctrl-C to stop")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\n[html_report] stopped")
 
 
 def main():
@@ -470,39 +1814,22 @@ def main():
     ap.add_argument("--labels", nargs="+", default=None,
                     help="one per run dir; defaults to the dir basenames")
     ap.add_argument("--out", default="sim2sim_eval_results/compare/report.html")
+    ap.add_argument("--serve", action="store_true",
+                    help="serve the report over localhost instead of only writing the "
+                         "file: every browser refresh re-discovers runs and re-reads "
+                         "the CSVs (still also refreshes the --out snapshot)")
+    ap.add_argument("--port", type=int, default=8000, help="port for --serve")
     args = ap.parse_args()
-    if args.run_dirs is None:
-        args.run_dirs = sorted(
-            os.path.join(args.runs_root, d) for d in os.listdir(args.runs_root)
-            if os.path.exists(os.path.join(args.runs_root, d, "robustness.csv"))
-            or os.path.exists(os.path.join(args.runs_root, d, "capability.csv")))
-        if not args.run_dirs:
-            ap.error(f"no runs with CSVs found under {args.runs_root}")
-        print(f"[html_report] discovered {len(args.run_dirs)} runs under {args.runs_root}")
-    if args.labels is None:
-        args.labels = [os.path.basename(os.path.normpath(d)) for d in args.run_dirs]
-    if len(args.run_dirs) != len(args.labels):
-        ap.error("--labels must match --run-dirs")
-
-    report_dir = os.path.dirname(os.path.abspath(args.out)) or "."
-    os.makedirs(report_dir, exist_ok=True)
-    runs = [collect_run(d, lab, PALETTE[i % len(PALETTE)], report_dir)
-            for i, (d, lab) in enumerate(zip(args.run_dirs, args.labels))]
-
-    n_rob = sum(1 for _ in open(os.path.join(args.run_dirs[0], "robustness.csv"))) - 1 \
-        if os.path.exists(os.path.join(args.run_dirs[0], "robustness.csv")) else 0
-    meta = (f"{len(runs)} experiments; paired episodes per condition "
-            f"(first run: {n_rob} robustness rows)")
-    html = (HTML_TEMPLATE
-            .replace("__DATA__", json.dumps(runs, separators=(",", ":")))
-            .replace("__ROB_GROUPS__", json.dumps(ROB_GROUPS))
-            .replace("__ROB_METRICS__", json.dumps(ROB_METRICS))
-            .replace("__CAP_METRICS__", json.dumps(CAP_METRICS))
-            .replace("__META__", meta))
+    if args.serve:
+        serve(args)
+        return
+    try:
+        html = generate(args)
+    except RuntimeError as e:
+        ap.error(str(e))
     with open(args.out, "w") as f:
         f.write(html)
-    print(f"[html_report] wrote {args.out} ({os.path.getsize(args.out) / 1e6:.1f} MB, "
-          f"{len(runs)} experiments)")
+    print(f"[html_report] wrote {args.out} ({os.path.getsize(args.out) / 1e6:.1f} MB)")
 
 
 if __name__ == "__main__":
