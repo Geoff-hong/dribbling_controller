@@ -309,6 +309,14 @@ DECODER_OBSERVATION_NAMES = [
 DECODER_OBSERVATION_DIMS = [3, 29, 29, 29]  # sum = 90
 ACTOR_HISTORY_LENGTH_V2 = 10
 
+# Frame the ball/cmd obs terms (ball_pos_b / ball_lin_vel_b / target_dir_b) are
+# expressed in. "pelvis" = the root frame (training default, v2_body_frame OFF).
+# "chest" = torso_link + local offset, i.e. training's --v2_body_frame. The
+# proprioceptive terms (base_ang_vel / projected_gravity) stay in the root frame
+# either way — training reads them through the stock isaaclab mdp functions.
+CHEST_FRAME_BODY = "torso_link"
+CHEST_FRAME_OFFSET = (0.077, 0.0, 0.148)
+
 
 class SoftTouchActor(nn.Module):
     def __init__(self, state_dict: dict[str, torch.Tensor]) -> None:
@@ -422,7 +430,8 @@ class SoftTouchDribbleDeployPolicy(nn.Module):
 
 
 def attach_metadata(onnx_path: Path, checkpoint_path: Path, artifact_path: Path, lab_lambda: float,
-                    obs_layout: str = "v1", latent_dim: int = 8) -> None:
+                    obs_layout: str = "v1", latent_dim: int = 8,
+                    obs_frame: str = "pelvis") -> None:
     model = onnx.load(str(onnx_path))
     if obs_layout == "v2":
         actor_names = ACTOR_SINGLE_FRAME_NAMES_V2
@@ -468,6 +477,9 @@ def attach_metadata(onnx_path: Path, checkpoint_path: Path, artifact_path: Path,
         ),
         "actor_obs_names": actor_names,
         "actor_history_length": actor_history,
+        "obs_frame": obs_frame,
+        "obs_frame_body": CHEST_FRAME_BODY if obs_frame == "chest" else "pelvis",
+        "obs_frame_offset": list(CHEST_FRAME_OFFSET) if obs_frame == "chest" else [0.0, 0.0, 0.0],
         "route_defaults": [
             "reset_ball_forward_m=0.65",
             "route_seg_len_m=0.25",
@@ -514,6 +526,13 @@ def main() -> None:
                         help="v1 = 82-dim single-frame actor; v2 = 83-dim single frame "
                              "(+ball_radius) x 10-frame history = 830-dim actor (2026-06-21 run); "
                              "v2_noballvel = v2 without ball_lin_vel_b (80-dim frame + latent)")
+    parser.add_argument("--obs-frame", choices=["pelvis", "chest"], default="pelvis",
+                        help="frame the ball/cmd obs terms are expressed in. pelvis = root "
+                             "frame (training default). chest = torso_link + offset, i.e. a "
+                             "checkpoint trained with --v2_body_frame. Getting this wrong "
+                             "feeds the policy obs from the wrong frame — the numbers look "
+                             "plausible and are meaningless, so read the checkpoint's "
+                             "env.yaml (v2_body_frame) rather than guessing")
     args = parser.parse_args()
 
     checkpoint_path = Path(os.path.expanduser(args.checkpoint)).resolve()
@@ -549,7 +568,7 @@ def main() -> None:
         dynamic_axes={},
     )
     attach_metadata(output_path, checkpoint_path, artifact_path, args.lab_lambda, args.obs_layout,
-                    latent_dim=latent_dim)
+                    latent_dim=latent_dim, obs_frame=args.obs_frame)
     onnx.checker.check_model(str(output_path))
     print(f"[export] wrote {output_path}")
 

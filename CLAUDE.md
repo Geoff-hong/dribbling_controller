@@ -1,4 +1,18 @@
 ## Workflow
+- **Eval artifacts: keep only valid runs.** If a play/eval turns out to be
+  misconfigured (wrong friction/DR, wrong era, wrong mode mix — anything that
+  invalidates the numbers), move its diagnostic dir and video to
+  `~/Desktop/trash/` (descriptive subdir name) immediately after the corrected
+  rerun exists — no need to ask. Never leave superseded/invalid eval outputs
+  in run dirs; they pollute later comparisons.
+- **Smoke tests are disposable.** Move smoke-test scripts/outputs to
+  `~/Desktop/trash/` as soon as they've served their purpose — same session,
+  not "later".
+- Before evaluating a checkpoint, read its own params/command.txt (or
+  env.yaml/README) and match ITS training params — friction, ball damping,
+  latency, reset distribution, curriculum state at that iteration. A
+  checkpoint from an older code era may need era-only knobs disabled (e.g.
+  --no_joint_friction_dr) or may not be fairly evaluable at current HEAD.
 - After making changes, summarize what was modified and ask whether to commit
 - Once the user approves the commit, push the same batch without asking again
 - Do NOT auto-commit (wait for explicit approval on the commit itself)
