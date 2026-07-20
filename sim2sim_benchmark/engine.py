@@ -64,15 +64,15 @@ LOST_BALL_T = 2.0
 JITTER_YAW_DEG = 5.0
 JITTER_XY = 0.02
 
-# training latency DR (2026-06-21 v2 policy), sampled when Robot.latency is on
-# (the pysim --latency flag) and no condition pins the channels.
-# Ball obs lag: per-episode constant d in {1,2,3} policy steps (delay_steps_range (1,3)).
-# Action lag: per-episode constant d in [0,4] sub-steps (action_delay_ms_range (0,20ms) at
-# sim_dt=0.005), 30% of episodes forced to zero (zero_prob), applied at sub-step granularity.
+# Training latency DR, sampled when Robot.latency is on (the pysim --latency
+# flag) and no condition pins the channels. FALLBACK values (the 2026-06-21 v2
+# policy); configure_train_dr() overwrites them from the checkpoint's env.yaml.
+# Ball obs lag: per-episode constant d policy steps. Action lag: per-episode
+# constant d sub-steps (sim_dt=0.005 -> 5 ms each), zero_prob episodes forced
+# to zero, applied at sub-step granularity.
 BALL_DELAY_RANGE = (1, 3)
 ACT_DELAY_SUBSTEPS = (0, 4)
 ACT_DELAY_ZERO_PROB = 0.3
-ACT_DELAY_K = (ACT_DELAY_SUBSTEPS[1] + DECIMATION - 1) // DECIMATION + 1  # ring depth (policy steps)
 EFFORT_LIMIT = np.array([88., 88., 88., 139., 139., 50., 88., 88., 50., 139., 139.,
                          25., 25., 50., 50., 25., 25., 50., 50., 25., 25., 25., 25.,
                          25., 25., 5., 5., 5., 5.])
@@ -102,22 +102,83 @@ for _s in ("left", "right"):
 for _w in ("waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint"):
     STANDBY_GAINS[_w] = (200., 5.)
 
-# --eval ranges = the ACTUAL training DR (verified against dribble_env_cfg.py):
-#   ball_mass x[0.9,1.1] of 0.391 -> [0.352,0.430], ball friction [0.475,0.525],
-#   body/foot dynamic friction [0.5,1.0]. ball_radius was NOT randomized in training
-#   (fixed 0.10), so per user request we give it a +/-10% band [0.09,0.11].
+# --eval ranges = the training DR. FALLBACK values (the v2 human_dr policies);
+# configure_train_dr() overwrites them from the checkpoint's env.yaml so a run
+# always evaluates against the DR its policy was actually trained with.
 DR = dict(ball_mass=(0.352, 0.430), ball_radius=(0.09, 0.11),
           foot_friction=(0.50, 1.00), ball_friction=(0.475, 0.525))
 
-# --sweep ranges = 1.5x the training range (centered), so we probe a bit past the
-# trained envelope but NOT into meaningless OOD territory. radius has no trained
-# range, so use the same +/-10% band [0.09,0.11] around 0.10.
+# --sweep ranges = the training range expanded 1.5x (centered): probe a bit past
+# the trained envelope but NOT into meaningless OOD territory. Recomputed from
+# the checkpoint's env.yaml by configure_train_dr().
 SWEEP_RANGES = dict(ball_mass=(0.3325, 0.4495), ball_radius=(0.09, 0.11),
                     foot_friction=(0.375, 1.125), ball_friction=(0.4625, 0.5375))
+
+
+def _expand(pair, scale, lo_clamp=0.02):
+    center, half = 0.5 * (pair[0] + pair[1]), 0.5 * (pair[1] - pair[0]) * scale
+    return (max(center - half, lo_clamp), center + half)
+
+
+def configure_train_dr(train, sweep_scale=1.5):
+    """Overwrite DR / SWEEP_RANGES / latency-DR constants in place from a parsed
+    checkpoint env.yaml (train_dr.read_train_dr record). A ball channel the
+    checkpoint did NOT randomize becomes a degenerate (nominal, nominal) range —
+    evaluating a policy against DR it never trained with would misattribute the
+    failures — EXCEPT ball radius, which keeps a synthetic +/-10% band around the
+    trained nominal (the deploy ball's radius is uncertain regardless of training;
+    the band is flagged and NOT sweep-expanded). foot_friction has no nominal in
+    the record, so when untrained it KEEPS the hardcoded fallback band (flagged).
+    train=None -> keep every hardcoded fallback.
+    """
+    global BALL_DELAY_RANGE, ACT_DELAY_SUBSTEPS, ACT_DELAY_ZERO_PROB
+    if train is None:
+        print("[train_dr] WARNING: no env.yaml — using hardcoded legacy DR ranges")
+        return
+    synthetic = []
+    nominal = dict(ball_mass=train["ball_mass_nominal"], ball_radius=train["ball_radius_nominal"],
+                   ball_friction=train["ball_friction_nominal"])
+    for key in ("ball_mass", "ball_radius", "ball_friction", "foot_friction"):
+        rng = train[f"{key}_range" if key != "foot_friction" else "foot_friction_range"]
+        if rng is not None:
+            DR[key] = (float(rng[0]), float(rng[1]))
+            SWEEP_RANGES[key] = _expand(DR[key], sweep_scale)
+        elif key == "ball_radius" and nominal["ball_radius"] is not None:
+            DR[key] = SWEEP_RANGES[key] = (0.9 * nominal["ball_radius"], 1.1 * nominal["ball_radius"])
+            synthetic.append(key)
+        elif nominal.get(key) is not None:
+            DR[key] = SWEEP_RANGES[key] = (float(nominal[key]), float(nominal[key]))
+        else:
+            print(f"[train_dr] WARNING: {key} missing from env.yaml — keeping the "
+                  f"hardcoded fallback range {DR[key]}")
+    if train["ball_obs_delay_steps"] is not None:
+        BALL_DELAY_RANGE = train["ball_obs_delay_steps"]
+    else:
+        BALL_DELAY_RANGE = (0, 0)
+    if train["action_delay_ms"] is not None:
+        ACT_DELAY_SUBSTEPS = (int(round(train["action_delay_ms"][0] / 5.0)),
+                              int(round(train["action_delay_ms"][1] / 5.0)))
+        if train["action_delay_zero_prob"] is not None:
+            ACT_DELAY_ZERO_PROB = float(train["action_delay_zero_prob"])
+    else:
+        ACT_DELAY_SUBSTEPS = (0, 0)
+    for key in DR:
+        tag = " (synthetic +/-10% band)" if key in synthetic else ""
+        print(f"[train_dr] {key}: DR [{DR[key][0]:.4g}, {DR[key][1]:.4g}]"
+              f"  sweep(x{sweep_scale:g}) [{SWEEP_RANGES[key][0]:.4g}, {SWEEP_RANGES[key][1]:.4g}]{tag}")
+    print(f"[train_dr] latency: ball obs {BALL_DELAY_RANGE} steps, action "
+          f"{tuple(5 * s for s in ACT_DELAY_SUBSTEPS)} ms (zero_prob {ACT_DELAY_ZERO_PROB:g})")
 
 # distinct per-robot colors (ball + its route dots) so each trajectory is identifiable
 COLORS = [(0.90, 0.25, 0.25), (0.25, 0.80, 0.35), (0.30, 0.55, 1.00), (0.95, 0.85, 0.15),
           (0.85, 0.40, 0.95), (0.20, 0.85, 0.85), (0.95, 0.55, 0.15), (0.6, 0.6, 0.6)]
+
+
+def rot_vec(quat_wxyz, vec):
+    res = np.zeros(3)
+    mujoco.mju_rotVecQuat(res, np.ascontiguousarray(vec, dtype=np.float64),
+                          np.ascontiguousarray(quat_wxyz, dtype=np.float64))
+    return res
 
 
 def world_to_body(quat_wxyz, vec):
@@ -509,6 +570,20 @@ class Robot:
         self.actor_dims = all_dims[: len(self.actor_names)]
         self.sf_dim = sum(self.actor_dims)                         # single-frame actor width
         self.hist_len = int(meta.get("actor_history_length", "1"))  # 10 for the v2 policy
+        # obs frame for ball_pos_b / ball_lin_vel_b / target_dir_b: "pelvis" (root,
+        # the default) or "chest" (torso_link + local offset) for policies trained
+        # with --v2_body_frame. base_ang_vel / projected_gravity stay root-frame in
+        # BOTH cases — training reads them through the stock isaaclab mdp functions.
+        self.obs_frame = meta.get("obs_frame", "pelvis")
+        self.chest_body = None
+        if self.obs_frame == "chest":
+            self.chest_body = mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_BODY,
+                self.pfx + meta.get("obs_frame_body", "torso_link"))
+            if self.chest_body < 0:
+                raise RuntimeError(f"obs_frame=chest: body "
+                                   f"{meta.get('obs_frame_body', 'torso_link')} not in the model")
+            self.chest_offset = csv_floats(meta.get("obs_frame_offset", "0.077,0,0.148"))
         # per-term [start, stop) column ranges inside one single frame
         offs = np.concatenate([[0], np.cumsum(self.actor_dims)])
         self.term_cols = [(int(offs[i]), int(offs[i + 1])) for i in range(len(self.actor_names))]
@@ -719,9 +794,17 @@ class Robot:
         cmd = self.cmd
         w, x, y, z = bq
         yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-        # ball obs in pelvis frame, optionally lagged by the per-episode camera latency
-        ball_b_cur = world_to_body(bq, data.qpos[self.ballq:self.ballq + 3] - pelvis)
-        ball_vb_cur = world_to_body(bq, data.qvel[self.ballv:self.ballv + 3])
+        # anchor of the ball/cmd obs terms: pelvis root, or the chest frame
+        # (torso_link + local offset, rotating with the waist DOFs) for
+        # --v2_body_frame policies
+        if self.chest_body is None:
+            fq, fpos = bq, pelvis
+        else:
+            fq = data.xquat[self.chest_body]
+            fpos = data.xpos[self.chest_body] + rot_vec(fq, self.chest_offset)
+        # ball obs in the anchor frame, optionally lagged by the per-episode camera latency
+        ball_b_cur = world_to_body(fq, data.qpos[self.ballq:self.ballq + 3] - fpos)
+        ball_vb_cur = world_to_body(fq, data.qvel[self.ballv:self.ballv + 3])
         if self.lat_active:
             if self.ball_pos_hist is None:
                 K = self.ball_delay + 1
@@ -743,7 +826,7 @@ class Robot:
             "last_latent_action": self.prev_latent,
             "ball_pos_b": ball_b,
             "ball_lin_vel_b": ball_vb,
-            "target_dir_b": world_to_body(bq, [cmd["target_dir"][0], cmd["target_dir"][1], 0.0])[:2],
+            "target_dir_b": world_to_body(fq, [cmd["target_dir"][0], cmd["target_dir"][1], 0.0])[:2],
             "target_speed": [cmd["target_speed"]],
             "cmd_dir_w": [cmd["target_dir"][0], cmd["target_dir"][1]],
             "next_cmd_dir_w": [cmd["next_target_dir"][0], cmd["next_target_dir"][1]],

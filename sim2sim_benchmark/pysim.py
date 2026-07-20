@@ -265,8 +265,8 @@ def main():
     ap.add_argument("--reset", default=engine.DEFAULT_RESET,
                     help="reset-state file (default: the standby reset, matching the default policy)")
     ap.add_argument("--latency", action="store_true",
-                    help="replicate the v2 training latency DR: per-episode ball-obs lag (1-3 "
-                         "steps) + action lag (0-20ms, 30%% zero). Off = feed current values.")
+                    help="replicate the checkpoint's training latency DR (per-episode ball-obs "
+                         "lag + action lag, read from its env.yaml). Off = feed current values.")
     ap.add_argument("--standby-hold-s", type=float, default=0.0,
                     help="hold the standby reset pose (PD, no policy) for this many seconds at the "
                          "start of every episode, then hand off to the policy with fresh memory")
@@ -288,6 +288,8 @@ def main():
     ap.add_argument("--ball-delay-steps", type=int, default=None, help="pin ball-obs lag (policy steps)")
     ap.add_argument("--act-delay-ms", type=float, default=None, help="pin action lag (ms)")
     ap.add_argument("--jitter", action="store_true", help="small reset yaw/xy jitter (de-determinize clean env)")
+    ap.add_argument("--sweep-scale", type=float, default=1.5,
+                    help="--sweep envelope as a multiple of the checkpoint's training DR range")
     args = ap.parse_args()
     engine.ROUTE_CFG["routeLength"] = args.route_len   # route must outlast the episode (no run-out)
     if args.spacing is None:
@@ -311,6 +313,10 @@ def main():
         print(f"[multi] capping --robots {args.robots} -> 64 (one MuJoCo model can't hold hundreds; "
               f"eval episodes accumulate over time, so raise --seconds for more data instead).")
         args.robots = 64
+
+    # DR/sweep ranges + latency DR anchor on the checkpoint's own training config
+    from .train_dr import read_train_dr
+    engine.configure_train_dr(read_train_dr(args.onnx), sweep_scale=args.sweep_scale)
 
     model, data, robots = engine.build_world(args.robots, args.spacing, args.onnx, args.reset, args.seed)
     # single-run CLI knobs become every robot's default condition
@@ -371,6 +377,11 @@ def main():
                 ("ball_radius (m)", "radius", engine.SWEEP_RANGES["ball_radius"]),
                 ("foot_friction", "foot", engine.SWEEP_RANGES["foot_friction"]),
                 ("ball_friction", "ball", engine.SWEEP_RANGES["ball_friction"])]
+        # a channel the checkpoint never randomized has a degenerate range — L
+        # identical levels there would burn L x route_bank episodes for nothing
+        for lab, key, rng in [a for a in axes if a[2][1] - a[2][0] < 1e-9]:
+            print(f"[sweep] skipping {lab}: not randomized in training (fixed {rng[0]:g})")
+        axes = [a for a in axes if a[2][1] - a[2][0] >= 1e-9]
         # ROUTE-CONTROLLED sweep: discretise each param into L levels and run EVERY level
         # on the SAME bank of R fixed routes. Route difficulty then cancels between levels,
         # so a level-to-level change in fall/cross-track is the PARAM's effect, not route luck.

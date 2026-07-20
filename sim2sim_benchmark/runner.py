@@ -11,37 +11,45 @@ import mujoco
 from . import engine
 
 
-def run_condition_table(table, title, episode_rows, *, onnx, reset_file,
+def run_condition_table(table, title, stream, *, onnx, reset_file,
                         n_robots=32, seed=0, route_bank=12, reps=4,
-                        episode_s=20.0, standby_hold_s=0.0, speed_pair_rows=None,
-                        speed_trace_rows=None):
-    """Run every condition in `table` for route_bank x reps episodes, appending one
-    metrics dict per completed episode into `episode_rows` (the caller owns the
-    list so partial results survive a crash or Ctrl-C). Conditions that record
-    speed pairs additionally append (axis_value, cmd, actual) rows, downsampled
-    to 10 Hz, into `speed_pair_rows`, and — for the first EIGHT episodes of each
-    such condition — full-rate (50 Hz) trace rows into `speed_trace_rows` for
-    the per-episode control trace plots."""
+                        episode_s=20.0, standby_hold_s=0.0):
+    """Run every condition in `table` for route_bank x reps episodes. Each
+    completed episode is written to `stream` (report.EpisodeStream) immediately —
+    the CSV is the progress record, and episodes already in it are skipped, so a
+    killed run resumes for free. Conditions that record speed pairs additionally
+    stream (axis_value, rep, cmd, actual) rows downsampled to 10 Hz, and — for
+    the first EIGHT episodes of each such condition — full-rate (50 Hz) trace
+    rows for the per-episode control trace plots."""
+    bank = max(1, route_bank)
+    pending = [(index, episode, episode % bank)
+               for index in range(len(table))
+               for episode in range(bank * max(1, reps))]
+    already_done = len(pending)
+    pending = [p for p in pending
+               if not stream.is_done(table[p[0]]["name"], p[1])]
+    already_done -= len(pending)
+    if already_done:
+        print(f"[{title}] resume: {already_done} episodes already in {stream.csv_path}")
+    if not pending:
+        print(f"[{title}] nothing left to run")
+        return
+    np.random.default_rng(seed).shuffle(pending)   # interleave over time/robots
+    total = len(pending); next_pending = 0
+    est_hours = sum(float(table[index]["episode_s"] or episode_s)
+                    for index, _, _ in pending) / 3600.0
+
     # isolate the robots: no route may reach a neighbour's workspace mid-episode
     max_route_len = max([engine.ROUTE_CFG["routeLength"]]
                         + [c["route_len_m"] for c in table if c["route_len_m"]])
     spacing = 2.0 * max_route_len + 20.0
+    print(f"[{title}] {len(table)} conditions x {bank * max(1, reps)} episodes; "
+          f"{total} to run (~{est_hours:.1f} robot-hours, spacing {spacing:.0f} m)")
     model, data, robots = engine.build_world(n_robots, spacing, onnx, reset_file, seed)
     for rb in robots:
         rb.hold_s = standby_hold_s
         rb.episode_len_default = episode_s
     mujoco.mj_resetData(model, data)
-
-    bank = max(1, route_bank)
-    pending = [(index, episode, episode % bank)
-               for index in range(len(table))
-               for episode in range(bank * max(1, reps))]
-    np.random.default_rng(seed).shuffle(pending)   # interleave over time/robots
-    total = len(pending); next_pending = 0
-    est_hours = sum(bank * max(1, reps) * float(c["episode_s"] or episode_s)
-                    for c in table) / 3600.0
-    print(f"[{title}] {len(table)} conditions x {bank * max(1, reps)} episodes "
-          f"= {total} (~{est_hours:.1f} robot-hours, spacing {spacing:.0f} m)")
 
     def assign_next_episode(rb, t):
         nonlocal next_pending
@@ -50,11 +58,20 @@ def run_condition_table(table, title, episode_rows, *, onnx, reset_file,
             rb.assignment = (index, episode, route_seed)
             # EVERY random draw of this episode (DR sampling, reset jitter, push
             # phases/directions — on top of the already route-seeded geometry) is
-            # a pure function of (benchmark seed, condition, rep): experiments run
-            # independently yet compare on IDENTICAL, paired episodes, regardless
-            # of robot count or queue timing. _seed_index (set by --shard) keeps
-            # the FULL-table condition index, so sharded runs stay bit-identical
-            # to unsharded ones.
+            # a pure function of (benchmark seed, condition, rep). _seed_index
+            # (set by --shard) keeps the FULL-table condition index.
+            #
+            # ⚠ This seeds the SETTINGS identically, NOT the trajectory. All robots
+            # share one mjData on a spaced grid, so a slot's absolute world
+            # coordinates (and its co-residents) perturb the last float bits, and
+            # 20 s of contact-rich dribbling amplifies that chaotically. Measured
+            # 2026-07-19 (m8500_bodyframe): three byte-identical conditions gave
+            # 29/46/46 % survival, flipping ~half the per-episode fall outcomes at
+            # the same (rep, route_seed); at --robots 1 the same three agreed. A
+            # single process IS bit-reproducible run-to-run, so the slot draw acts
+            # as legitimate randomization — rates stay unbiased, but conditions are
+            # NOT route-paired and carry the full binomial SE (~7 pts at n=48).
+            # Do not read differences below ~20 points as signal.
             rb.rng = np.random.Generator(np.random.PCG64(np.random.SeedSequence(
                 (seed, table[index].get("_seed_index", index), episode))))
             rb.reset(model, data, t, route_seed=route_seed, condition=table[index])
@@ -62,6 +79,7 @@ def run_condition_table(table, title, episode_rows, *, onnx, reset_file,
             rb.assignment = None
             rb.reset(model, data, t)
 
+    needs_kinematics = any(rb.chest_body is not None for rb in robots)
     for rb in robots:
         assign_next_episode(rb, 0.0)
     mujoco.mj_forward(model, data)
@@ -74,32 +92,37 @@ def run_condition_table(table, title, episode_rows, *, onnx, reset_file,
             if rb.assignment is not None:
                 index, episode, route_seed = rb.assignment
                 condition = table[index]
-                episode_rows.append(dict(
+                row = dict(
                     condition=condition["name"], group=condition["group"],
                     axis_value=condition["axis"], rep=episode, route_seed=route_seed,
-                    **rb.dr, **rb.episode_metrics(data, data.time)))
-                if speed_pair_rows is not None:
-                    pair_arrays = rb.speed_pair_arrays()
-                    if pair_arrays is not None:
-                        cmd, actual = pair_arrays
-                        speed_pair_rows.extend(
-                            (condition["axis"], float(c), float(a))
-                            for c, a in zip(cmd[::5], actual[::5]))   # 50 Hz -> 10 Hz
-                if speed_trace_rows is not None and episode < 8:
+                    **rb.dr, **rb.episode_metrics(data, data.time))
+                pair_rows = []
+                pair_arrays = rb.speed_pair_arrays()
+                if pair_arrays is not None:
+                    cmd, actual = pair_arrays
+                    pair_rows = [(condition["axis"], episode, float(c), float(a))
+                                 for c, a in zip(cmd[::5], actual[::5])]  # 50 Hz -> 10 Hz
+                trace_rows = []
+                if episode < 8:
                     trace = rb.speed_trace()
                     if trace is not None:
                         cmd, along_cmd, speed_abs = trace
-                        speed_trace_rows.extend(
+                        trace_rows = [
                             (condition["axis"], episode, step, float(c), float(p), float(a))
-                            for step, (c, p, a) in enumerate(zip(cmd, along_cmd, speed_abs)))
+                            for step, (c, p, a) in enumerate(zip(cmd, along_cmd, speed_abs))]
+                stream.write_episode(row, pair_rows, trace_rows)
                 done += 1
             assign_next_episode(rb, data.time)
+        if ended and needs_kinematics:
+            # chest-frame obs reads data.xpos/xquat, which a reset's qpos writes do
+            # not refresh — the stale first frame would be tiled into every history
+            # slot. Pure FK, so pelvis-frame runs stay bit-identical (hence the guard).
+            mujoco.mj_kinematics(model, data)
         if not np.all(np.isfinite(data.qpos)):
             print(f"\n[{title}] DIVERGED — aborting this table")
             break
         print(f"\r[{title}] {done}/{total} episodes", end="", flush=True)
     print()
-    return episode_rows
 
 
 def record_condition_videos(table, title, video_dir, *, onnx, reset_file, seed=0,
