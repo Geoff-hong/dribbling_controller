@@ -49,6 +49,7 @@ SERIES_DARK = ["#3987e5", "#2fb84a", "#d55181", "#c98500",
                "#199e70", "#d95926", "#9085e9", "#e66767"]
 
 ROB_METRICS = [("survival", "survival rate (%)", "up"),
+               ("train_survival", "training-faithful survival (%)", "up"),
                ("possession", "ball possession (%)", "up"),
                ("foot_ball_dist_p90", "foot-ball surface distance (m, p90)", "down"),
                ("ball_dist_p90", "robot-ball distance (m, p90)", "down"),
@@ -102,6 +103,13 @@ REASON_EXTRA_COLORS = ["var(--rz-x0)", "var(--rz-x1)", "var(--rz-x2)"]
 # colour, not by negating the delta.
 DIFF_METRICS = [
     ("survival", "survival rate (%)", lambda r: 1.0 - r["fell"], stats.rate_stat, True, "up"),
+    # training's actual done-set: fall OR ball_lost. None on old-criterion runs
+    # (no foot column) so they drop out of the pair instead of comparing a
+    # never-firing flag against a real one -- see condition_stats.
+    ("train_survival", "training-faithful survival (%)",
+     lambda r: None if r["foot_ball_dist"] is None
+     else (1.0 if (r["fell"] < 0.5 and r["ball_lost"] < 0.5) else 0.0),
+     stats.rate_stat, True, "up"),
     ("success", "success rate (%)", lambda r: r["success"], stats.rate_stat, True, "up"),
     ("cross_track", "cross-track (m)", lambda r: r["ct"] if r["fell"] < 0.5 else None,
      stats.mean_stat, False, "down"),
@@ -301,6 +309,20 @@ def condition_stats(rows, fail_fast=None):
         fail_fast = any(r["success"] is not None for r in rows)
     surv_p = 1.0 - float(np.mean([r["fell"] for r in rows]))
     poss_p = 1.0 - float(np.mean([r["ball_lost"] for r in rows]))
+    # TRAINING-faithful survival. Training terminates on fall OR ball_lost OR
+    # time_out (env.yaml `terminations`); the benchmark deliberately keeps
+    # ball_lost as a metric so survival and possession read as separate failure
+    # modes, which makes plain `survival` LOOSER than the thing training
+    # optimised. Recombining them costs nothing -- both flags are already on
+    # every row -- and it changes rankings: a policy that stays upright while
+    # the ball rolls away scores well on `survival` and badly here.
+    # None on runs whose ball_lost came from the old 1.5 m / 2.0 s pelvis
+    # criterion (detected by the missing foot column): that flag fired on ~1
+    # episode in 3500, so recombining it would just restate `survival` under a
+    # name that promises training parity.
+    train_surv_p = (None if all(r["foot_ball_dist"] is None for r in rows) else
+                    float(np.mean([1.0 if (r["fell"] < 0.5 and r["ball_lost"] < 0.5)
+                                   else 0.0 for r in rows])))
 
     def rate_se(p, m):
         return round(100.0 * (max(p * (1.0 - p), 0.0) / m) ** 0.5, 2) if m else None
@@ -343,6 +365,10 @@ def condition_stats(rows, fail_fast=None):
     return dict(
         n=n, n_alive=len(alive),
         survival=round(100.0 * surv_p, 2), survival_se=rate_se(surv_p, n),
+        train_survival=(None if train_surv_p is None
+                        else round(100.0 * train_surv_p, 2)),
+        train_survival_se=(None if train_surv_p is None
+                           else rate_se(train_surv_p, n)),
         possession=round(100.0 * poss_p, 2), possession_se=rate_se(poss_p, n),
         success=None if succ_p is None else round(100.0 * succ_p, 2),
         success_se=None if succ_p is None else rate_se(succ_p, len(succ_vals)),
@@ -948,6 +974,13 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <b>coloured only when its 95&nbsp;% bootstrap CI excludes zero</b> (shown in
         brackets) &mdash; grey means the gap is inside the noise. Continuous
         metrics are survivors-only, with their own n.
+        <b>survival</b> asks only whether the robot stayed upright;
+        <b>training-faithful survival</b> also counts a lost ball as an ended
+        episode, which is training's own done-set (<code>fall</code> OR
+        <code>ball_lost</code> OR <code>time_out</code>), so the gap between the
+        two rows is the episodes that stayed up while the ball rolled away. It
+        reads &ndash; on runs recorded before the foot-to-ball lost criterion
+        existed.
         See <a href="#sec-signif">Significance</a> for every condition.</div>
       <div id="summary-host" style="overflow-x:auto"></div></section>
 
@@ -1461,6 +1494,15 @@ const SGROUPS = [
     ["survival (%)", "up", r => r.nominal && r.nominal.survival,
      r => r.nominal ? `${fmtVal(r.nominal.survival)} ±${fmtVal(r.nominal.survival_se)}` : null,
      "survival"],
+    // sits directly under `survival` on purpose: the gap between the two rows
+    // IS the episodes that kept the robot upright and lost the ball, which
+    // training would have ended.
+    ["training-faithful survival (%)", "up",
+     r => r.nominal && r.nominal.train_survival,
+     r => r.nominal && r.nominal.train_survival != null
+       ? `${fmtVal(r.nominal.train_survival)} ±${fmtVal(r.nominal.train_survival_se)}`
+       : null,
+     "train_survival"],
     ["robot-ball dist (m, p90)", "down", r => r.nominal && r.nominal.ball_dist_p90,
      r => r.nominal && r.nominal.ball_dist_p90 != null
        ? `${fmtVal(r.nominal.ball_dist_p90)}` : null],
