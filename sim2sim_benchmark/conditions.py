@@ -258,6 +258,21 @@ def robustness_conditions(train=None):
                                    dr=NOMINAL_DR, reset_ball_dist=list(PHYSICS_START),
                                    reset_ball_bearing=v))
 
+    # ---- DEPLOY HAND-OFF probe -----------------------------------------------
+    # Real deployment does NOT hand the policy a clean kinematic reset: the
+    # StandbyController holds the standby pose at stiff gains, gravity settles the
+    # robot, then control HARD-swaps to the policy (soft gains, memory reset).
+    # Training never saw this -- it takes over on step 0 from the normal_pose clip
+    # -- so it is a pure sim2real probe, isolated in its own axis and flagged
+    # deploy-only rather than folded into the main survival. The axis sweeps how
+    # long the robot settles at standby before the swap. (settle_time_range_s, the
+    # training-side takeover window, is separate: the whole-run --settle-s.)
+    for hold in (0.5, 1.0, 2.0):
+        table.append(condition_row(f"handover_{hold:g}", "handover", hold,
+                                   dr=NOMINAL_DR, standby_hold_s=hold))
+    print(f"[conditions] handover: standby hold {(0.5, 1.0, 2.0)} s "
+          f"(deploy hard hand-off probe)")
+
     # Randomized start on every robustness episode. The baseline (dist/bearing
     # None) samples the FULL trained start so its number is training-faithful;
     # every other axis gets the narrow PHYSICS_START band + bearing 0, so a drop

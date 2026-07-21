@@ -314,6 +314,10 @@ DEFAULT_CONDITION = dict(
     # training-faithful; reset_ball_dist / reset_ball_bearing pin a value
     # (the robustness axes), None -> sample the trained range.
     reset_ball_random=False, reset_ball_dist=None, reset_ball_bearing=None,
+    # Deploy hand-off probe (the `handover` robustness axis): stiff-gain standby
+    # hold for this many seconds before the policy takes over. None -> the
+    # whole-run --standby-hold-s default.
+    standby_hold_s=None,
     # Robot-side DR. Each is a SCALE on the trained magnitude (1.0 = as trained,
     # 0.0 = off) except ball_radius_obs_m, which is an absolute offset.
     #
@@ -602,9 +606,15 @@ def build_world(n_robots, spacing, onnx_path, reset_path, seed, visual=True):
 def step_control_period(model, data, robots, standby_hold_s=0.0):
     """Run one 50 Hz control period (policy once, PD torque every physics sub-step)
     and return the indices of robots whose episode just ended (fall / fail-fast /
-    episode-length timeout)."""
+    episode-length timeout). The start-phase override is PER-ROBOT (resolved at
+    reset from the condition + whole-run defaults): a stiff standby HOLD (deploy
+    hand-off probe) or a soft policy SETTLE (training settle_time_range_s). The
+    standby_hold_s arg is retained for signature stability but no longer read --
+    rb.hold_s / rb.settle_s carry it."""
     for rb in robots:
-        rb.policy_step(data, hold=(data.time - rb.ep_start) < standby_hold_s)
+        warm = data.time - rb.ep_start
+        rb.policy_step(data, hold=warm < rb.hold_s,
+                       settle=(rb.hold_s <= 0.0 and warm < rb.settle_s))
         rb.maybe_push(data)
     for _ in range(DECIMATION):
         for rb in robots:
@@ -795,7 +805,16 @@ class Robot:
         self.target = np.zeros(29); self.ep_start = 0.0; self.dr = {}
         self.ct_sum = 0.0; self.ct_count = 0   # cross-track (ball deviation from route) accumulators
         self.default_condition = make_condition()  # main() fills from the single-run CLI knobs
-        self.hold_s = 0.0                      # main() sets = args.standby_hold_s
+        # start-phase override: hold_s = stiff standby freeze (deploy hand-off,
+        # the `handover` robustness axis); settle_s = soft policy takeover window
+        # (training settle_time_range_s). hold_s_default / settle_range are the
+        # whole-run fallbacks the runner sets; reset() resolves the per-episode
+        # values (and warm_s = max, the timing offset for move_start / pushes).
+        self.hold_s = 0.0
+        self.hold_s_default = 0.0              # runner sets = args.standby_hold_s
+        self.settle_range = None               # runner sets = args.settle_s (lo, hi) or None
+        self.settle_s = 0.0
+        self.warm_s = 0.0
         self.episode_len_default = 20.0        # main() sets = args.episode_s
         self.episode_len = 20.0
         self.offroute_fail_m = None            # per-condition fail-fast thresholds
@@ -1050,21 +1069,32 @@ class Robot:
         self.tgt_hist = np.tile(data.qpos[self.qadr].copy(),
                                 (max(2, -(-self.act_delay // DECIMATION) + 1), 1))
         self.substep = 0
+        # start-phase override durations (per episode). hold = stiff standby
+        # freeze (deploy hand-off probe, the `handover` axis); settle = soft
+        # policy takeover window (training). Mutually exclusive: a pinned hold
+        # wins, so settle only samples when hold is 0. warm_s = the total start
+        # phase, i.e. the offset for move_start / push onset. Settle sampling is
+        # gated so rng is unchanged when --settle-s is off.
+        self.hold_s = (float(condition["standby_hold_s"])
+                       if condition["standby_hold_s"] is not None else self.hold_s_default)
+        self.settle_s = (float(self.rng.uniform(*self.settle_range))
+                         if (self.settle_range is not None and self.hold_s <= 0.0) else 0.0)
+        self.warm_s = max(self.hold_s, self.settle_s)
         # push schedule: velocity kicks every push_interval_s, random phase/direction
         self.push_dv = float(condition["push_dv"])
         self.ball_push_dv = float(condition["ball_push_dv"])
         self.push_interval_s = float(condition["push_interval_s"])
         self.next_push_t = None; self.next_ball_push_t = None
         if self.push_dv > 0.0:
-            self.next_push_t = t + self.hold_s + self.rng.uniform(1.0, self.push_interval_s)
+            self.next_push_t = t + self.warm_s + self.rng.uniform(1.0, self.push_interval_s)
         if self.ball_push_dv > 0.0:
-            self.next_ball_push_t = t + self.hold_s + self.rng.uniform(1.0, self.push_interval_s)
+            self.next_ball_push_t = t + self.warm_s + self.rng.uniform(1.0, self.push_interval_s)
         bq = data.qpos[self.bq + 3:self.bq + 7].copy()
         fwd = np.zeros(3); mujoco.mju_rotVecQuat(fwd, np.array([1.0, 0, 0]), bq)
         self.cmd = self.route.reset(bp[:2], fwd[:2], cmd_mode)
         self.target = data.qpos[self.qadr].copy(); self.ep_start = t
-        self.move_start = t + self.hold_s
-        self.hold_target = self.target.copy()   # standby pose to PD-hold during --standby-hold-s
+        self.move_start = t + self.warm_s
+        self.hold_target = self.target.copy()   # standby pose to PD-hold during the hold phase
         self.ct_sum = 0.0; self.ct_count = 0   # per-episode cross-track
         self.cmd_speed_sum = 0.0
         self.speed_pairs = [] if condition["record_speed_pairs"] else None
@@ -1157,13 +1187,28 @@ class Robot:
         decoder = np.concatenate([bav, q, qd, self.prev_decoded])
         return np.concatenate([actor, decoder]).astype(np.float32)[None, :]
 
-    def policy_step(self, data, hold=False):
+    def policy_step(self, data, hold=False, settle=False):
         self._holding = hold
         self.cmd = self.route.update(data.qpos[self.ballq:self.ballq + 2].copy())
         self._update_dots(data)
         if hold:
-            # standby phase: PD-hold the reset pose, no policy, memory stays cleared
+            # deploy standby hold: stiff PD toward the standby pose (no policy),
+            # letting gravity settle the robot before the hard hand-off. memory
+            # stays cleared. Used by the `handover` robustness axis. (No 2 s ramp:
+            # the reset pose already IS the standby pose, so the real controller's
+            # ramp-from-current-pose is a no-op here.)
             self.target = self.hold_target
+            return
+        if settle:
+            # training settle window (settle_time_range_s): the policy STEPS -- we
+            # advance the obs history via _obs so it is populated when the policy
+            # takes over -- but its action is REPLACED by the default (standby)
+            # pose and the last-action memory zeroed, on the policy's own soft
+            # gains (not _holding). Reproduces the trained hand-off (a zeroed
+            # last-action obs from a settled state). No metrics accumulate yet.
+            self._obs(data)
+            self.prev_latent[:] = 0; self.prev_decoded[:] = 0
+            self.target = self.dq.copy()
             return
         self.ct_sum += self.cmd["crosstrack"]; self.ct_count += 1
         self.cmd_speed_sum += self.cmd["target_speed"]
@@ -1236,9 +1281,10 @@ class Robot:
         data.ctrl[self.aadr] = self.torque(data, target)
 
     def maybe_push(self, data):
-        # velocity kicks (perturbation axes); skipped during the standby hold
+        # velocity kicks (perturbation axes); skipped during the start phase
+        # (stiff hold or soft settle)
         t = data.time
-        if t - self.ep_start < self.hold_s:
+        if t - self.ep_start < self.warm_s:
             return
         if self.next_push_t is not None and t >= self.next_push_t:
             # Shaped like the training event (isaaclab events:push_by_setting_velocity
