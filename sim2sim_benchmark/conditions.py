@@ -8,6 +8,7 @@ import numpy as np
 
 from . import engine
 from .engine import make_condition, route_cmd_mode
+from .real_world import REAL_WORLD
 
 NOMINAL_DR = dict(mass=0.391, radius=0.10, foot=0.8, ball=0.5)   # deploy nominal
 # every condition pins latency to the deployment nominal — the REAL robot
@@ -15,11 +16,40 @@ NOMINAL_DR = dict(mass=0.391, radius=0.10, foot=0.8, ball=0.5)   # deploy nomina
 # the deployment stack, not of the checkpoint; the latency axes override their own
 DEPLOY_LATENCY = dict(ball_obs_delay_steps=2, action_delay_ms=10)
 
+# Roll brake: the real value sits far outside the trained one (see real_world),
+# so this axis is REAL-anchored, not training-anchored.
+REAL_BALL_DAMPING = REAL_WORLD["ball_damping"]["nominal"]
+REAL_BALL_DAMPING_BAND = REAL_WORLD["ball_damping"]["band"]
+
 
 def condition_row(name, group, axis, **overrides):
     for key, value in DEPLOY_LATENCY.items():
         overrides.setdefault(key, value)
     return {**make_condition(**overrides), "name": name, "group": group, "axis": float(axis)}
+
+
+def ball_damping_axis(train_c, real=REAL_BALL_DAMPING, band=REAL_BALL_DAMPING_BAND):
+    """Roll-brake axis spanning the REAL band and the TRAINED value in one sweep.
+
+    Step size widens with c because the roll decay k = 2/7 c is exponential in
+    time: the same delta-c changes the roll distance 3.5/c far more at the
+    slippery (hardware-real) end, which is also where the behavior differentiates
+    — the same reason the training side spaces its damping DR bins logarithmically.
+    Both anchors (`real` and the checkpoint's trained c) are always grid points.
+    """
+    lo = min(band[0], train_c or band[0])
+    hi = max(band[1], train_c or band[1])
+    values = set()
+    for start, stop, step in ((lo, min(1.2, hi), 0.1), (1.2, min(2.0, hi), 0.2),
+                              (2.0, hi, 0.4)):
+        if stop >= start:
+            values |= {round(float(v), 3) for v in np.arange(start, stop + 1e-9, step)}
+    values |= {round(float(real), 3)} | ({round(float(train_c), 3)} if train_c else set())
+    values = tuple(sorted(v for v in values if lo - 1e-9 <= v <= hi + 1e-9))
+    print(f"[conditions] ball_damping: axis {values} "
+          f"(real {real:g}, trained {train_c if train_c else 'unknown'}; "
+          f"roll distance {3.5 / values[-1]:.2f}-{3.5 / values[0]:.2f} m at 1 m/s)")
+    return values
 
 
 def robustness_conditions(train=None):
@@ -112,6 +142,9 @@ def robustness_conditions(train=None):
         for v in values:
             table.append(condition_row(f"{group}_{v:g}", group, v,
                                        dr={**NOMINAL_DR, dr_key: v}))
+    for c in ball_damping_axis(train.get("ball_damping")):
+        table.append(condition_row(f"balldamp_{c:g}", "ball_damping", c,
+                                   dr=NOMINAL_DR, ball_damping=c))
     for dv in push_dvs:
         table.append(condition_row(f"push_{dv:g}", "base_push", dv,
                                    dr=NOMINAL_DR, push_dv=dv))
@@ -124,6 +157,72 @@ def robustness_conditions(train=None):
     for ms in actlag_ms:
         table.append(condition_row(f"actlag_{ms}", "act_latency", ms,
                                    dr=NOMINAL_DR, action_delay_ms=ms))
+
+    # ---- ROBOT-SIDE axes -------------------------------------------------
+    # Everything above perturbs the BALL. Training also randomizes the robot
+    # (sensor noise, actuator gains, torso payload/CoM, encoder calibration) and
+    # the benchmark tested none of it, so every previous run evaluated a
+    # nominal, perfectly-calibrated robot with noise-free sensors -- easier than
+    # the policy's own training distribution, and blind to the channels most
+    # likely to break a real transfer. Each axis is a MULTIPLE of the
+    # checkpoint's own trained magnitude, so 1.0 reproduces training.
+    def scaled_axis(channel, present, values):
+        if not present:
+            print(f"[conditions] {channel}: not randomized in training — skipped")
+            return ()
+        print(f"[conditions] {channel}: scale axis {values} (x trained magnitude)")
+        return values
+
+    # obs noise is OFF at the deploy nominal (see engine.DEFAULT_CONDITION for
+    # why), so this axis is the only place the noise sensitivity is measured --
+    # 1.0 is the level the checkpoint actually trained with.
+    SCALES = (0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0)
+    for scale in scaled_axis("obs_noise", train.get("obs_noise"), SCALES):
+        table.append(condition_row(f"obsnoise_{scale:g}", "obs_noise", scale,
+                                   dr=NOMINAL_DR, obs_noise_scale=scale))
+    for scale in scaled_axis("base_com", train.get("base_com_range"), SCALES[:7]):
+        table.append(condition_row(f"basecom_{scale:g}", "base_com", scale,
+                                   dr=NOMINAL_DR, base_com_scale=scale))
+
+    # actuator gain is a two-sided multiplier, so its axis walks the multiplier
+    # itself out from 1.0 rather than a magnitude scale
+    gain_range = train.get("actuator_gain_range")
+    if gain_range:
+        half = max(abs(gain_range[1] - 1.0), abs(1.0 - gain_range[0]))
+        gains = thin(sorted({round(1.0 + m * half, 3)
+                             for m in (-3, -2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2, 3)}))
+        print(f"[conditions] actuator_gain: axis {gains} (trained {gain_range})")
+        for g in gains:
+            table.append(condition_row(f"gain_{g:g}", "actuator_gain", g,
+                                       dr=NOMINAL_DR, actuator_gain_scale=g))
+    else:
+        print("[conditions] actuator_gain: not randomized in training — skipped")
+
+    # payload / encoder offset are absolute (their trained ranges are one-sided),
+    # anchored on the trained maximum
+    for channel, group, key, rng_key in (
+            ("payload", "payload", "payload_kg", "payload_kg_range"),
+            ("encoder offset", "encoder_offset", "joint_offset_rad",
+             "joint_offset_range")):
+        trained = train.get(rng_key)
+        if not trained:
+            print(f"[conditions] {channel}: not randomized in training — skipped")
+            continue
+        top = max(abs(trained[0]), abs(trained[1]))
+        values = thin([round(m * top, 4) for m in (0, 0.5, 1.0, 1.5, 2.0, 3.0)])
+        print(f"[conditions] {channel}: axis {values} (trained max {top:g})")
+        for v in values:
+            table.append(condition_row(f"{group}_{v:g}", group, v,
+                                       dr=NOMINAL_DR, **{key: v}))
+
+    # believed-vs-true ball radius. Training feeds the policy the TRUE radius;
+    # the deployment C++ feeds a configured constant, so the real failure mode is
+    # the configured value disagreeing with the ball on the floor. Nothing in
+    # training covers this, so it is a pure probe around the deploy nominal.
+    for delta in (-0.02, -0.015, -0.01, -0.005, 0.0, 0.005, 0.01, 0.015, 0.02):
+        table.append(condition_row(f"radiusobs_{delta:g}", "ball_radius_obs", delta,
+                                   dr=NOMINAL_DR,
+                                   ball_radius_obs_m=NOMINAL_DR["radius"] + delta))
     return table
 
 
@@ -272,6 +371,8 @@ def load_conditions_json(path):
             for key in ("episode_s", "offroute_fail_m", "ball_far_fail_m"):
                 if condition[key] is not None and float(condition[key]) <= 0:
                     raise ValueError(f"{key} must be > 0")
+            if condition["ball_damping"] is not None and float(condition["ball_damping"]) < 0:
+                raise ValueError("ball_damping must be >= 0 (0 = free-rolling ball)")
         except (ValueError, KeyError) as e:
             raise ValueError(f"conditions[{i}] ({name}): {e}") from e
         table.append({**condition, "name": name, "group": group, "axis": axis})

@@ -9,10 +9,17 @@
       # re-discovers runs and re-reads the CSVs on every page load
 
 One HTML file, no external assets: experiment checkboxes in the sidebar select
-which runs are drawn. A topline summary table leads; sections mirror the PNG
-figures (robustness axes, corner turn, human dribble, u-turn, speed, control
-traces) with hover tooltips, +/-1 SE bands on rate metrics, failure-mode
-breakdowns, and a per-condition video index with a side-by-side lightbox
+which runs are drawn. A topline summary table leads, then a DIFFERENCE MAP that
+answers "where do these runs actually differ, and is it real" -- every condition
+carries a 95 % bootstrap CI on the difference (paired on route via
+(condition, rep)), and nothing is coloured unless that interval clears zero. At
+the default n=48 the rate noise floor alone is ~7 points, so an uncoloured cell
+means "cannot tell apart", NOT "equal".
+
+Remaining sections mirror the PNG figures (robustness axes, corner turn, human
+dribble, u-turn, speed, control traces) with hover tooltips, +/-1 SE bands on
+every metric, failure-mode breakdowns, and a per-condition video index with a
+side-by-side lightbox
 (links resolve relative to the report location, so keep the report under
 sim2sim_eval_results/compare/ with runs under sim2sim_eval_results/runs/).
 All aggregation happens here in Python; the embedded JS only toggles and
@@ -31,29 +38,184 @@ import sys
 
 import numpy as np
 
+from . import stats
+from .real_world import REAL_WORLD
+
 # CVD-validated 8-slot categorical order (adjacent-pair simulated dE >= 8 in
 # both modes); slot index i is stored per run, hex lives in the CSS as --sI.
 SERIES_LIGHT = ["#2a78d6", "#008300", "#e87ba4", "#eda100",
                 "#1baf7a", "#eb6834", "#4a3aa7", "#e34948"]
-SERIES_DARK = ["#3987e5", "#008300", "#d55181", "#c98500",
+SERIES_DARK = ["#3987e5", "#2fb84a", "#d55181", "#c98500",
                "#199e70", "#d95926", "#9085e9", "#e66767"]
 
 ROB_METRICS = [("survival", "survival rate (%)", "up"),
                ("possession", "ball possession (%)", "up"),
-               ("speed_ratio", "speed ratio (achieved/cmd)", "one"),
+               ("foot_ball_dist_p90", "foot-ball surface distance (m, p90)", "down"),
+               ("ball_dist_p90", "robot-ball distance (m, p90)", "down"),
+               ("speed_ratio", "speed ratio (achieved/cmd, survivors)", "one"),
                ("cross_track", "cross-track (m, survivors)", "down"),
+               ("min_pelvis_z_p5", "lowest pelvis height (m, p5)", "up"),
                ("mean_duration", "mean episode duration (s)", "up")]
-ROB_GROUPS = [("ball_mass", "ball mass (kg)"), ("ball_radius", "ball radius (m)"),
-              ("foot_friction", "foot friction"), ("ball_friction", "ball friction"),
-              ("base_push", "base push dv (m/s)"),
-              ("ball_push", "ball push dv (m/s)"),
-              ("obs_latency", "ball-obs latency (steps @ 50 Hz)"),
-              ("act_latency", "action latency (ms)"),
-              ("dr_scale", "DR scale alpha")]   # legacy CSVs only
+# Robustness groups are DISCOVERED from the CSVs (see robustness_groups); this
+# table only supplies nicer axis labels for the ones we know about, so a new
+# sweep group shows up automatically instead of being silently invisible.
+ROB_GROUP_LABEL = {
+    "ball_mass": "ball mass (kg)", "ball_radius": "ball radius (m)",
+    "foot_friction": "foot friction", "ball_friction": "ball friction",
+    "ball_damping": "ball roll brake c (1 m/s rolls 3.5/c m)",
+    "base_push": "base push dv (m/s)", "ball_push": "ball push dv (m/s)",
+    "obs_latency": "ball-obs latency (steps @ 50 Hz)",
+    "act_latency": "action latency (ms)",
+    "obs_noise": "obs noise scale (x trained)",
+    "actuator_gain": "actuator kp/kd scale",
+    "payload": "torso payload (kg)", "base_com": "torso CoM offset (m)",
+    "encoder_offset": "joint encoder offset (rad)",
+    "ball_radius_obs": "believed - true ball radius (m)",
+    "dr_scale": "DR scale alpha",   # legacy CSVs only
+}
+# groups that belong to the capability sections, never the robustness grid
+CAP_GROUPS = {"baseline", "straight_speed", "corner_turn", "u_turn",
+              "human_dribble", "speed_tracking"}
 CAP_METRICS = [("success", "success rate (%)", "up"),
                ("survival", "survival rate (%)", "up"),
-               ("possession", "ball possession (%)", "up"),
+               ("progress", "progress before termination (m)", "up"),
+               ("ball_dist_p90", "robot-ball distance (m, p90)", "down"),
                ("cross_track", "cross-track (m, survivors)", "down")]
+
+
+# fail_reason -> (legend label, CSS colour var). "timeout"/"completed" are the
+# two readings of an empty fail_reason (see condition_stats).
+REASON_STYLE = {
+    "completed": ("completed", "var(--rz-done)"),
+    "timeout": ("ran full clock", "var(--rz-done)"),
+    "ball_far": ("ball lost", "var(--rz-far)"),
+    "off_route": ("off route", "var(--rz-off)"),
+    "fell": ("fell", "var(--rz-fell)"),
+}
+REASON_ORDER = ["completed", "timeout", "ball_far", "off_route", "fell"]
+# extra slots for reason strings this file has never seen; cycles if exhausted
+REASON_EXTRA_COLORS = ["var(--rz-x0)", "var(--rz-x1)", "var(--rz-x2)"]
+
+
+# Metrics the significance machinery compares. (key, label, row-extractor,
+# statistic, is_rate). "down" metrics are handled in the JS by flipping the
+# colour, not by negating the delta.
+DIFF_METRICS = [
+    ("survival", "survival rate (%)", lambda r: 1.0 - r["fell"], stats.rate_stat, True, "up"),
+    ("success", "success rate (%)", lambda r: r["success"], stats.rate_stat, True, "up"),
+    ("cross_track", "cross-track (m)", lambda r: r["ct"] if r["fell"] < 0.5 else None,
+     stats.mean_stat, False, "down"),
+    ("foot_ball_dist", "foot-ball distance (m)", lambda r: r["foot_ball_dist"],
+     stats.mean_stat, False, "down"),
+    ("ball_dist", "robot-ball distance (m)", lambda r: r["ball_dist"],
+     stats.mean_stat, False, "down"),
+    ("progress", "progress (m)", lambda r: r["progress"], stats.mean_stat, False, "up"),
+]
+# Every extra run multiplies the bootstrap work (~1.5 s per pair over all five
+# metrics x ~130 conditions). Up to this many runs we compute EVERY pair, so any
+# run can serve as the baseline; beyond it only pairs against the first run are
+# computed and the page says so instead of silently offering a dead control.
+MAX_DIFF_RUNS = 4
+
+
+def _diff_rows(rows, extract):
+    """Episode rows reduced to {pair, value} for one diff metric."""
+    out = []
+    for r in rows:
+        value = extract(r)
+        out.append(dict(pair=stats.pair_key(r),
+                        v=float("nan") if value is None else float(value)))
+    return out
+
+
+def condition_diffs(parsed, labels):
+    """Bootstrap CIs on every condition, for every comparable pair of runs.
+
+    Returns {"i>j": {metric: [{cond, group, x, delta, lo, hi, sig, paired, n}]}}
+    where i is the baseline and j the comparison. Only i<j is stored; the JS
+    negates for the reverse direction.
+
+    This is THE view the report was missing: the summary table used to colour
+    any non-zero delta green/red, while the measured noise floor at n=48 is
+    ~7 points. Here a delta is only marked significant when the 95% bootstrap
+    CI on the difference excludes zero.
+    """
+    n = len(parsed)
+    pairs = [(i, j) for i in range(n) for j in range(i + 1, n)
+             if n <= MAX_DIFF_RUNS or i == 0]
+    if n > MAX_DIFF_RUNS:
+        print(f"[html_report] {n} runs: computing significance only against "
+              f"{labels[0]} (pairwise would be {n * (n - 1) // 2} comparisons)")
+    out = {}
+    for i, j in pairs:
+        per_metric = {}
+        for key, _label, extract, stat_fn, is_rate, _dir in DIFF_METRICS:
+            entries = []
+            for table in (0, 1):          # robustness, capability
+                rows_a, rows_b = parsed[i][table], parsed[j][table]
+                by_cond_a, by_cond_b = {}, {}
+                for r in rows_a:
+                    by_cond_a.setdefault(r["condition"], []).append(r)
+                for r in rows_b:
+                    by_cond_b.setdefault(r["condition"], []).append(r)
+                for cond in sorted(set(by_cond_a) & set(by_cond_b)):
+                    a = _diff_rows(by_cond_a[cond], extract)
+                    b = _diff_rows(by_cond_b[cond], extract)
+                    if not any(np.isfinite(r["v"]) for r in a):
+                        continue          # metric undefined for this condition
+                    ci = stats.bootstrap_diff_ci(a, b, "v", stat_fn,
+                                                 pair_key="pair", rate=is_rate)
+                    if not np.isfinite(ci["delta"]):
+                        continue
+                    entries.append(dict(
+                        cond=cond, group=by_cond_a[cond][0]["group"],
+                        x=by_cond_a[cond][0]["axis"],
+                        delta=round(ci["delta"], 4),
+                        lo=round(ci["lo"], 4) if np.isfinite(ci["lo"]) else None,
+                        hi=round(ci["hi"], 4) if np.isfinite(ci["hi"]) else None,
+                        sig=ci["significant"], paired=ci["paired"],
+                        n=ci["n_pairs"] or min(ci["n_a"], ci["n_b"])))
+            if entries:
+                per_metric[key] = entries
+        if per_metric:
+            out[f"{i}>{j}"] = per_metric
+    return out
+
+
+def reason_legend(runs):
+    """[(key, label, cssvar), ...] over the fail_reasons actually present.
+
+    The old fixed 4-element list dropped anything else on the floor: the bars
+    would quietly stop summing to 100% with no visual cue. Unknown reasons now
+    get their own slot and legend entry."""
+    present = set()
+    for run in runs:
+        for series in list(run["robustness"].values()) + [
+                run["straight"], run["human"], run["tracking"],
+                run["corner"]["L"], run["corner"]["R"],
+                run["uturn"]["L"], run["uturn"]["R"]]:
+            for point in series:
+                present.update(point.get("reasons", {}))
+    known = [k for k in REASON_ORDER if k in present]
+    unknown = sorted(present - set(known))
+    out = [(k, *REASON_STYLE[k]) for k in known]
+    for i, k in enumerate(unknown):
+        out.append((k, k, REASON_EXTRA_COLORS[i % len(REASON_EXTRA_COLORS)]))
+    # stacked bars draw bottom-up; keep the "good" outcomes at the bottom
+    return out
+
+
+def robustness_groups(*row_lists):
+    """Ordered (group, label) pairs actually present in the data.
+
+    Known groups keep their curated order and label; anything else is appended
+    alphabetically under its raw name. Groups with no episodes are dropped, so
+    the report no longer renders empty panels for channels this checkpoint never
+    swept (ball_damping / dr_scale on the current runs)."""
+    present = {r["group"] for rows in row_lists for r in rows} - CAP_GROUPS - {""}
+    known = [g for g in ROB_GROUP_LABEL if g in present]
+    unknown = sorted(present - set(known))
+    return [(g, ROB_GROUP_LABEL.get(g, g)) for g in known + unknown]
 
 
 def _f(value):
@@ -81,11 +243,24 @@ def read_rows(path):
                 continue
             out.append(dict(
                 condition=r["condition"], group=r.get("group", ""), axis=axis,
+                # rep keys the route: the runner assigns route_seed = rep % bank,
+                # so (condition, rep) names the SAME route in every run of the
+                # same table -> stats.bootstrap_diff_ci can pair on it
+                rep=r.get("rep", ""), route_seed=r.get("route_seed", ""),
                 fell=fell, ball_lost=lost,
                 success=_f(r.get("success")),
                 ach=_f(r.get("ach_speed_mps")), cmd=_f(r.get("cmd_speed_mps")),
                 ct=_f(r.get("cross_track_m")), r=_f(r.get("speed_corr_r")),
                 duration=_f(r.get("duration_s")),
+                progress=_f(r.get("progress_m")),
+                ball_dist=_f(r.get("ball_dist_m")),
+                # training's own possession measure (nearest foot to ball
+                # surface); absent from pre-2026-07-20 CSVs, hence .get
+                foot_ball_dist=_f(r.get("foot_ball_dist_m")),
+                ball_lost_t=_f(r.get("ball_lost_t_s")),
+                min_z=_f(r.get("min_pelvis_z")), max_tilt=_f(r.get("max_tilt_gvec_z")),
+                slope=_f(r.get("speed_slope")), bias=_f(r.get("speed_bias")),
+                resid=_f(r.get("speed_resid_mps")),
                 reason=(r.get("fail_reason") or "").strip()))
     if bad:
         print(f"[html_report] {path}: skipped {bad} malformed rows")
@@ -96,36 +271,100 @@ def finite(values):
     return [v for v in values if v is not None and np.isfinite(v)]
 
 
-def condition_stats(rows):
-    """rows of one condition -> point stats used by every panel."""
+def condition_stats(rows, fail_fast=None):
+    """rows of one condition -> point stats used by every panel.
+
+    `fail_fast` (None = infer) decides how an empty fail_reason is labelled.
+    engine.episode_metrics writes `success` ONLY when a fail-fast criterion is
+    armed, so a finite success column is an exact marker for it -- no group-name
+    list to keep in sync.
+
+    Continuous metrics are SURVIVORS-ONLY (`alive`). An episode truncated by a
+    fall covers its route distance in less wall time, so an unfiltered
+    ach_speed / speed_ratio mean RISES as the condition gets harder -- it moves
+    opposite to what it claims to measure. cross-track was already filtered this
+    way; ach/ratio now match it, and every panel reports the sample it used.
+
+    foot_ball_dist / ball_dist percentiles are the continuous form of
+    possession. Pre-2026-07-20 runs used a 1.5 m / 2.0 s pelvis-to-ball criterion
+    that fired on ~1 episode in 3500, making the possession panel a flat 100%
+    line; those CSVs lack the foot column and fall back to ball_dist.
+    """
     n = len(rows)
+    alive = [r for r in rows if r["fell"] < 0.5]
+    if fail_fast is None:
+        fail_fast = any(r["success"] is not None for r in rows)
     surv_p = 1.0 - float(np.mean([r["fell"] for r in rows]))
     poss_p = 1.0 - float(np.mean([r["ball_lost"] for r in rows]))
 
     def rate_se(p, m):
         return round(100.0 * (max(p * (1.0 - p), 0.0) / m) ** 0.5, 2) if m else None
 
+    def mean_se(values, digits=4):
+        """SEM of a continuous metric. Reported for the same reason the rates
+        carry a binomial SE: episodes are independent draws (the trajectory
+        follows the robot slot the episode landed on), so a bare mean invites
+        reading noise as trend. Note the divisor is len(values), NOT n -- e.g.
+        cross-track is survivors-only, so its sample is smaller than the
+        condition's episode count and its SE correspondingly wider."""
+        if len(values) < 2:
+            return None
+        return round(float(np.std(values, ddof=1) / len(values) ** 0.5), digits)
+
+    def pct(values, q, digits=3):
+        values = finite(values)
+        return round(float(np.percentile(values, q)), digits) if values else None
+
     succ_vals = finite([r["success"] for r in rows])
     succ_p = float(np.mean(succ_vals)) if succ_vals else None
-    ratios = [r["ach"] / r["cmd"] for r in rows
+    ratios = [r["ach"] / r["cmd"] for r in alive
               if r["ach"] is not None and r["cmd"] is not None and r["cmd"] > 0.05]
-    ct_vals = finite([r["ct"] for r in rows if r["fell"] < 0.5])
-    ach_vals = finite([r["ach"] for r in rows])
+    ct_vals = finite([r["ct"] for r in alive])
+    ach_vals = finite([r["ach"] for r in alive])
     dur_vals = finite([r["duration"] for r in rows])
+    prog_vals = finite([r["progress"] for r in rows])
+    bd_vals = finite([r["ball_dist"] for r in rows])
+    fb_vals = finite([r["foot_ball_dist"] for r in rows])
+    mz_vals = finite([r["min_z"] for r in rows])
     reasons = {}
     for r in rows:
-        key = r["reason"] or "completed"
+        # an empty fail_reason means "the episode was never cut short". In a
+        # fail-fast (capability) condition that IS a clean completion; in a
+        # robustness condition there is no fail-fast at all, so it only means the
+        # clock ran out -- calling that "completed" would paint an episode that
+        # drifted 5 m off route as a success.
+        key = r["reason"] or ("completed" if fail_fast else "timeout")
         reasons[key] = reasons.get(key, 0) + 1
     return dict(
-        n=n,
+        n=n, n_alive=len(alive),
         survival=round(100.0 * surv_p, 2), survival_se=rate_se(surv_p, n),
         possession=round(100.0 * poss_p, 2), possession_se=rate_se(poss_p, n),
         success=None if succ_p is None else round(100.0 * succ_p, 2),
         success_se=None if succ_p is None else rate_se(succ_p, len(succ_vals)),
         speed_ratio=round(float(np.mean(ratios)), 4) if ratios else None,
+        speed_ratio_se=mean_se(ratios),
+        speed_ratio_n=len(ratios),
         cross_track=round(float(np.mean(ct_vals)), 4) if ct_vals else None,
+        cross_track_se=mean_se(ct_vals),
+        cross_track_n=len(ct_vals),      # survivors only -- smaller than n
         ach_speed=round(float(np.mean(ach_vals)), 4) if ach_vals else None,
+        ach_speed_se=mean_se(ach_vals),
+        ach_speed_n=len(ach_vals),
+        ball_dist_p50=pct(bd_vals, 50), ball_dist_p90=pct(bd_vals, 90),
+        ball_dist_n=len(bd_vals),
+        foot_ball_dist=round(float(np.mean(fb_vals)), 4) if fb_vals else None,
+        foot_ball_dist_se=mean_se(fb_vals),
+        foot_ball_dist_p90=pct(fb_vals, 90), foot_ball_dist_n=len(fb_vals),
+        # how close the episode came to the fall threshold. Recorded raw so a
+        # criterion change stays auditable instead of silently re-ruling old runs
+        min_pelvis_z_p5=pct(mz_vals, 5), min_pelvis_z=round(
+            float(np.median(mz_vals)), 4) if mz_vals else None,
+        min_pelvis_z_n=len(mz_vals),
+        progress=round(float(np.mean(prog_vals)), 3) if prog_vals else None,
+        progress_se=mean_se(prog_vals, 3),
+        progress_n=len(prog_vals),
         mean_duration=round(float(np.mean(dur_vals)), 2) if dur_vals else None,
+        mean_duration_se=mean_se(dur_vals, 2),
         reasons=reasons)
 
 
@@ -241,8 +480,16 @@ def toplines(straight, corner, human, uturn, cap_rows, pairs):
             best = p["x"]
         return best
 
-    tr = finite([r["r"] for r in cap_rows if r["group"] == "speed_tracking"])
+    track = [r for r in cap_rows if r["group"] == "speed_tracking"]
+    tr = finite([r["r"] for r in track])
+
+    def avg(key, digits=3):
+        vals = finite([r.get(key) for r in track])
+        return round(float(np.mean(vals)), digits) if vals else None
+
     return dict(
+        tracking_slope=avg("slope"), tracking_bias=avg("bias"),
+        tracking_resid=avg("resid"),
         max_speed=passing(straight),
         corner_L=passing(corner["L"]), corner_R=passing(corner["R"]),
         uturn_L=passing(uturn["L"]), uturn_R=passing(uturn["R"]),
@@ -250,9 +497,56 @@ def toplines(straight, corner, human, uturn, cap_rows, pairs):
         tracking_r=round(float(np.mean(tr)), 3) if tr else None)
 
 
-def collect_run(run_dir, label, index, report_dir):
-    rob = read_rows(os.path.join(run_dir, "robustness.csv"))
-    cap = read_rows(os.path.join(run_dir, "capability.csv"))
+def run_provenance(run_dir):
+    """The two sidecars every run already writes, which no plotting module read.
+
+    `<test>.fingerprint.json` is the semantic identity of the condition table
+    (__main__.table_fingerprint). If two runs disagree, their curves share an x
+    axis by coincidence only -- plot.py warned about this on the console, but the
+    interactive report, which is where runs actually get compared, had no idea.
+
+    `train_dr.json` records the DR the policy was TRAINED with, which is exactly
+    the "match ITS training params" check CLAUDE.md mandates before trusting a
+    comparison."""
+    out = {"fingerprints": {}, "train": None}
+    for test in ("robustness", "capability"):
+        path = os.path.join(run_dir, f"{test}.fingerprint.json")
+        if os.path.exists(path):
+            try:
+                out["fingerprints"][test] = json.load(open(path))["fingerprint"][:12]
+            except (ValueError, KeyError, OSError):
+                out["fingerprints"][test] = "unreadable"
+    path = os.path.join(run_dir, "train_dr.json")
+    if os.path.exists(path):
+        try:
+            blob = json.load(open(path))
+            train = blob.get("train") or {}
+            out["train"] = dict(
+                onnx=os.path.basename(str(blob.get("onnx") or "")),
+                source=train.get("source"),
+                ball_mass=train.get("ball_mass_range"),
+                ball_radius=train.get("ball_radius_range"),
+                ball_friction=train.get("ball_friction_range"),
+                foot_friction=train.get("foot_friction_range"),
+                ball_damping=train.get("ball_damping"),
+                obs_delay=train.get("ball_obs_delay_steps"),
+                act_delay=train.get("action_delay_ms"),
+                push_robot=(train.get("push_robot") or {}).get("dv"),
+                push_ball=(train.get("push_ball") or {}).get("dv"))
+        except (ValueError, KeyError, OSError):
+            pass
+    return out
+
+
+def collect_run(run_dir, label, index, report_dir, rob_groups=None, rows=None):
+    """One run -> the JSON blob the page draws. `rob_groups` is the union of
+    robustness groups across ALL selected runs (so a group only one run has still
+    gets a panel); `rows` reuses an already-parsed (rob, cap) pair."""
+    rob, cap = rows if rows is not None else (
+        read_rows(os.path.join(run_dir, "robustness.csv")),
+        read_rows(os.path.join(run_dir, "capability.csv")))
+    if rob_groups is None:
+        rob_groups = robustness_groups(rob, cap)
     nominal = [r for r in rob if r["group"] == "baseline"]
     corner = group_series(cap, "corner_turn", split_sign=True)
     human = group_series(cap, "human_dribble")
@@ -265,11 +559,12 @@ def collect_run(run_dir, label, index, report_dir):
     pairs = binned_pairs(os.path.join(run_dir, "capability_speed_pairs.csv"))
     return dict(
         label=label, color=index % 8,
+        prov=run_provenance(run_dir),
         info=dict(dir=os.path.relpath(run_dir), n_rob=len(rob), n_cap=len(cap),
                   data_time=datetime.datetime.fromtimestamp(max(mtimes)).strftime("%Y-%m-%d %H:%M")
                   if mtimes else None),
         nominal=condition_stats(nominal) if nominal else None,
-        robustness={g: group_series(rob, g) for g, _ in ROB_GROUPS},
+        robustness={g: group_series(rob, g) for g, _ in rob_groups},
         straight=straight, corner=corner, human=human, uturn=uturn,
         tracking=group_series(cap, "speed_tracking"),
         pairs=pairs,
@@ -299,7 +594,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     --shadow2:0 2px 6px rgba(24,22,16,.08), 0 10px 26px rgba(24,22,16,.09);
     --s0:#2a78d6; --s1:#008300; --s2:#e87ba4; --s3:#eda100;
     --s4:#1baf7a; --s5:#eb6834; --s6:#4a3aa7; --s7:#e34948;
-    --rz-fell:#d03b3b; --rz-off:#ec835a; --rz-far:#fab219; --rz-done:#d9d8d1;
+    --rz-fell:#d03b3b; --rz-off:#6c5fc7; --rz-far:#fab219; --rz-done:#d9d8d1;
+    --rz-x0:#00868b; --rz-x1:#a1568c; --rz-x2:#7a6a3a;
   }
   @media (prefers-color-scheme: dark) {
     :root:where(:not([data-theme="light"])) {
@@ -313,9 +609,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       --dgood:#0ca30c; --dbad:#e05d5d;
       --shadow:0 1px 2px rgba(0,0,0,.4);
       --shadow2:0 4px 16px rgba(0,0,0,.5);
-      --s0:#3987e5; --s1:#008300; --s2:#d55181; --s3:#c98500;
+      --s0:#3987e5; --s1:#2fb84a; --s2:#d55181; --s3:#c98500;
       --s4:#199e70; --s5:#d95926; --s6:#9085e9; --s7:#e66767;
-      --rz-done:#3a3a37;
+      --rz-fell:#e05a5a; --rz-off:#8b7fe0; --rz-far:#e0a930; --rz-done:#3a3a37;
+      --rz-x0:#31a5a9; --rz-x1:#c07aa9; --rz-x2:#a3915a;
     }
   }
   :root[data-theme="dark"] {
@@ -329,9 +626,10 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     --dgood:#0ca30c; --dbad:#e05d5d;
     --shadow:0 1px 2px rgba(0,0,0,.4);
     --shadow2:0 4px 16px rgba(0,0,0,.5);
-    --s0:#3987e5; --s1:#008300; --s2:#d55181; --s3:#c98500;
+    --s0:#3987e5; --s1:#2fb84a; --s2:#d55181; --s3:#c98500;
     --s4:#199e70; --s5:#d95926; --s6:#9085e9; --s7:#e66767;
-    --rz-done:#3a3a37;
+    --rz-fell:#e05a5a; --rz-off:#8b7fe0; --rz-far:#e0a930; --rz-done:#3a3a37;
+    --rz-x0:#31a5a9; --rz-x1:#c07aa9; --rz-x2:#a3915a;
   }
   * { box-sizing: border-box; }
   html { scroll-behavior: smooth; scrollbar-width:thin; scrollbar-color:var(--axis) transparent; }
@@ -434,6 +732,9 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .chip input { margin:0; accent-color:var(--accent); cursor:pointer; }
   .chip:has(input) { cursor:pointer; }
   .chip:has(input:checked) { border-color:var(--accent); background:var(--wash); }
+  .realtag { margin-left:9px; font-size:11px; font-weight:500; color:var(--text2);
+             border:1px dashed var(--border); border-radius:999px; padding:1px 8px;
+             cursor:help; }
   .filterrow { display:flex; flex-wrap:wrap; gap:6px 8px; font-size:12.5px;
                color:var(--text2); margin:0 0 14px; }
   .filterrow label { display:inline-flex; gap:6px; align-items:center; cursor:pointer;
@@ -466,6 +767,63 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                                 vertical-align:2px; margin-right:5px; }
   table.summary .delta { font-size:11px; margin-left:5px; color:var(--muted); }
   .dgood { color:var(--dgood); } .dbad { color:var(--dbad); }
+  .dnull { color:var(--muted); }
+  #cmpbanner { display:none; margin:0 0 14px; padding:10px 13px; border-radius:8px;
+               font-size:12.5px; line-height:1.5;
+               background:color-mix(in srgb, var(--dbad) 11%, var(--card));
+               border:1px solid color-mix(in srgb, var(--dbad) 45%, transparent); }
+  #cmpbanner b { color:var(--dbad); }
+  #trainbox { margin:0 0 16px; font-size:11.5px; }
+  #trainbox table { border-collapse:collapse; }
+  #trainbox td, #trainbox th { padding:2px 10px 2px 0; text-align:left;
+                               white-space:nowrap; color:var(--muted); }
+  #trainbox th { color:var(--fg); font-weight:600; }
+  #trainbox td.mismatch { color:var(--dbad); font-weight:600; }
+  .ci { color:var(--muted); font-size:11px; margin-left:4px; white-space:nowrap; }
+  .ctlrow { display:flex; flex-wrap:wrap; gap:6px; align-items:center;
+            width:100%; margin:1px 0; }
+  .ctllabel { color:var(--muted); font-size:11px; text-transform:uppercase;
+              letter-spacing:.05em; margin-right:2px; min-width:112px; }
+  .ctlnote { color:var(--muted); font-size:11.5px; }
+  .foldcard { margin:6px 0; }
+  .foldcard > summary { cursor:pointer; padding:5px 2px; font-size:12.5px;
+                        color:var(--muted); }
+  .foldcard > summary:hover { color:var(--fg); }
+  .colorkey { display:flex; flex-wrap:wrap; gap:14px; margin:0 0 10px;
+              font-size:11.5px; color:var(--muted); }
+  .keyitem { display:inline-flex; gap:5px; align-items:center; }
+  .keyswatch { width:22px; height:11px; border-radius:2px; display:inline-block;
+               background:color-mix(in srgb, var(--muted) 17%, transparent); }
+  .keyswatch.cgood { background:var(--dgood); }
+  .keyswatch.cbad { background:var(--dbad); }
+  .verdict { margin:2px 0 4px; font-size:13px; }
+  .verdict .vgood { color:var(--dgood); font-weight:650; }
+  .verdict .vbad { color:var(--dbad); font-weight:650; }
+  .verdict .vnull { color:var(--muted); font-weight:650; }
+  .verdict .vsep { color:var(--muted); margin:0 7px; }
+  .verdict .vnote { color:var(--muted); }
+  .maprow { display:grid; grid-template-columns:210px 1fr 46px; gap:10px;
+            align-items:center; padding:3px 4px; border-radius:5px; font-size:12px; }
+  .maprow:hover { background:var(--wash); }
+  .maprow.quiet .mapname { color:var(--muted); }
+  .mapname { display:flex; gap:6px; align-items:center; white-space:nowrap;
+             overflow:hidden; text-overflow:ellipsis; user-select:none; }
+  .mapcaret { color:var(--muted); font-size:10px; width:9px; }
+  .mapstrip { display:flex; gap:2px; }
+  .mapcell { flex:1 1 0; height:15px; border-radius:2px;
+             background:color-mix(in srgb, var(--muted) 17%, transparent); }
+  .mapcell.cgood { background:var(--dgood); }
+  .mapcell.cbad { background:var(--dbad); }
+  .maptally { text-align:right; color:var(--muted); font-size:11px;
+              font-variant-numeric:tabular-nums; }
+  .maptally.on { color:var(--fg); font-weight:600; }
+  .forestwrap { margin:2px 0 10px 24px; padding:6px 0 6px 10px;
+                border-left:2px solid var(--grid); }
+  .forestrow { display:grid; grid-template-columns:170px 1fr 148px; gap:8px;
+               align-items:center; padding:1px 0; font-size:11px; }
+  .forestrow .fname { color:var(--fg); overflow:hidden; text-overflow:ellipsis;
+                      white-space:nowrap; }
+  .forestrow .fnum { color:var(--muted); text-align:right; font-variant-numeric:tabular-nums; }
   .runth { display:inline-flex; align-items:center; gap:6px; }
 
   #videos-host h3 { font-size:14px; margin:18px 0 10px; text-transform:uppercase;
@@ -530,7 +888,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       --shadow:none; --shadow2:none;
       --s0:#2a78d6; --s1:#008300; --s2:#e87ba4; --s3:#eda100;
       --s4:#1baf7a; --s5:#eb6834; --s6:#4a3aa7; --s7:#e34948;
-      --rz-done:#d9d8d1;
+      --rz-fell:#d03b3b; --rz-off:#6c5fc7; --rz-far:#fab219; --rz-done:#d9d8d1;
+      --rz-x0:#00868b; --rz-x1:#a1568c; --rz-x2:#7a6a3a;
     }
     #sidebar, #dragbar, .filterrow, #tip, #lightbox, #nobanner { display:none !important; }
     #layout { display:block; }
@@ -551,6 +910,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="note">1-8 toggle &middot; shift+digit solo &middot; 0 all &middot; click a name to solo</div>
     <h2>Sections</h2>
     <a class="navlink" href="#sec-summary">Summary</a>
+    <a class="navlink" href="#sec-signif">Significance</a>
     <a class="navlink" href="#sec-robustness">Robustness</a>
     <a class="navlink" href="#sec-corner">Corner turn</a>
     <a class="navlink" href="#sec-human">Human dribble</a>
@@ -572,11 +932,30 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div class="headmeta" id="headmeta"></div>
     </header>
     <div id="nobanner">No experiments selected &mdash; enable one in the sidebar.</div>
+    <div id="cmpbanner"></div>
+    <div id="trainbox"></div>
 
     <section id="sec-summary"><h2><span class="eyebrow">overview</span>Summary</h2>
       <div class="note">Headline numbers per run; <b>best of the selected runs</b> is underlined,
-        small &Delta; is vs the first selected run. Rates carry &plusmn;1 binomial SE.</div>
+        small &Delta; is vs the first selected run. Values carry &plusmn;1 SE; a &Delta; is
+        <b>coloured only when its 95&nbsp;% bootstrap CI excludes zero</b> (shown in
+        brackets) &mdash; grey means the gap is inside the noise. Continuous
+        metrics are survivors-only, with their own n.
+        See <a href="#sec-signif">Significance</a> for every condition.</div>
       <div id="summary-host" style="overflow-x:auto"></div></section>
+
+    <section id="sec-signif"><h2><span class="eyebrow">statistics</span>Significant differences</h2>
+      <div class="note">Where the selected runs actually differ. Each cell is one
+        condition; it is coloured only when the 95&nbsp;% bootstrap CI on the
+        difference clears zero &mdash; at n&nbsp;=&nbsp;48 per condition the noise
+        floor alone is ~7&nbsp;points, so an uncoloured cell means "we cannot
+        tell these apart", not "they are equal". Episodes are paired on
+        (condition,&nbsp;rep) &mdash; the same route in both runs; pairing removes
+        route difficulty but <i>not</i> the shared-<code>mjData</code> slot draw,
+        so it tightens the intervals only modestly.</div>
+      <div class="filterrow" id="signif-controls"></div>
+      <div id="signif-host"></div>
+    </section>
 
     <section id="sec-robustness"><h2><span class="eyebrow">robustness</span>Perturbation axes &mdash; nominal human routes (20 s)</h2>
       <div class="note">Each axis perturbs the nominal route bank; dotted line = that run's unperturbed
@@ -635,18 +1014,49 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
 const DATA = __DATA__;
 const META = __META__;
 const ROB_GROUPS = __ROB_GROUPS__;
+const REAL_WORLD = __REAL_WORLD__;
 const ROB_METRICS = __ROB_METRICS__;
 const CAP_METRICS = __CAP_METRICS__;
 
-const DIRTXT = {up: "↑ better", down: "↓ better", one: "→ 1 ideal"};
+const DIRTXT = {up: "↑ better", down: "↓ better", one: "→ 1 ideal",
+                zero: "→ 0 ideal"};
 const DASH = {r: "6,3", ref: "2,3", cmd: "7,4", base: "1,3"};
-const RATE_KEYS = new Set(["survival", "possession", "success"]);
-const REASONS = [
-  ["completed", "completed", "var(--rz-done)"],
-  ["ball_far", "ball lost", "var(--rz-far)"],
-  ["off_route", "off route", "var(--rz-off)"],
-  ["fell", "fell", "var(--rz-fell)"],
-];
+// Discovered from the data (see reason_legend) so a new fail_reason string
+// cannot silently vanish and leave the stacked bars not summing to 100%.
+const REASONS = __REASONS__;
+// {"i>j": {metric: [{cond, group, x, delta, lo, hi, sig, paired, n}]}} -- only
+// i<j is stored; getDiffs negates for the other direction.
+const DIFFS = __DIFFS__;
+const DIFF_METRICS = __DIFF_METRICS__;
+// axis labels for the difference map: robustness groups come from the data-driven
+// ROB_GROUPS, capability groups are named here (they have their own sections)
+const DIFF_FULL = __DIFF_FULL__;
+const ROB_LABEL = Object.assign(Object.fromEntries(ROB_GROUPS), {
+  baseline: "nominal (unperturbed)",
+  straight_speed: "straight, commanded speed (m/s)",
+  corner_turn: "corner turn |\u03ba| (1/m)",
+  u_turn: "u-turn |\u03ba| (1/m)",
+  human_dribble: "human dribble \u03ba-cap (1/m)",
+  speed_tracking: "speed tracking",
+});
+
+function getDiffs(baseIdx, cmpIdx, metric) {
+  if (baseIdx === cmpIdx) return null;
+  const lo = Math.min(baseIdx, cmpIdx), hi = Math.max(baseIdx, cmpIdx);
+  const block = DIFFS[`${lo}>${hi}`];
+  if (!block || !block[metric]) return null;
+  const flip = baseIdx > cmpIdx;
+  return block[metric].map(e => flip
+    ? {...e, delta: -e.delta, lo: e.hi == null ? null : -e.hi,
+       hi: e.lo == null ? null : -e.lo}
+    : e);
+}
+
+function nominalDiff(baseIdx, cmpIdx, metric) {
+  const all = getDiffs(baseIdx, cmpIdx, metric);
+  if (!all) return null;
+  return all.find(e => e.cond === "nominal") || null;
+}
 
 const state = {
   on: DATA.map(() => true),
@@ -716,7 +1126,8 @@ function hideTip() { tip.style.display = "none"; }
 
 // ---- line chart ----------------------------------------------------------
 // series: {x[], y[], se[]?, n[]?, label, cvar, dash?, sw?, runIdx?, ref?}
-// opts: {yDomain, xLabel, yLabel, hlines:[{y,cvar,label}], zeroBase(!==false), xFmt}
+// opts: {yDomain, xLabel, yLabel, hlines:[{y,cvar,label}], zeroBase(!==false), xFmt,
+//        vlines:[{x,band:[lo,hi],title}]}   // x/band may each be null
 function lineChart(host, seriesList, opts = {}) {
   const W = 340, H = 210, m = {l: 46, r: 10, t: 8, b: opts.xLabel ? 32 : 20};
   const svg = makeSVG(W, H);
@@ -788,6 +1199,23 @@ function lineChart(host, seriesList, opts = {}) {
       else seg.push([s.x[i], s.y[i], s.se[i]]);
     }
     flush();
+  }
+  for (const vl of opts.vlines || []) {         // measured REAL hardware value
+    const cx = v => Math.max(m.l, Math.min(W - m.r, X(v)));
+    if (vl.band) {
+      const [a, b] = [cx(vl.band[0]), cx(vl.band[1])];
+      if (b > a)
+        el("rect", {x: a, y: m.t, width: b - a, height: H - m.b - m.t,
+                    style: "fill:var(--text)", "fill-opacity": 0.07, stroke: "none",
+                    "pointer-events": "none"}, svg);
+    }
+    if (vl.x != null && vl.x >= xlo && vl.x <= xhi) {
+      el("line", {x1: X(vl.x), x2: X(vl.x), y1: m.t, y2: H - m.b,
+                  "stroke-dasharray": "5 3", "stroke-width": 1.4, opacity: 0.7,
+                  style: "stroke:var(--text)"}, svg);
+      el("text", {x: X(vl.x) + 3, y: m.t + 9, "font-size": 9, opacity: 0.75,
+                  style: "fill:var(--text)"}, svg).textContent = "real";
+    }
   }
   for (const hl of opts.hlines || []) {         // per-run reference levels
     if (hl.y == null || hl.y < ylo || hl.y > yhi) continue;
@@ -953,8 +1381,14 @@ function panel(host, title, dir) {
 function runSeries(run, i, pts, metric, extra = {}) {
   return {
     x: pts.map(p => p.x), y: pts.map(p => p[metric] == null ? null : p[metric]),
-    se: RATE_KEYS.has(metric) ? pts.map(p => p[metric + "_se"]) : null,
-    n: pts.map(p => p.n),
+    // band whenever the metric ships an SE, not just for the rate metrics:
+    // speed_ratio / cross_track / ach_speed carry a SEM too, and a bare mean
+    // line reads as far more certain than n=48 episodes justify
+    se: pts.some(p => p[metric + "_se"] != null)
+        ? pts.map(p => p[metric + "_se"]) : null,
+    // per-metric sample size: cross_track / speed_ratio / ach_speed are
+    // survivors-only, so the condition's episode count p.n overstates them
+    n: pts.map(p => p[metric + "_n"] != null ? p[metric + "_n"] : p.n),
     label: run.label + (extra.suffix || ""), cvar: sv(i), runIdx: i,
     dash: extra.dash,
   };
@@ -1013,17 +1447,31 @@ const SGROUPS = [
   ]],
   ["nominal — unperturbed human routes", [
     ["survival (%)", "up", r => r.nominal && r.nominal.survival,
-     r => r.nominal ? `${fmtVal(r.nominal.survival)} ±${fmtVal(r.nominal.survival_se)}` : null],
+     r => r.nominal ? `${fmtVal(r.nominal.survival)} ±${fmtVal(r.nominal.survival_se)}` : null,
+     "survival"],
+    ["robot-ball dist (m, p90)", "down", r => r.nominal && r.nominal.ball_dist_p90,
+     r => r.nominal && r.nominal.ball_dist_p90 != null
+       ? `${fmtVal(r.nominal.ball_dist_p90)}` : null],
     ["possession (%)", "up", r => r.nominal && r.nominal.possession,
      r => r.nominal ? `${fmtVal(r.nominal.possession)} ±${fmtVal(r.nominal.possession_se)}` : null],
-    ["speed ratio", "one", r => r.nominal && r.nominal.speed_ratio],
-    ["cross-track (m)", "down", r => r.nominal && r.nominal.cross_track],
+    ["speed ratio (survivors)", "one", r => r.nominal && r.nominal.speed_ratio,
+     r => r.nominal && r.nominal.speed_ratio != null
+       ? `${fmtVal(r.nominal.speed_ratio)} ±${fmtVal(r.nominal.speed_ratio_se)}`
+         + ` (n=${r.nominal.speed_ratio_n})` : null],
+    ["cross-track (m)", "down", r => r.nominal && r.nominal.cross_track,
+     r => r.nominal && r.nominal.cross_track != null
+       ? `${fmtVal(r.nominal.cross_track)} ±${fmtVal(r.nominal.cross_track_se)}`
+         + ` (n=${r.nominal.cross_track_n})` : null,
+     "cross_track"],
   ]],
   ["speed & controllability", [
     ["max straight speed @≥50% success (m/s)", "up", r => r.top.max_speed],
     ["controllability pooled r", "up", r => r.pairs && r.pairs.r],
     ["cmd→ball speed slope", "one", r => r.pairs && r.pairs.slope],
     ["tracking mean per-episode r", "up", r => r.top.tracking_r],
+    ["tracking slope (actual/cmd)", "one", r => r.top.tracking_slope],
+    ["tracking bias (m/s)", "zero", r => r.top.tracking_bias],
+    ["tracking residual (m/s)", "down", r => r.top.tracking_resid],
   ]],
   ["turning", [
     ["corner max |κ| left (1/m)", "up", r => r.top.corner_L],
@@ -1035,6 +1483,7 @@ const SGROUPS = [
 ];
 function betterOf(a, b, dir) {
   if (dir === "one") return Math.abs(a - 1) < Math.abs(b - 1);
+  if (dir === "zero") return Math.abs(a) < Math.abs(b);
   return dir === "down" ? a < b : a > b;
 }
 function renderSummary() {
@@ -1057,7 +1506,7 @@ function renderSummary() {
     const gtr = h("tr", "sgroup", null, body);
     const gtd = h("td", null, gLabel, gtr);
     gtd.colSpan = vis.length + 1;
-    for (const [label, dir, get, fmt] of rows) {
+    for (const [label, dir, get, fmt, dkey] of rows) {
     const tr = h("tr", null, null, body);
     const nm = h("td", "mname", label, tr);
     if (dir) h("span", "dir", DIRTXT[dir], nm);
@@ -1081,32 +1530,262 @@ function renderSummary() {
         txt != null ? txt : fmtVal(vals[k]), td);
       if (dir && k > 0 && vals[k] != null && ref != null) {
         const dv = vals[k] - ref;
-        if (Math.abs(dv) < 1e-9) h("span", "delta", "±0", td);
-        else h("span", "delta " + (betterOf(vals[k], ref, dir) ? "dgood" : "dbad"),
-               (dv >= 0 ? "+" : "") + fmtVal(dv), td);
+        // Colour ONLY when the 95% bootstrap CI on the difference excludes
+        // zero. The measured noise floor at n=48 is ~7 points, so painting
+        // every non-zero delta red/green (what this did before) reports noise
+        // as regression. Metrics with no CI available stay neutral.
+        const ci = dkey ? nominalDiff(vis[0].i, vis[k].i, dkey) : null;
+        if (Math.abs(dv) < 1e-9 && !ci) h("span", "delta", "±0", td);
+        else {
+          const sig = ci ? ci.sig : null;
+          const cls = sig === true
+            ? (betterOf(vals[k], ref, dir) ? "dgood" : "dbad") : "dnull";
+          const sp = h("span", "delta " + cls,
+                       (dv >= 0 ? "+" : "") + fmtVal(dv), td);
+          if (ci) {
+            sp.title = `95% bootstrap CI on the difference: `
+              + `[${fmtVal(ci.lo)}, ${fmtVal(ci.hi)}]`
+              + (ci.paired ? ` — paired on route (n=${ci.n})` : ` — unpaired (n=${ci.n})`)
+              + (sig ? "" : " — includes 0, not significant");
+            h("span", "ci", ` [${fmtVal(ci.lo)}, ${fmtVal(ci.hi)}]`, td);
+          }
+        }
       }
     });
     }
   }
 }
 
+// ---- significance ------------------------------------------------------------
+// Default view is a DIFFERENCE MAP: one row per perturbation group, one cell
+// per axis level, coloured only where the 95% CI clears zero. 134 forest rows
+// is a wall nobody reads; ~10 rows of coloured cells answers "where does this
+// checkpoint differ, and which way" at a glance. Expanding a group reveals the
+// per-condition intervals underneath.
+// baseline = null -> the first selected run. Made explicit (and pickable)
+// because with 3+ checkpoints "whatever happens to be first" is not an answer.
+const signifState = {metric: "survival", baseline: null, expanded: new Set()};
+
+function betterDir(delta, dir) { return dir === "down" ? delta < 0 : delta > 0; }
+
+function renderSignificance() {
+  const controls = document.getElementById("signif-controls");
+  const host = document.getElementById("signif-host");
+  controls.textContent = ""; host.textContent = "";
+  const vis = visible();
+  if (vis.length < 2) {
+    h("div", "note", "Select at least two experiments to compare.", host);
+    return;
+  }
+  // eligible baselines: every visible run when all pairs were computed,
+  // otherwise only run 0 (the only one with precomputed comparisons)
+  const eligible = vis.filter(o => DIFF_FULL || o.i === 0);
+  let base = eligible.find(o => o.i === signifState.baseline) || eligible[0] || vis[0];
+  const others = vis.filter(o => o.i !== base.i);
+  const dir = (DIFF_METRICS.find(m => m[0] === signifState.metric) || [])[2] || "up";
+
+  const mrow = h("div", "ctlrow", null, controls);
+  h("span", "ctllabel", "metric", mrow);
+  for (const [key, label] of DIFF_METRICS) {
+    const lab = h("label", "chip" + (signifState.metric === key ? " on" : ""), null, mrow);
+    const rb = h("input", null, null, lab);
+    rb.type = "radio"; rb.name = "signifmetric";
+    rb.checked = signifState.metric === key;
+    rb.addEventListener("change", () => {
+      signifState.metric = key; signifState.expanded.clear(); renderSignificance();
+    });
+    h("span", null, label, lab);
+  }
+  if (vis.length > 2 || eligible.length > 1) {
+    const brow = h("div", "ctlrow", null, controls);
+    h("span", "ctllabel", "compare against", brow);
+    for (const o of eligible) {
+      const lab = h("label", "chip" + (o.i === base.i ? " on" : ""), null, brow);
+      const rb = h("input", null, null, lab);
+      rb.type = "radio"; rb.name = "signifbase";
+      rb.checked = o.i === base.i;
+      rb.addEventListener("change", () => {
+        signifState.baseline = o.i; signifState.expanded.clear(); renderSignificance();
+      });
+      const sw = h("span", "swatch", null, lab);
+      sw.style.background = sv(o.i);
+      h("span", null, o.r.label, lab);
+    }
+    if (!DIFF_FULL)
+      h("span", "ctlnote", `— only ${vis[0].r.label} can be the baseline: with `
+        + `more than ${MAX_DIFF_LABEL} runs the report precomputes comparisons `
+        + `against the first run only`, brow);
+  }
+
+  // With many runs the stacked maps become the same wall this view replaced;
+  // keep the first two comparisons open and fold the rest away.
+  const foldFrom = others.length > 2 ? 2 : others.length;
+  others.forEach((other, oi) => {
+    const entries = getDiffs(base.i, other.i, signifState.metric);
+    let host2 = host;
+    if (oi >= foldFrom) {
+      const det = h("details", "foldcard", null, host);
+      const sig0 = (entries || []).filter(e => e.sig);
+      h("summary", null,
+        `${other.r.label} vs ${base.r.label} — ${sig0.length} of `
+        + `${(entries || []).length} conditions differ`, det);
+      host2 = det;
+    }
+    const card = h("div", "card", null, host2);
+    // NO run-colour swatch here on purpose: the cells below are coloured by
+    // BETTER/WORSE, and a run swatch in the same block invites reading a green
+    // cell as "this run's colour" instead of "this run is better" -- which is
+    // exactly the collision the series palette makes easy (slot 1 IS green).
+    const head = h("div", "cardhead", null, card);
+    h("span", null, `${other.r.label} vs ${base.r.label}`, head);
+    if (!entries || !entries.length) {
+      h("div", "note", "no comparable conditions for this metric", card);
+      return;
+    }
+    const sig = entries.filter(e => e.sig);
+    const better = sig.filter(e => betterDir(e.delta, dir)).length;
+
+    // headline verdict, in words
+    const verdict = h("div", "verdict", null, card);
+    h("span", "vgood", `${better} better`, verdict);
+    h("span", "vsep", "·", verdict);
+    h("span", "vbad", `${sig.length - better} worse`, verdict);
+    h("span", "vsep", "·", verdict);
+    h("span", "vnull", `${entries.length - sig.length} indistinguishable`, verdict);
+    h("span", "vnote", ` — of ${entries.length} conditions, at 95 % CI`, verdict);
+
+    // spell out what the two cell colours mean, BY RUN NAME
+    const ckey = h("div", "colorkey", null, card);
+    const chip = (cls, text) => {
+      const w = h("span", "keyitem", null, ckey);
+      h("span", "keyswatch " + cls, null, w);
+      h("span", null, text, w);
+    };
+    chip("cgood", `${other.r.label} better than ${base.r.label}`);
+    chip("cbad", `${other.r.label} worse`);
+    chip("cnull", "cannot tell apart");
+
+    // group rows, most-affected first
+    const groups = new Map();
+    for (const e of entries) {
+      if (!groups.has(e.group)) groups.set(e.group, []);
+      groups.get(e.group).push(e);
+    }
+    const ordered = [...groups.entries()].sort((a, b) =>
+      b[1].filter(e => e.sig).length - a[1].filter(e => e.sig).length
+      || a[0].localeCompare(b[0]));
+
+    for (const [group, list] of ordered) {
+      list.sort((a, b) => a.x - b.x);
+      const nsig = list.filter(e => e.sig).length;
+      const key = `${other.i}|${group}`;
+      const row = h("div", "maprow" + (nsig ? "" : " quiet"), null, card);
+      const nameCell = h("div", "mapname", null, row);
+      h("span", "mapcaret", signifState.expanded.has(key) ? "▾" : "▸", nameCell);
+      h("span", null, ROB_LABEL[group] || group, nameCell);
+      const strip = h("div", "mapstrip", null, row);
+      for (const e of list) {
+        const cell = h("div", "mapcell", null, strip);
+        if (e.sig) cell.classList.add(betterDir(e.delta, dir) ? "cgood" : "cbad");
+        // saturation carries |delta| relative to the biggest gap in this group
+        const peak = Math.max(...list.map(v => Math.abs(v.delta))) || 1;
+        if (e.sig) cell.style.opacity = (0.45 + 0.55 * Math.abs(e.delta) / peak).toFixed(2);
+        cell.title = `${group} = ${fmtVal(e.x)}\n`
+          + `${e.delta >= 0 ? "+" : ""}${fmtVal(e.delta)} `
+          + `[${fmtVal(e.lo)}, ${fmtVal(e.hi)}]  n=${e.n}`
+          + (e.sig ? "" : "  (includes 0)");
+      }
+      const tally = h("div", "maptally", nsig ? `${nsig}/${list.length}` : "—", row);
+      if (nsig) tally.classList.add("on");
+      nameCell.style.cursor = strip.style.cursor = "pointer";
+      const toggle = () => {
+        if (signifState.expanded.has(key)) signifState.expanded.delete(key);
+        else signifState.expanded.add(key);
+        renderSignificance();
+      };
+      nameCell.addEventListener("click", toggle);
+      strip.addEventListener("click", toggle);
+      if (signifState.expanded.has(key)) drawForest(card, list, other.i, dir);
+    }
+    h("div", "note", "Each cell is one condition along that axis, left to right. "
+      + "Colour only where the 95 % CI clears zero; intensity tracks the size of "
+      + "the gap. Click a row for the per-condition intervals.", card);
+  });
+}
+
+// per-condition intervals for ONE group -- the detail behind a difference-map row
+function drawForest(host, list, runIdx, dir) {
+  const wrap = h("div", "forestwrap", null, host);
+  let span = 0;
+  for (const e of list)
+    for (const v of [e.delta, e.lo, e.hi])
+      if (v != null && isFinite(v)) span = Math.max(span, Math.abs(v));
+  span = span || 1;
+  const W = 300, PAD = 6;
+  const xs = v => PAD + (W - 2 * PAD) * (v + span) / (2 * span);
+  for (const e of list) {
+    const row = h("div", "forestrow", null, wrap);
+    h("div", "fname", e.cond, row);
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", `0 0 ${W} 13`);
+    svg.setAttribute("preserveAspectRatio", "none");
+    svg.style.width = "100%"; svg.style.height = "13px";
+    const mk = (tag, attrs) => {
+      const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
+      for (const k in attrs) el.setAttribute(k, attrs[k]);
+      svg.appendChild(el); return el;
+    };
+    mk("line", {x1: xs(0), x2: xs(0), y1: 0, y2: 13,
+                stroke: "var(--axis)", "stroke-width": 1});
+    const col = e.sig ? (betterDir(e.delta, dir) ? "var(--dgood)" : "var(--dbad)")
+                      : "var(--muted)";
+    if (e.lo != null && e.hi != null)
+      mk("line", {x1: xs(e.lo), x2: xs(e.hi), y1: 6.5, y2: 6.5, stroke: col,
+                  "stroke-width": e.sig ? 2.5 : 1.5, opacity: e.sig ? 0.9 : 0.4});
+    mk("circle", {cx: xs(e.delta), cy: 6.5, r: 2.8,
+                  fill: e.paired ? col : "var(--bg)", stroke: col,
+                  "stroke-width": 1.4, opacity: e.sig ? 1 : 0.5});
+    row.appendChild(svg);
+    const num = h("div", "fnum",
+      `${e.delta >= 0 ? "+" : ""}${fmtVal(e.delta)}`
+      + (e.lo != null ? ` [${fmtVal(e.lo)}, ${fmtVal(e.hi)}]` : ""), row);
+    num.title = `n=${e.n}${e.paired ? " paired on route" : " unpaired"}`;
+    if (e.sig) num.style.color = "var(--fg)";
+  }
+}
+
 // ---- sections ---------------------------------------------------------------
 function robDomains(vis) {
-  const dom = {survival: [0, 102], possession: [0, 102], speed_ratio: [0, 1.15]};
-  let ct = 0, du = 0;
+  // speed_ratio floors at 0 and reserves room to 1.15, but GROWS past it: a
+  // fixed [0, 1.15] silently clipped any run that overshoots the command, which
+  // reads as "no data up there" rather than ">1"
+  const dom = {survival: [0, 102], possession: [0, 102]};
+  let ct = 0, du = 0, sr = 1.15, bd = 0, fb = 0, mzlo = 9, mzhi = 0;
   for (const {r} of vis) {
-    for (const [g] of ROB_GROUPS)
-      for (const p of r.robustness[g] || []) {
+    const sets = [...ROB_GROUPS.map(([g]) => r.robustness[g] || []),
+                  r.nominal ? [r.nominal] : []];
+    for (const set of sets)
+      for (const p of set) {
         if (p.cross_track != null) ct = Math.max(ct, p.cross_track);
         if (p.mean_duration != null) du = Math.max(du, p.mean_duration);
+        if (p.ball_dist_p90 != null) bd = Math.max(bd, p.ball_dist_p90);
+        if (p.foot_ball_dist_p90 != null) fb = Math.max(fb, p.foot_ball_dist_p90);
+        if (p.min_pelvis_z_p5 != null) {
+          mzlo = Math.min(mzlo, p.min_pelvis_z_p5); mzhi = Math.max(mzhi, p.min_pelvis_z_p5);
+        }
+        // include the SE so a band is never squashed against the ceiling
+        if (p.speed_ratio != null)
+          sr = Math.max(sr, p.speed_ratio + (p.speed_ratio_se || 0));
       }
-    if (r.nominal) {
-      ct = Math.max(ct, r.nominal.cross_track || 0);
-      du = Math.max(du, r.nominal.mean_duration || 0);
-    }
   }
   dom.cross_track = [0, ct * 1.08 + 1e-6];
   dom.mean_duration = [0, du * 1.08 + 1e-6];
+  dom.ball_dist_p90 = [0, bd * 1.08 + 1e-6];
+  dom.foot_ball_dist_p90 = [0, fb * 1.08 + 1e-6];
+  // pelvis height sits in a narrow band just above the fall threshold, so a
+  // 0-based axis would flatten the whole signal
+  dom.min_pelvis_z_p5 = mzhi > 0 ? [Math.max(0, mzlo - 0.03), mzhi + 0.03] : [0, 1];
+  dom.speed_ratio = [0, sr * 1.02];
   return dom;
 }
 function renderRobustness() {
@@ -1116,14 +1795,28 @@ function renderRobustness() {
   host.textContent = "";
   const vis = visible();
   legendChips(document.getElementById("rob-legend"),
-              runChips([{cvar: "var(--muted)", dash: DASH.base, label: "nominal baseline"}]));
+              runChips([{cvar: "var(--muted)", dash: DASH.base, label: "nominal baseline"},
+                        {cvar: "var(--text)", dash: "5 3",
+                         label: "real hardware value (shaded = measured spread)"}]));
   const dom = robDomains(vis);
   for (const [group, gLabel] of ROB_GROUPS) {
     const det = document.createElement("details");
     det.className = "robgroup"; det.dataset.g = group;
     det.open = open[group] !== undefined ? open[group] : true;
     host.appendChild(det);
-    h("summary", null, gLabel, det);
+    const real = REAL_WORLD[group];
+    const measured = real && (real.nominal != null || real.band != null);
+    const sum = h("summary", null, gLabel, det);
+    if (measured) {
+      const txt = real.nominal != null
+        ? `real ${fmtVal(real.nominal)}` + (real.band ? ` [${fmtVal(real.band[0])}, ${fmtVal(real.band[1])}]` : "")
+        : `real [${fmtVal(real.band[0])}, ${fmtVal(real.band[1])}]`;
+      const tag = h("span", "realtag", txt, sum);
+      tag.title = real.note || "";
+    }
+    // the marker is the sim2real overlay: where the deployment hardware actually
+    // sits on this axis. Unmeasured channels get none (see real_world.py).
+    const vlines = measured ? [{x: real.nominal, band: real.band}] : [];
     const row = h("div", "robrow", null, det);
     // full axis range even where a metric has no survivors (null points)
     const gxs = vis.flatMap(({r}) => (r.robustness[group] || []).map(p => p.x));
@@ -1137,7 +1830,7 @@ function renderRobustness() {
         if (r.nominal && r.nominal[metric] != null)
           hlines.push({y: r.nominal[metric], cvar: sv(i), runIdx: i});
       }
-      lineChart(p, series, {yDomain: dom[metric], xLabel: gLabel, hlines, xDomain});
+      lineChart(p, series, {yDomain: dom[metric], xLabel: gLabel, hlines, xDomain, vlines});
     }
     if (state.robReasons) {
       const p = panel(row, "failure modes (share of episodes)");
@@ -1617,11 +2310,80 @@ document.getElementById("lightbox").addEventListener("click", ev => {
   if (ev.target.id === "lightbox") closeLightbox();
 });
 
+// Comparability: two runs are only directly comparable if their condition
+// tables (fingerprint) match. Previously plot.py warned on stdout and the HTML
+// report -- the artifact people actually compare in -- said nothing.
+function renderComparability() {
+  const banner = document.getElementById("cmpbanner");
+  const box = document.getElementById("trainbox");
+  banner.style.display = "none"; banner.textContent = ""; box.textContent = "";
+  const vis = visible();
+  if (vis.length < 2) return;
+
+  const bad = [];
+  for (const test of ["robustness", "capability"]) {
+    const seen = new Map();
+    for (const {r} of vis) {
+      const fp = ((r.prov || {}).fingerprints || {})[test];
+      if (fp) seen.set(fp, [...(seen.get(fp) || []), r.label]);
+    }
+    if (seen.size > 1) bad.push([test, [...seen.entries()]]);
+  }
+  if (bad.length) {
+    banner.style.display = "block";
+    h("b", null, "Condition tables differ. ", banner);
+    h("span", null, "These runs were recorded against different condition "
+      + "tables, so their curves share an x axis only where values happen to "
+      + "coincide and are not paired. Re-run with the same --dr-from to compare "
+      + "fairly.", banner);
+    for (const [test, groups] of bad) {
+      const line = h("div", null, null, banner);
+      h("span", null, `${test}: `, line);
+      h("span", null, groups.map(([fp, labels]) =>
+        `${labels.join(", ")} → ${fp}`).join("   |   "), line);
+    }
+  }
+
+  // training DR per run -- the "match ITS training params" check
+  const rows = [["policy", r => (r.prov.train || {}).onnx],
+                ["ball mass DR", r => fmtRange((r.prov.train || {}).ball_mass)],
+                ["ball radius DR", r => fmtRange((r.prov.train || {}).ball_radius)],
+                ["ball fric DR", r => fmtRange((r.prov.train || {}).ball_friction)],
+                ["foot fric DR", r => fmtRange((r.prov.train || {}).foot_friction)],
+                ["ball damping c", r => fmtVal((r.prov.train || {}).ball_damping)],
+                ["obs lag (steps)", r => fmtRange((r.prov.train || {}).obs_delay)],
+                ["act lag (ms)", r => fmtRange((r.prov.train || {}).act_delay)],
+                ["push robot dv", r => fmtVal((r.prov.train || {}).push_robot)],
+                ["push ball dv", r => fmtVal((r.prov.train || {}).push_ball)]];
+  if (!vis.some(({r}) => r.prov && r.prov.train)) return;
+  const det = h("details", null, null, box);
+  h("summary", null, "training DR each checkpoint was actually trained with", det);
+  const tb = h("table", null, null, det);
+  const hr = h("tr", null, null, h("thead", null, null, tb));
+  h("th", null, "channel", hr);
+  for (const {r} of vis) h("th", null, r.label, hr);
+  const body = h("tbody", null, null, tb);
+  for (const [label, get] of rows) {
+    const tr = h("tr", null, null, body);
+    h("th", null, label, tr);
+    const vals = vis.map(({r}) => get(r));
+    const differ = new Set(vals.map(String)).size > 1;
+    for (const v of vals) h("td", differ ? "mismatch" : null, v == null ? "–" : v, tr);
+  }
+}
+
+function fmtRange(pair) {
+  if (!pair) return "not randomized";
+  return `[${fmtVal(pair[0])}, ${fmtVal(pair[1])}]`;
+}
+
 function renderAll() {
   document.getElementById("nobanner").style.display =
     state.on.some(Boolean) ? "none" : "block";
   const dom = capDomains(visible());
+  renderComparability();
   renderSummary();
+  renderSignificance();
   renderRobustness();
   renderTurns("corner-grid", "corner", "|κ| (1/m)", dom, "corner-legend");
   renderTurns("human-grid", "human", "κ-cap (1/m)", dom, "human-legend");
@@ -1674,8 +2436,14 @@ def generate(args, live=False, quiet=False):
     run_dirs, labels = resolve_runs(args, quiet=quiet)
     report_dir = os.path.dirname(os.path.abspath(args.out)) or "."
     os.makedirs(report_dir, exist_ok=True)
-    runs = [collect_run(d, lab, i, report_dir)
-            for i, (d, lab) in enumerate(zip(run_dirs, labels))]
+    # parse once, then take the UNION of robustness groups across runs so a group
+    # only one run swept still gets a panel (the old fixed ROB_GROUPS list both
+    # hid new groups and rendered empty ones for groups nobody swept)
+    parsed = [(read_rows(os.path.join(d, "robustness.csv")),
+               read_rows(os.path.join(d, "capability.csv"))) for d in run_dirs]
+    rob_groups = robustness_groups(*[r for pair in parsed for r in pair])
+    runs = [collect_run(d, lab, i, report_dir, rob_groups, rows)
+            for i, (d, lab, rows) in enumerate(zip(run_dirs, labels, parsed))]
     title = "sim2sim benchmark — " + (
         ", ".join(labels) if len(labels) <= 5 else f"{len(labels)} runs")
     meta = dict(
@@ -1685,7 +2453,12 @@ def generate(args, live=False, quiet=False):
             + " ".join(shlex.quote(a) for a in sys.argv[1:]))
     payload = {
         "__TITLE__": html_lib.escape(title),
-        "__ROB_GROUPS__": js_embed(ROB_GROUPS),
+        "__ROB_GROUPS__": js_embed(rob_groups),
+        "__REASONS__": js_embed(reason_legend(runs)),
+        "__DIFFS__": js_embed(condition_diffs(parsed, labels)),
+        "__DIFF_METRICS__": js_embed([(k, lab, d) for k, lab, _, _, _, d in DIFF_METRICS]),
+        "__DIFF_FULL__": js_embed(len(run_dirs) <= MAX_DIFF_RUNS),
+        "__REAL_WORLD__": js_embed(REAL_WORLD),
         "__ROB_METRICS__": js_embed(ROB_METRICS),
         "__CAP_METRICS__": js_embed(CAP_METRICS),
         "__META__": js_embed(meta),

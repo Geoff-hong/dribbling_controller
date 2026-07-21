@@ -57,22 +57,34 @@ def _pair(value):
 
 
 def _ball_spawn_props(cfg):
-    """Nominal ball mass / radius / friction from scene.ball.spawn. Newer runs
-    spawn a multi-asset ball (radius-DR bins) -> read the shared props off the
-    first variant and the radius span off the bin list."""
+    """Nominal ball mass / radius / friction / angular damping from
+    scene.ball.spawn. Newer runs spawn a multi-asset ball (radius-DR x
+    damping-DR bins) -> read the shared props off the first variant and the
+    radius / damping spans off the bin list.
+
+    Angular damping is the roll brake (PhysX has no rolling-friction material):
+    it is NEVER dumped as a top-level cfg key, only baked into the spawn props,
+    so the spawn is the only ground truth for it."""
     spawn = (cfg.get("scene", {}).get("ball") or {}).get("spawn") or {}
     assets = spawn.get("assets_cfg") or []
     first = assets[0] if assets else spawn
     mass = ((first.get("mass_props") or {}).get("mass"))
     friction = ((first.get("physics_material") or {}).get("dynamic_friction"))
+
+    def _span(values):
+        if not values:
+            return None, None
+        lo, hi = min(values), max(values)
+        return 0.5 * (lo + hi), ((lo, hi) if hi > lo else None)
+
     radii = [a.get("radius") for a in assets if a.get("radius") is not None]
-    if radii:
-        radius = 0.5 * (min(radii) + max(radii))
-        radius_span = (min(radii), max(radii)) if max(radii) > min(radii) else None
-    else:
+    radius, radius_span = _span(radii)
+    if radius is None:
         radius = spawn.get("radius")
-        radius_span = None
-    return mass, radius, friction, radius_span
+    dampings = [(a.get("rigid_props") or {}).get("angular_damping")
+                for a in (assets or [spawn])]
+    damping, damping_span = _span([d for d in dampings if d is not None])
+    return mass, radius, friction, radius_span, damping, damping_span
 
 
 def _find_obs_term(cfg, func_substr):
@@ -97,6 +109,39 @@ def _checkpoint_iteration(env_yaml_dir):
     return max(iters) if iters else None
 
 
+def _obs_noise(cfg):
+    """{obs term name: uniform noise half-width} for every term that carries one.
+
+    Isaac Lab hangs `noise` on the observation TERM, and those term names
+    (base_ang_vel / projected_gravity / joint_pos / joint_vel / ball_pos_b /
+    ball_lin_vel_b ...) are exactly the keys engine._obs builds its `term` dict
+    with, so the record can be applied by name with no translation table.
+
+    Only symmetric uniform noise is represented; anything else is skipped with a
+    note rather than silently approximated."""
+    out, skipped = {}, []
+    for group in (cfg.get("observations") or {}).values():
+        for name, term in (group or {}).items():
+            if not isinstance(term, dict):
+                continue
+            noise = term.get("noise")
+            if not isinstance(noise, dict):
+                continue
+            lo, hi = noise.get("n_min"), noise.get("n_max")
+            if lo is None or hi is None:
+                skipped.append(name)
+                continue
+            half = 0.5 * (float(hi) - float(lo))
+            if abs(float(hi) + float(lo)) > 1e-9:
+                skipped.append(f"{name} (asymmetric)")
+                continue
+            if half > 0:
+                out[name] = half
+    if skipped:
+        print(f"[train_dr] obs noise: skipped non-uniform/asymmetric terms {skipped}")
+    return out or None
+
+
 def _find_action_delay(cfg):
     for term in (cfg.get("actions") or {}).values():
         if isinstance(term, dict) and term.get("action_delay_ms_range") is not None:
@@ -117,7 +162,8 @@ def read_train_dr(path):
     def event_params(name):
         return (events.get(name) or {}).get("params") or {}
 
-    mass_nom, radius_nom, fric_nom, radius_span = _ball_spawn_props(cfg)
+    (mass_nom, radius_nom, fric_nom, radius_span,
+     damping_nom, damping_span) = _ball_spawn_props(cfg)
 
     mass_range = None
     mp = _pair(event_params("ball_mass").get("mass_distribution_params"))
@@ -166,6 +212,7 @@ def read_train_dr(path):
         ball_radius_nominal=radius_nom, ball_radius_range=radius_range,
         ball_friction_nominal=fric_nom,
         ball_friction_range=_pair(event_params("ball_physics_material").get("dynamic_friction_range")),
+        ball_damping=damping_nom, ball_damping_range=_pair(damping_span),
         foot_friction_range=_pair(event_params("physics_material").get("dynamic_friction_range")),
         push_robot=push_robot, push_ball=push_ball,
         ball_obs_delay_steps=(None if delay_range is None
@@ -173,6 +220,21 @@ def read_train_dr(path):
         ball_pos_noise=_pair((obs_noise.get("n_min"), obs_noise.get("n_max"))
                              if obs_noise.get("n_max") is not None else None),
         action_delay_ms=action_delay_ms, action_delay_zero_prob=action_delay_zero_prob,
+        # ---- robot-side DR: everything above perturbs the BALL; these are the
+        # channels most likely to break a PhysX->MuJoCo->real transfer, and the
+        # benchmark had none of them.
+        obs_noise=_obs_noise(cfg),
+        obs_corruption=(cfg.get("observations") or {}).get("policy", {}).get(
+            "enable_corruption") if isinstance(
+                (cfg.get("observations") or {}).get("policy"), dict) else None,
+        actuator_gain_range=_pair(
+            event_params("actuator_gains").get("stiffness_distribution_params")),
+        payload_kg_range=_pair(
+            event_params("add_torso_payload").get("mass_distribution_params")),
+        joint_offset_range=_pair(
+            event_params("add_joint_default_pos").get("pos_distribution_params")),
+        base_com_range={k: _pair(v) for k, v in
+                        (event_params("base_com").get("com_range") or {}).items()} or None,
         # route/command training params (capability-axis anchors). Fields that are
         # None/absent were class defaults at training time (not dumped) — the
         # consumer falls back to the documented training-code defaults.
@@ -198,11 +260,26 @@ def describe(train):
     lines.append(f"  ball radius  nominal {train['ball_radius_nominal']} m, DR {rng(train['ball_radius_range'])}")
     lines.append(f"  ball fric    nominal {train['ball_friction_nominal']}, DR {rng(train['ball_friction_range'])}")
     lines.append(f"  foot fric    DR {rng(train['foot_friction_range'])}")
+    c = train["ball_damping"]
+    lines.append(f"  ball damping c = {'unknown' if c is None else f'{c:g}'}"
+                 + ("" if c is None else f" (roll decay k = {2 / 7 * c:.3g}/s, "
+                    f"1 m/s ball rolls {3.5 / c:.2f} m)")
+                 + f", DR {rng(train['ball_damping_range'])}")
     for key, unit in (("push_robot", "m/s"), ("push_ball", "m/s")):
         p = train[key]
         lines.append(f"  {key:12} " + ("not trained" if p is None else
                      f"dv <= {p['dv']:g} {unit}, every {p['interval_s']} s"))
     lines.append(f"  ball obs lag {rng(train['ball_obs_delay_steps'], '{:.0f}')} policy steps")
+    noise = train.get("obs_noise")
+    lines.append("  obs noise    " + ("not randomized" if not noise else
+                 ", ".join(f"{k} +/-{v:g}" for k, v in sorted(noise.items()))))
+    for key, label, fmt in (("actuator_gain_range", "actuator gain", "{:.3g}"),
+                            ("payload_kg_range", "torso payload", "{:.3g}"),
+                            ("joint_offset_range", "joint offset", "{:.3g}")):
+        lines.append(f"  {label:12} {rng(train.get(key), fmt)}")
+    com = train.get("base_com_range")
+    lines.append("  torso CoM    " + ("not randomized" if not com else
+                 ", ".join(f"{k} {rng(v, '{:.3g}')}" for k, v in sorted(com.items()))))
     lines.append(f"  action lag   {rng(train['action_delay_ms'], '{:.0f}')} ms"
                  + ("" if train["action_delay_zero_prob"] is None
                     else f", zero_prob {train['action_delay_zero_prob']:g}"))

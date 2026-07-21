@@ -13,7 +13,18 @@ CSV_COLUMNS = ["condition", "group", "axis_value", "rep", "route_seed",
                "ball_mass", "ball_radius", "foot_fric", "ball_fric",
                "fell", "fail_reason", "duration_s", "cross_track_m", "progress_m",
                "ach_speed_mps", "cmd_speed_mps", "ball_lost", "ball_dist_m",
-               "completed", "success", "speed_corr_r"]
+               # foot_ball_dist_m is the TRAINING measure of possession (nearest
+               # foot to ball surface); ball_dist_m stays pelvis-to-centre because
+               # the ball_far fail-fast threshold is calibrated on it
+               "foot_ball_dist_m", "ball_lost_t_s",
+               "completed", "success", "speed_corr_r",
+               # r is scale/offset invariant (a constant 0.5x cmd scores r=1), so
+               # the regression of actual on commanded is what measures tracking
+               "speed_slope", "speed_bias", "speed_resid_mps",
+               # raw fall-criterion quantities: any threshold can be re-derived
+               # from these, so changing FALL_Z stays auditable rather than a
+               # silent re-ruling of past runs
+               "min_pelvis_z", "max_tilt_gvec_z"]
 PAIRS_COLUMNS = ["axis_value", "rep", "cmd_speed_mps", "ball_speed_mps"]
 TRACES_COLUMNS = ["axis_value", "episode", "step", "cmd_speed_mps",
                   "ball_speed_along_cmd_mps", "ball_speed_abs_mps"]
@@ -37,8 +48,12 @@ def format_episode_row(row):
             f"{row['progress']:.3f}", f"{row['ach_speed']:.4f}",
             f"{row['cmd_speed']:.4f}", int(row["ball_lost"]),
             f"{row['ball_dist']:.4f}",
+            f"{row['foot_ball_dist']:.4f}", _num(row["ball_lost_t"], "{:.3f}"),
             _flag(row["completed"]), _flag(row["success"]),
-            _num(row["speed_corr_r"], "{:.3f}")]
+            _num(row["speed_corr_r"], "{:.3f}"),
+            _num(row["speed_slope"], "{:.4f}"), _num(row["speed_bias"], "{:.4f}"),
+            _num(row["speed_resid"], "{:.4f}"),
+            _num(row["min_pelvis_z"], "{:.4f}"), _num(row["max_tilt_gvec_z"], "{:.4f}")]
 
 
 def write_csv(episode_rows, csv_path):
@@ -80,6 +95,37 @@ def _rewrite(path, columns, rows):
         writer.writerow(columns)
         writer.writerows(rows)
     os.replace(tmp, path)
+
+
+def drop_conditions(csv_path, names):
+    """Delete every episode of `names` from a main CSV and its aux sidecars.
+
+    Used by the top-up planner when a condition's semantics changed: its old
+    episodes describe a different experiment, so leaving them in would silently
+    average two protocols together. Returns the number of episodes removed.
+
+    The aux CSVs key on axis_value, not condition name, so they are filtered by
+    the (axis_value, rep) pairs the dropped episodes owned — the same key
+    EpisodeStream uses to reconcile them on resume.
+    """
+    rows, _ = _read_valid_rows(csv_path, CSV_COLUMNS)
+    if not rows:
+        return 0
+    names = set(names)
+    keep = [r for r in rows if r[0] not in names]
+    if len(keep) == len(rows):
+        return 0
+    dropped_keys = {(r[2], r[3]) for r in rows if r[0] in names}
+    _rewrite(csv_path, CSV_COLUMNS, keep)
+    for path, columns in ((csv_path.replace(".csv", "_speed_pairs.csv"), PAIRS_COLUMNS),
+                          (csv_path.replace(".csv", "_speed_traces.csv"), TRACES_COLUMNS)):
+        aux, _ = _read_valid_rows(path, columns)
+        if not aux:
+            continue
+        kept = [r for r in aux if (r[0], r[1]) not in dropped_keys]
+        if len(kept) != len(aux):
+            _rewrite(path, columns, kept)
+    return len(rows) - len(keep)
 
 
 class EpisodeStream:
@@ -157,6 +203,34 @@ class EpisodeStream:
         self._files = {}
 
 
+def _rate_pm(flags):
+    """(rate %, standard error %) for a 0/1 outcome. The SE is binomial: episodes
+    within a condition are independent draws, since the trajectory depends on
+    which robot slot the episode landed on (see the runner's assign_next_episode
+    note) and that assignment is effectively random. Report this ALWAYS — at the
+    default reps 4 (n=48) it is ~7 points near p=0.5, wide enough that most
+    single-axis wiggles in these tables are noise."""
+    if not len(flags):
+        return float("nan"), float("nan")
+    p = float(np.mean(flags))
+    return 100.0 * p, 100.0 * np.sqrt(max(p * (1.0 - p), 0.0) / len(flags))
+
+
+def _mean_pm(values):
+    """(mean, standard error of the mean) for a continuous metric."""
+    values = [v for v in values if np.isfinite(v)]
+    if not values:
+        return float("nan"), float("nan")
+    if len(values) == 1:
+        return float(values[0]), float("nan")
+    return float(np.mean(values)), float(np.std(values, ddof=1) / np.sqrt(len(values)))
+
+
+def _pct(values, q):
+    values = [v for v in values if np.isfinite(v)]
+    return float(np.percentile(values, q)) if values else float("nan")
+
+
 def print_summary(episode_rows, title):
     by_condition = {}
     for row in episode_rows:
@@ -164,27 +238,42 @@ def print_summary(episode_rows, title):
         by_condition.setdefault(key, []).append(row)
     print(f"\n=== {title.upper()}: {len(episode_rows)} episodes "
           f"| {len(by_condition)} conditions ===")
-    print(f"{'condition':<18}{'n':>4}{'surv%':>7}{'succ%':>7}{'poss%':>7}"
-          f"{'v(m/s)':>8}{'v/cmd':>7}{'r':>7}{'ct(m)':>8}")
+    print("every +/- is one standard error (rates binomial, others SEM); two "
+          "conditions differ only when the gap exceeds ~2x the larger SE")
+    print("v / v/cmd / ct are SURVIVORS-ONLY: an episode truncated by a fall "
+          "covers its distance in less time, so an unfiltered mean rises as the "
+          "condition gets harder. poss% uses the TRAINING lost-ball criterion "
+          "(nearest foot to ball surface > 0.5 m for 0.1 s, after first touch); "
+          "bd90 = 90th pct robot-ball distance, its continuous form.")
+    print(f"{'condition':<18}{'n':>4}{'surv%':>14}{'succ%':>14}{'poss%':>7}"
+          f"{'v(m/s)':>14}{'v/cmd':>7}{'r':>7}{'ct(m)':>14}{'bd90':>7}")
     for (group, axis, name) in sorted(by_condition, key=lambda k: (k[0], k[1])):
         rows = by_condition[(group, axis, name)]
-        survival = 100.0 * (1.0 - np.mean([r["fell"] for r in rows]))
-        possession = 100.0 * (1.0 - np.mean([r["ball_lost"] for r in rows]))
+        # survivors define every continuous metric below -- see the note above
+        alive = [r for r in rows if r["fell"] < 0.5]
+        survival, survival_se = _rate_pm([1.0 - r["fell"] for r in rows])
+        possession, _ = _rate_pm([1.0 - r["ball_lost"] for r in rows])
         successes = [r["success"] for r in rows if np.isfinite(r["success"])]
-        success_txt = f"{100.0 * np.mean(successes):>7.0f}" if successes else f"{'-':>7}"
-        ach_speeds = [r["ach_speed"] for r in rows if np.isfinite(r["ach_speed"])]
-        ach_speed = np.mean(ach_speeds) if ach_speeds else float("nan")
-        speed_ratios = [r["ach_speed"] / r["cmd_speed"] for r in rows
-                        if np.isfinite(r["ach_speed"]) and np.isfinite(r["cmd_speed"])
-                        and r["cmd_speed"] > 0.05]
-        speed_ratio = np.mean(speed_ratios) if speed_ratios else float("nan")
+        if successes:
+            success, success_se = _rate_pm(successes)
+            success_txt = f"{success:>8.0f}+-{success_se:<4.0f}"
+        else:
+            success_txt = f"{'-':>14}"
+        ach_speed, ach_speed_se = _mean_pm([r["ach_speed"] for r in alive])
+        speed_ratio, _ = _mean_pm([r["ach_speed"] / r["cmd_speed"] for r in alive
+                                   if np.isfinite(r["ach_speed"]) and np.isfinite(r["cmd_speed"])
+                                   and r["cmd_speed"] > 0.05])
         corr_values = [r["speed_corr_r"] for r in rows if np.isfinite(r["speed_corr_r"])]
         corr_txt = f"{np.mean(corr_values):>7.2f}" if corr_values else f"{'-':>7}"
-        survivor_ct = [r["cross_track"] for r in rows
-                       if r["fell"] < 0.5 and np.isfinite(r["cross_track"])]
-        cross_track = np.mean(survivor_ct) if survivor_ct else float("nan")
-        print(f"{name:<18}{len(rows):>4}{survival:>7.0f}{success_txt}{possession:>7.0f}"
-              f"{ach_speed:>8.2f}{speed_ratio:>7.2f}{corr_txt}{cross_track:>8.3f}")
+        # cross-track is survivors-only, so its n is not len(rows) -- _mean_pm
+        # divides by the actual survivor count, which is what the SE must use
+        cross_track, cross_track_se = _mean_pm([r["cross_track"] for r in alive])
+        ball_dist_p90 = _pct([r["ball_dist"] for r in rows], 90)
+        print(f"{name:<18}{len(rows):>4}"
+              f"{survival:>8.0f}+-{survival_se:<4.0f}{success_txt}"
+              f"{possession:>7.0f}"
+              f"{ach_speed:>8.2f}+-{ach_speed_se:<4.2f}{speed_ratio:>7.2f}{corr_txt}"
+              f"{cross_track:>8.3f}+-{cross_track_se:<5.3f}{ball_dist_p90:>7.2f}")
 
 
 def write_speed_pairs_csv(speed_pair_rows, csv_path):
@@ -216,11 +305,22 @@ def load_summary_rows(csv_path):
         for r in csv.DictReader(f):
             rows.append(dict(condition=r["condition"], group=r["group"],
                              axis_value=float(r["axis_value"]),
+                             rep=r.get("rep", ""), route_seed=r.get("route_seed", ""),
                              fell=num(r["fell"]), ball_lost=num(r["ball_lost"]),
                              success=num(r["success"]), ach_speed=num(r["ach_speed_mps"]),
                              cmd_speed=num(r["cmd_speed_mps"]),
                              speed_corr_r=num(r["speed_corr_r"]),
-                             cross_track=num(r["cross_track_m"])))
+                             cross_track=num(r["cross_track_m"]),
+                             progress=num(r.get("progress_m", "")),
+                             duration=num(r.get("duration_s", "")),
+                             ball_dist=num(r.get("ball_dist_m", "")),
+                             foot_ball_dist=num(r.get("foot_ball_dist_m", "")),
+                             ball_lost_t=num(r.get("ball_lost_t_s", "")),
+                             speed_slope=num(r.get("speed_slope", "")),
+                             speed_bias=num(r.get("speed_bias", "")),
+                             speed_resid=num(r.get("speed_resid_mps", "")),
+                             min_pelvis_z=num(r.get("min_pelvis_z", "")),
+                             max_tilt_gvec_z=num(r.get("max_tilt_gvec_z", ""))))
     return rows
 
 

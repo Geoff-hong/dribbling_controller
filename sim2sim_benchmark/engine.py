@@ -13,8 +13,10 @@ the robots are fully independent.
 Pure library: the benchmark runner (`python -m sim2sim_benchmark`) and the
 interactive CLI (`python -m sim2sim_benchmark.pysim`) both build on it.
 """
+import functools
 import os
 import re
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import mujoco
@@ -49,14 +51,32 @@ ROUTE_CFG = dict(
 CMD_MODE = 4
 JOINT_LIMIT_FACTOR = 0.9
 DECIMATION = 4
-FALL_Z = 0.4
+# Fall criterion, matched term-for-term to the TRAINING termination
+# (multiagent_sim/tasks/kick/mdp/terminations.py:fall, which the checkpoints'
+# env.yaml selects): pelvis below height_min OR tilted past ~45 deg, where the
+# tilt test is on the body-frame projected gravity z. The benchmark used to test
+# height alone at 0.4 m -- a very late trigger against a 0.79 m standing pelvis,
+# so kneeling / heavily-pitched states well past recovery scored as "survived"
+# and survival rates were not comparable to training's.
+FALL_Z = 0.5
+FALL_TILT_GVEC_Z = -0.7
 
-# lost-ball ("possession") criterion: horizontal ball-pelvis distance stays above
-# LOST_BALL_DIST for LOST_BALL_T continuous seconds -> the episode is flagged
-# ball_lost (sticky). A robot that stays up but kicks the ball away is a task
-# failure that fall-rate alone cannot see.
-LOST_BALL_DIST = 1.5
-LOST_BALL_T = 2.0
+# Lost-ball ("possession") criterion, also matched to training
+# (DribbleRLEnv: BALL_LOST_DIST_THRESHOLD_M / BALL_LOST_GRACE_S): the NEAREST
+# FOOT's distance to the ball SURFACE exceeds the threshold continuously for the
+# grace period -> sticky ball_lost.
+#
+# The old criterion measured pelvis-to-ball-CENTRE at 1.5 m for 2.0 s. That is
+# ~3x looser than the state training TERMINATES on, and 2 s of continuous loss
+# cannot even accumulate in an episode that ends early, so the flag fired on 1
+# episode in 3504 and the derived "possession" metric was a flat 100% line.
+#
+# Training's `_first_touch_done` gate is reproduced as "the foot has been within
+# the threshold at least once this episode" -- see policy_step. It is not
+# optional: the reset spawns the ball 0.65 m ahead, i.e. already outside the
+# threshold, so without the gate the sticky flag fires on every episode.
+LOST_BALL_DIST = 0.5
+LOST_BALL_T = 0.1
 
 # reset jitter (condition key reset_jitter): deterministic clean-env conditions
 # need SOME spread to make per-condition survival a probability, not a repeated
@@ -114,6 +134,31 @@ DR = dict(ball_mass=(0.352, 0.430), ball_radius=(0.09, 0.11),
 SWEEP_RANGES = dict(ball_mass=(0.3325, 0.4495), ball_radius=(0.09, 0.11),
                     foot_friction=(0.375, 1.125), ball_friction=(0.4625, 0.5375))
 
+# Ball roll brake. PhysX (training side) exposes no rolling-friction material, so
+# the roll is braked by rigid-body ANGULAR DAMPING c: w_dot = -c*w, which for a
+# rolling sphere gives speed decay v_dot = -(2/7)*c*v -> a 1 m/s ball rolls 3.5/c
+# metres. MuJoCo's dof_damping is a torque coefficient (tau = -d*w), so d = c*I
+# reproduces PhysX's c exactly. FALLBACK = the m16000-era training value;
+# configure_train_dr() overwrites it from the checkpoint's env.yaml, and a
+# condition's ball_damping key overrides it per condition.
+# Reference points: 4.0 = grass calibration (the trained value), 0.9 = the
+# 2026-07-17 hardware measurement on the indoor test floor (free-roll k ~0.26/s).
+BALL_DAMPING = 4.0
+
+# ---- robot-side DR --------------------------------------------------------
+# Everything above perturbs the BALL. These four channels perturb the ROBOT, and
+# the benchmark had none of them even though training randomized all four -- so
+# every previous run evaluated a nominal-mass, nominal-gain, perfectly-calibrated
+# robot with noise-free sensors, i.e. easier than the policy's own training
+# distribution. configure_train_dr() fills them from the checkpoint's env.yaml;
+# None means "that checkpoint did not randomize it" and the axis falls back to a
+# pure stress probe.
+OBS_NOISE = {}            # {obs term name: uniform half-width}, applied post-delay
+ACTUATOR_GAIN_RANGE = None    # kp/kd multiplier
+PAYLOAD_KG_RANGE = None       # added to torso_link mass
+JOINT_OFFSET_RANGE = None     # encoder calibration error on default_joint_pos
+BASE_COM_RANGE = None         # {axis: (lo, hi)} offset of torso_link CoM
+
 
 def _expand(pair, scale, lo_clamp=0.02):
     center, half = 0.5 * (pair[0] + pair[1]), 0.5 * (pair[1] - pair[0]) * scale
@@ -131,7 +176,9 @@ def configure_train_dr(train, sweep_scale=1.5):
     the record, so when untrained it KEEPS the hardcoded fallback band (flagged).
     train=None -> keep every hardcoded fallback.
     """
-    global BALL_DELAY_RANGE, ACT_DELAY_SUBSTEPS, ACT_DELAY_ZERO_PROB
+    global BALL_DELAY_RANGE, ACT_DELAY_SUBSTEPS, ACT_DELAY_ZERO_PROB, BALL_DAMPING
+    global OBS_NOISE, ACTUATOR_GAIN_RANGE, PAYLOAD_KG_RANGE, JOINT_OFFSET_RANGE
+    global BASE_COM_RANGE
     if train is None:
         print("[train_dr] WARNING: no env.yaml — using hardcoded legacy DR ranges")
         return
@@ -139,7 +186,7 @@ def configure_train_dr(train, sweep_scale=1.5):
     nominal = dict(ball_mass=train["ball_mass_nominal"], ball_radius=train["ball_radius_nominal"],
                    ball_friction=train["ball_friction_nominal"])
     for key in ("ball_mass", "ball_radius", "ball_friction", "foot_friction"):
-        rng = train[f"{key}_range" if key != "foot_friction" else "foot_friction_range"]
+        rng = train[f"{key}_range"]
         if rng is not None:
             DR[key] = (float(rng[0]), float(rng[1]))
             SWEEP_RANGES[key] = _expand(DR[key], sweep_scale)
@@ -166,8 +213,21 @@ def configure_train_dr(train, sweep_scale=1.5):
         tag = " (synthetic +/-10% band)" if key in synthetic else ""
         print(f"[train_dr] {key}: DR [{DR[key][0]:.4g}, {DR[key][1]:.4g}]"
               f"  sweep(x{sweep_scale:g}) [{SWEEP_RANGES[key][0]:.4g}, {SWEEP_RANGES[key][1]:.4g}]{tag}")
+    if train.get("ball_damping") is not None:
+        BALL_DAMPING = float(train["ball_damping"])
     print(f"[train_dr] latency: ball obs {BALL_DELAY_RANGE} steps, action "
           f"{tuple(5 * s for s in ACT_DELAY_SUBSTEPS)} ms (zero_prob {ACT_DELAY_ZERO_PROB:g})")
+    OBS_NOISE = dict(train.get("obs_noise") or {})
+    ACTUATOR_GAIN_RANGE = train.get("actuator_gain_range")
+    PAYLOAD_KG_RANGE = train.get("payload_kg_range")
+    JOINT_OFFSET_RANGE = train.get("joint_offset_range")
+    BASE_COM_RANGE = train.get("base_com_range")
+    if not OBS_NOISE:
+        print("[train_dr] WARNING: no obs noise in env.yaml — the benchmark will "
+              "run NOISE-FREE, which is easier than the training distribution")
+    print(f"[train_dr] ball_damping c = {BALL_DAMPING:g} "
+          f"(roll decay k = {2 / 7 * BALL_DAMPING:.3g}/s, 1 m/s ball rolls "
+          f"{3.5 / BALL_DAMPING:.2f} m)")
 
 # distinct per-robot colors (ball + its route dots) so each trajectory is identifiable
 COLORS = [(0.90, 0.25, 0.25), (0.25, 0.80, 0.35), (0.30, 0.55, 1.00), (0.95, 0.85, 0.15),
@@ -217,8 +277,24 @@ DEFAULT_CONDITION = dict(
     offroute_fail_m=None, ball_far_fail_m=None, episode_s=None,
     push_dv=0.0, ball_push_dv=0.0, push_interval_s=5.0,
     ball_obs_delay_steps=None, action_delay_ms=None, reset_jitter=False,
-    dr=None, dr_scale=None, record_speed_pairs=False,
-    route_start_speed=None, route_accel_limit=None)
+    dr=None, dr_scale=None, ball_damping=None, record_speed_pairs=False,
+    route_start_speed=None, route_accel_limit=None,
+    # Robot-side DR. Each is a SCALE on the trained magnitude (1.0 = as trained,
+    # 0.0 = off) except ball_radius_obs_m, which is an absolute offset.
+    #
+    # obs_noise_scale defaults to 0, NOT 1, and that is a deliberate protocol
+    # choice rather than an oversight. Measured 2026-07-20 on
+    # g1_dribble_s3_human_dr_iter80000, nominal condition, n=24: fall rate 0.50
+    # noise-free vs 0.88 at 1x the trained noise. A baseline that already fails
+    # 88% of the time floors every perturbation axis and destroys the
+    # benchmark's ability to separate checkpoints.
+    # The deeper reason: training noise is a REGULARIZER, not a measurement of
+    # the deployment sensors -- nobody has measured those. This mirrors how
+    # conditions.DEPLOY_LATENCY pins latency to the deployment stack's value
+    # instead of sampling the training range. The obs_noise sweep group carries
+    # the sensitivity information (0 -> 4x), which is where it belongs.
+    obs_noise_scale=0.0, actuator_gain_scale=None, payload_kg=None,
+    base_com_scale=None, joint_offset_rad=None, ball_radius_obs_m=None)
 
 
 def make_condition(**overrides):
@@ -457,10 +533,13 @@ class Route:
         if num > 0: self._build(num, False)
 
 
-def build_world(n_robots, spacing, onnx_path, reset_path, seed):
+def build_world(n_robots, spacing, onnx_path, reset_path, seed, visual=True):
     """Compose the multi-robot model and its Robot wrappers (shared by main() and
-    the sim2sim_benchmark package)."""
-    model, grid = compose(n_robots, spacing)
+    the sim2sim_benchmark package).
+
+    visual=False strips the render-only meshes (see _single_robot_xml) — pass it
+    for any world that is never rendered; physics is unaffected."""
+    model, grid = compose(n_robots, spacing, visual=visual)
     data = mujoco.MjData(model)
     print(f"[multi] policy: {onnx_path}")
     # tiny batch-1 MLPs: ORT's default core-count threadpool only spin-waits
@@ -471,6 +550,14 @@ def build_world(n_robots, spacing, onnx_path, reset_path, seed):
     session = ort.InferenceSession(onnx_path, sess_options=so,
                                    providers=["CPUExecutionProvider"])
     meta = session.get_modelmeta().custom_metadata_map
+    # log the obs contract, not just the path: feeding a chest-frame policy
+    # pelvis-frame observations does not error, it just produces quietly awful
+    # numbers (measured: straight-line success 92% -> 0%), and the only record
+    # of which frame a finished run used was buried in the ONNX metadata
+    print(f"[multi] obs frame: {meta.get('obs_frame', 'pelvis (no obs_frame key)')}"
+          f" | history {meta.get('actor_history_length', '1')}"
+          f" | actor obs {meta.get('actor_observation_dim', '?')}"
+          f" | latent {meta.get('latent_dim', '?')}")
     reset_state = parse_reset(reset_path)
     robots = [Robot(model, k, grid[k], session, meta, reset_state, seed)
               for k in range(n_robots)]
@@ -490,10 +577,48 @@ def step_control_period(model, data, robots, standby_hold_s=0.0):
         mujoco.mj_step(model, data)
     t = data.time
     return [j for j, rb in enumerate(robots)
-            if rb.base_z(data) < FALL_Z or rb.fail_reason or (t - rb.ep_start) >= rb.episode_len]
+            if rb.fell(data) or rb.fail_reason or (t - rb.ep_start) >= rb.episode_len]
 
 
-def compose(n, spacing):
+@functools.lru_cache(maxsize=2)
+def _single_robot_xml(visual):
+    """The single-robot MJCF, optionally with every mesh asset and mesh geom
+    stripped out.
+
+    The 35 STL meshes dominate a compiled model's memory, and `compose()` pays
+    for them once PER ROBOT (MjSpec.attach copies assets, so nmesh scales with
+    n). A 32-robot world costs ~3.4 GB with meshes and a fraction of that
+    without — and a statistics run never renders, so it is paying purely for
+    geometry nothing reads. Fanning such workers out is what OOM-killed the
+    2026-07-20 benchmark runs.
+
+    Stripping is physically exact, on three checks against this MJCF:
+      - all 38 mesh geoms are contype=0/conaffinity=0, so they generate no
+        contacts (verified: the set of (contype, conaffinity) over mesh geoms
+        is {(0, 0)});
+      - every robot link carries an explicit <inertial>, so no geom feeds
+        inertia (the bodies without one are the ball and the route dots, which
+        are primitives, not meshes);
+      - floors are planes and route dots are spheres, so both survive.
+    Both textures are `builtin` and both materials are inline, so the stripped
+    XML has no external asset dependencies and loads via from_string.
+
+    Prefer this over the compiler's `discardvisual`, which keys off
+    contype==0 && conaffinity==0 and would therefore also drop the floors
+    (deliberately zeroed here; they collide via explicit <pair>) and the route
+    dots that Robot.__init__ recolors through model.body_geomadr.
+    """
+    if visual:
+        return open(SINGLE_MJCF).read()
+    root = ET.parse(SINGLE_MJCF).getroot()
+    for parent in root.iter():
+        for child in list(parent):
+            if child.tag == "mesh" or (child.tag == "geom" and "mesh" in child.attrib):
+                parent.remove(child)
+    return ET.tostring(root, encoding="unicode")
+
+
+def compose(n, spacing, visual=True):
     sp = mujoco.MjSpec()
     sp.option.timestep = 0.005
     sp.option.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
@@ -505,7 +630,7 @@ def compose(n, spacing):
     grid = []
     for k in range(n):
         gx = (k % cols) * spacing; gy = (k // cols) * spacing
-        child = mujoco.MjSpec.from_file(SINGLE_MJCF)
+        child = mujoco.MjSpec.from_string(_single_robot_xml(visual))
         fr = sp.worldbody.add_frame(); fr.pos = [gx, gy, 0.0]
         sp.attach(child, prefix=f"r{k}_", frame=fr)
         grid.append((gx, gy))
@@ -556,11 +681,16 @@ def parse_reset(path):
 class Robot:
     def __init__(self, model, k, grid, sess, meta, rs, seed):
         self.k = k; self.pfx = f"r{k}_"; self.gx, self.gy = grid; self.sess = sess
-        self.kp = csv_floats(meta["joint_stiffness"]); self.kd = csv_floats(meta["joint_damping"])
+        # kp0/kd0/dq0 are the PRISTINE values; the per-episode robot-side DR
+        # writes self.kp/self.kd/self.dq from them, so a scale never compounds
+        # across episodes
+        self.kp0 = csv_floats(meta["joint_stiffness"]); self.kd0 = csv_floats(meta["joint_damping"])
+        self.kp = self.kp0.copy(); self.kd = self.kd0.copy()
         self.skp = np.array([STANDBY_GAINS[n][0] for n in meta["joint_names"].split(",")])
         self.skd = np.array([STANDBY_GAINS[n][1] for n in meta["joint_names"].split(",")])
         self._holding = False
-        self.ascale = csv_floats(meta["action_scale"]); self.dq = csv_floats(meta["default_joint_pos"])
+        self.ascale = csv_floats(meta["action_scale"])
+        self.dq0 = csv_floats(meta["default_joint_pos"]); self.dq = self.dq0.copy()
         self.jnames = meta["joint_names"].split(",")
         # actor obs is built term-by-term in this order so one code path serves the
         # 82-dim (invariant), 90-dim (world-frame) and 83x10 (history) policies.
@@ -600,6 +730,14 @@ class Robot:
         self.ballq = model.jnt_qposadr[balj]; self.ballv = model.jnt_dofadr[balj]
         self.ball_body = nid(mujoco.mjtObj.mjOBJ_BODY, "softtouch_ball")
         self.ball_geom = nid(mujoco.mjtObj.mjOBJ_GEOM, "softtouch_ball_geom")
+        # feet, for the training-matched lost-ball criterion (nearest foot to the
+        # ball SURFACE, not pelvis to ball centre)
+        self.foot_bodies = [nid(mujoco.mjtObj.mjOBJ_BODY, f"{side}_ankle_roll_link")
+                            for side in ("left", "right")]
+        # payload / CoM DR target torso_link (env.yaml asset_cfg.body_names)
+        self.torso_body = nid(mujoco.mjtObj.mjOBJ_BODY, "torso_link")
+        self.torso_mass0 = float(model.body_mass[self.torso_body])
+        self.torso_ipos0 = model.body_ipos[self.torso_body].copy()
         # distinct color per robot for ball + its route dots
         self.color = COLORS[k % len(COLORS)]
         model.geom_rgba[self.ball_geom] = [*self.color, 1.0]
@@ -633,24 +771,99 @@ class Robot:
         self.speed_pairs = None                # per-step (cmd, actual) speed pairs, opt-in
         self.ball_dist_sum = 0.0; self.ball_dist_count = 0
         self.ball_lost = False; self.lost_since = None
+        self.ball_lost_t = float("nan")
+        self.foot_dist_sum = 0.0; self.foot_dist_count = 0
+        self.first_touch = False
+        self.min_pelvis_z = float("inf"); self.max_tilt_gvec_z = -float("inf")
         self.move_start = 0.0                  # episode start + standby hold
         self.push_dv = 0.0; self.ball_push_dv = 0.0; self.push_interval_s = 5.0
         self.next_push_t = None; self.next_ball_push_t = None
+        self.ball_damping = None               # per-condition override; None -> BALL_DAMPING
+        self.ball_radius_obs_m = None          # None -> feed the true (DR'd) radius
+        self.obs_noise = {}
+        self.obs_rng = np.random.Generator(np.random.PCG64(np.random.SeedSequence(0)))
 
     def apply_dr(self, model, dr):
         self.dr = dict(dr)
         m, r, ff, bf = dr["mass"], dr["radius"], dr["foot"], dr["ball"]
+        c = BALL_DAMPING if self.ball_damping is None else float(self.ball_damping)
         I = 0.4 * m * r * r
         model.body_mass[self.ball_body] = m
         model.body_inertia[self.ball_body] = [I, I, I]
         model.geom_size[self.ball_geom][0] = r
+        # geom_rbound is compiled from the ORIGINAL radius; broadphase uses it, so
+        # an enlarged ball would have shin/torso contacts pruned at marginal
+        # separations (foot contacts are explicit <pair>s and immune). Without
+        # this the ball_radius axis partly measures a collision-detection artifact.
+        model.geom_rbound[self.ball_geom] = r
         model.dof_damping[self.ballv:self.ballv + 3] = 0.0
-        model.dof_damping[self.ballv + 3:self.ballv + 6] = 4.0 * I
+        model.dof_damping[self.ballv + 3:self.ballv + 6] = c * I
         for pid in self.foot_pairs:
             model.pair_friction[pid][0] = ff; model.pair_friction[pid][1] = ff
         for pid in self.ball_pairs:
             model.pair_friction[pid][0] = bf; model.pair_friction[pid][1] = bf
         return r
+
+    def apply_robot_dr(self, model, condition):
+        """Per-episode robot-side DR: sensor noise, actuator gains, torso payload
+        and CoM, encoder calibration.
+
+        Each condition key is a SCALE on the checkpoint's own trained magnitude
+        (so 1.0 reproduces training and the axes stay comparable across
+        checkpoints), except payload_kg / joint_offset_rad which are absolute
+        because their trained ranges are one-sided. A channel the checkpoint
+        never randomized has range None and is simply skipped -- evaluating a
+        policy against DR it never saw would misattribute the failures.
+
+        NOTE the draw order here is fixed and happens BEFORE the ball DR draw, so
+        adding a channel changes every downstream random number. That is fine on
+        a --fresh run and is why the condition-table fingerprint covers it.
+        """
+        u = self.rng.uniform
+
+        # 1. observation noise (applied in _obs, post-delay, as Isaac Lab does)
+        scale = condition["obs_noise_scale"]
+        self.obs_noise = ({k: v * float(scale) for k, v in OBS_NOISE.items()}
+                          if OBS_NOISE and scale else {})
+        # separate stream: obs noise is drawn every policy step, so sharing
+        # self.rng would make the push/DR draws depend on episode length
+        self.obs_rng = np.random.Generator(np.random.PCG64(
+            np.random.SeedSequence(int(self.rng.integers(0, 2**31 - 1)))))
+
+        # 2. actuator gains: one scalar multiplier on kp and kd together
+        gain = condition["actuator_gain_scale"]
+        if gain is None and ACTUATOR_GAIN_RANGE is not None:
+            gain = u(*ACTUATOR_GAIN_RANGE)
+        self.kp = self.kp0 * (1.0 if gain is None else float(gain))
+        self.kd = self.kd0 * (1.0 if gain is None else float(gain))
+
+        # 3. torso payload
+        payload = condition["payload_kg"]
+        if payload is None and PAYLOAD_KG_RANGE is not None:
+            payload = u(*PAYLOAD_KG_RANGE)
+        model.body_mass[self.torso_body] = self.torso_mass0 + float(payload or 0.0)
+
+        # 4. torso CoM offset (scale on the trained per-axis range)
+        com_scale = condition["base_com_scale"]
+        ipos = self.torso_ipos0.copy()
+        if BASE_COM_RANGE:
+            k = 1.0 if com_scale is None else float(com_scale)
+            for i, axis in enumerate(("x", "y", "z")):
+                rng_axis = BASE_COM_RANGE.get(axis)
+                if rng_axis and k:
+                    ipos[i] += k * u(*rng_axis)
+        model.body_ipos[self.torso_body] = ipos
+
+        # 5. encoder calibration error. dq feeds BOTH the joint_pos observation
+        # (q - dq) and the action offset (dq + scale*a), which is exactly what
+        # the training event randomize_joint_default_pos perturbs.
+        off = condition["joint_offset_rad"]
+        if off is None and JOINT_OFFSET_RANGE is not None:
+            self.dq = self.dq0 + u(*JOINT_OFFSET_RANGE, size=len(self.dq0))
+        elif off:
+            self.dq = self.dq0 + self.rng.uniform(-float(off), float(off), len(self.dq0))
+        else:
+            self.dq = self.dq0.copy()
 
     def sample_dr(self, model):
         u = self.rng.uniform
@@ -710,6 +923,10 @@ class Robot:
         self.offroute_fail_m = condition["offroute_fail_m"]
         self.ball_far_fail_m = condition["ball_far_fail_m"]
         cmd_mode = route_cmd_mode(condition)
+        # roll brake: read BEFORE the DR branch, apply_dr scales it by the ball inertia
+        self.ball_damping = condition["ball_damping"]
+        self.ball_radius_obs_m = condition["ball_radius_obs_m"]
+        self.apply_robot_dr(model, condition)
         # DR: explicit dict > dr_scale (centered training ranges x alpha) > training DR
         if dr is None:
             dr = condition["dr"]
@@ -763,7 +980,12 @@ class Robot:
             if self.rng.random() >= ACT_DELAY_ZERO_PROB:
                 self.act_delay = int(self.rng.integers(ACT_DELAY_SUBSTEPS[0], ACT_DELAY_SUBSTEPS[1] + 1))
         # ring depths sized to the actual delays (pinned delays can exceed the training range)
-        self.tgt_hist = np.tile(self.dq, (max(2, -(-self.act_delay // DECIMATION) + 1), 1))
+        # Tiled with the RESET POSE, not the default joint pos: with the
+        # deploy-nominal 10 ms action lag the first control period's early
+        # sub-steps PD toward whatever is in this ring, so seeding it with dq gave
+        # every episode a small startup kick away from the pose it just reset to.
+        self.tgt_hist = np.tile(data.qpos[self.qadr].copy(),
+                                (max(2, -(-self.act_delay // DECIMATION) + 1), 1))
         self.substep = 0
         # push schedule: velocity kicks every push_interval_s, random phase/direction
         self.push_dv = float(condition["push_dv"])
@@ -785,6 +1007,10 @@ class Robot:
         self.speed_pairs = [] if condition["record_speed_pairs"] else None
         self.ball_dist_sum = 0.0; self.ball_dist_count = 0
         self.ball_lost = False; self.lost_since = None
+        self.ball_lost_t = float("nan")
+        self.foot_dist_sum = 0.0; self.foot_dist_count = 0
+        self.first_touch = False
+        self.min_pelvis_z = float("inf"); self.max_tilt_gvec_z = -float("inf")
         self.fail_reason = ""
 
     def _obs(self, data):
@@ -834,7 +1060,25 @@ class Robot:
             "pelvis_pos_xy_w": [pelvis[0], pelvis[1]],
             "pelvis_yaw_cossin_w": [np.cos(yaw), np.sin(yaw)],
         }
-        term["ball_radius"] = [self.dr["radius"] - 0.10]   # v2: r - nominal 0.10 m
+        # ball_radius obs. Training feeds the TRUE (DR'd) radius; the deployment
+        # C++ builds it from a configured constant (cfg_.resetBallZ). Default
+        # matches training; ball_radius_obs_m pins the BELIEVED radius instead, so
+        # a sweep can test the real deployment failure mode -- the configured
+        # value disagreeing with the actual ball.
+        believed = (self.dr["radius"] if self.ball_radius_obs_m is None
+                    else float(self.ball_radius_obs_m))
+        term["ball_radius"] = [believed - 0.10]   # v2: r - nominal 0.10 m
+        # Observation noise, applied HERE: Isaac Lab's ObservationManager adds it
+        # to the term output, i.e. AFTER the delay functions, so it must land on
+        # the already-lagged ball terms and before history/concat. Uses a
+        # dedicated rng stream so turning noise off leaves every other per-episode
+        # draw (DR, pushes, jitter) bit-identical.
+        for name, half in self.obs_noise.items():
+            value = term.get(name)
+            if value is None:
+                continue
+            value = np.asarray(value, dtype=float)
+            term[name] = value + self.obs_rng.uniform(-half, half, value.shape)
         single = np.concatenate([np.ravel(term[n]) for n in self.actor_names])  # one frame (sf_dim,)
         if self.obs_hist is None:
             # first frame after reset: isaaclab CircularBuffer fills all slots with it
@@ -864,6 +1108,7 @@ class Robot:
             self.speed_pairs.append((self.cmd["target_speed"],
                                      float(ball_vel @ self.cmd["target_dir"]),
                                      float(np.hypot(*ball_vel))))
+        self.track_fall_margin(data)
         ball_dist = float(np.hypot(*(data.qpos[self.ballq:self.ballq + 2]
                                      - data.qpos[self.bq:self.bq + 2])))
         self.ball_dist_sum += ball_dist; self.ball_dist_count += 1
@@ -873,11 +1118,27 @@ class Robot:
                 self.fail_reason = "off_route"
             elif self.ball_far_fail_m is not None and ball_dist > self.ball_far_fail_m:
                 self.fail_reason = "ball_far"
-        # robustness possession metric: sticky lost-ball flag (does NOT end the episode)
-        if ball_dist > LOST_BALL_DIST:
+        # possession: sticky lost-ball flag on the TRAINING criterion (nearest
+        # foot to ball surface, LOST_BALL_DIST for LOST_BALL_T). Unlike training
+        # this does NOT end the episode -- keeping it a metric is what lets
+        # survival and possession be read as separate failure modes.
+        foot_dist = self.foot_ball_dist(data)
+        self.foot_dist_sum += foot_dist; self.foot_dist_count += 1
+        # first-acquisition gate, standing in for training's `_first_touch_done`.
+        # WITHOUT it the metric is meaningless: the reset places the ball
+        # route_defaults.reset_ball_forward_m = 0.65 m ahead, so foot-to-surface
+        # starts ABOVE the 0.5 m threshold, the 0.1 s timer fills before the robot
+        # has touched anything, and the sticky flag fires on 100% of episodes
+        # (measured 182/182 on the 2026-07-20 smoke run). "Lost" must mean losing
+        # a ball you had.
+        if foot_dist <= LOST_BALL_DIST:
+            self.first_touch = True
+        if self.first_touch and foot_dist > LOST_BALL_DIST:
             if self.lost_since is None:
                 self.lost_since = data.time
             elif (data.time - self.lost_since) >= LOST_BALL_T:
+                if not self.ball_lost:
+                    self.ball_lost_t = data.time - self.move_start
                 self.ball_lost = True
         else:
             self.lost_since = None
@@ -911,8 +1172,22 @@ class Robot:
         if t - self.ep_start < self.hold_s:
             return
         if self.next_push_t is not None and t >= self.next_push_t:
-            heading = self.rng.uniform(0.0, 2.0 * np.pi)
-            data.qvel[self.bv:self.bv + 2] += self.push_dv * np.array([np.cos(heading), np.sin(heading)])
+            # Shaped like the training event (isaaclab events:push_by_setting_velocity
+            # with the checkpoint's velocity_range): independent uniform draws per
+            # axis, WITH a vertical component and — the part that actually matters
+            # for a dribbler — an ANGULAR kick. The old version applied a
+            # fixed-magnitude planar shove only, so a `push_dv` axis point labelled
+            # "1x the trained magnitude" omitted half of what training pushed with.
+            # Ratios are the checkpoint's own (z 0.4x, roll/pitch 1.04x, yaw 1.56x
+            # of the planar dv), so scaling push_dv scales the whole 6-D kick.
+            dv = self.push_dv
+            data.qvel[self.bv:self.bv + 3] += dv * np.array([
+                self.rng.uniform(-1.0, 1.0), self.rng.uniform(-1.0, 1.0),
+                0.4 * self.rng.uniform(-1.0, 1.0)])
+            data.qvel[self.bv + 3:self.bv + 6] += dv * np.array([
+                1.04 * self.rng.uniform(-1.0, 1.0),
+                1.04 * self.rng.uniform(-1.0, 1.0),
+                1.56 * self.rng.uniform(-1.0, 1.0)])
             self.next_push_t = t + self.push_interval_s
         if self.next_ball_push_t is not None and t >= self.next_ball_push_t:
             heading = self.rng.uniform(0.0, 2.0 * np.pi)
@@ -928,7 +1203,13 @@ class Robot:
             return None
         pairs = np.asarray(self.speed_pairs)
         window = min(25, len(pairs))   # 25 policy steps = 0.5 s at 50 Hz
-        smoothed = np.convolve(pairs[:, 1], np.ones(window) / window, mode="same")
+        kernel = np.ones(window)
+        # normalise by the kernel's own overlap instead of dividing by `window`:
+        # np.convolve(mode="same") ZERO-PADS, so a plain /window attenuated the
+        # first and last ~window/2 samples toward zero, which then correlated
+        # spuriously with the command ramp at episode start/end.
+        smoothed = (np.convolve(pairs[:, 1], kernel, mode="same")
+                    / np.convolve(np.ones(len(pairs)), kernel, mode="same"))
         return pairs[:, 0], smoothed
 
     def speed_trace(self):
@@ -947,7 +1228,11 @@ class Robot:
         move_s = t - self.move_start
         moved = self.ct_count > 0 and move_s > 1e-6
         nan = float("nan")
-        fell = self.base_z(data) < FALL_Z
+        # include the TERMINATING frame: policy_step samples one control period
+        # before the physics that actually ends the episode, so without this the
+        # recorded minimum would miss the value the verdict was made on
+        self.track_fall_margin(data)
+        fell = self.fell(data)
         fail_reason = "fell" if fell else self.fail_reason
         # capability (fail-fast) episodes get a success verdict; corner-turn episodes
         # additionally require finishing the turn (+0.5 m into the exit straight).
@@ -956,10 +1241,20 @@ class Robot:
             completed = 1.0 if self.route.max_s >= self.route.arc_end_s + 0.5 else 0.0
         if self.offroute_fail_m is not None or self.ball_far_fail_m is not None:
             success = 1.0 if (fail_reason == "" and completed != 0.0) else 0.0
-        speed_corr_r = nan
+        # Controllability. r alone does NOT measure it: correlation is invariant
+        # to scale and offset, so a policy that runs at a constant 0.5x the
+        # commanded speed scores r = 1.0. The regression of actual on commanded
+        # (slope -> 1, bias -> 0, residual -> 0 is perfect tracking) is what
+        # actually answers "does it go the speed it was told".
+        speed_corr_r = speed_slope = speed_bias = speed_resid = nan
         pair_arrays = self.speed_pair_arrays()
         if pair_arrays is not None:
-            speed_corr_r = pearson_r(*pair_arrays)
+            cmd, act = pair_arrays
+            speed_corr_r = pearson_r(cmd, act)
+            if len(cmd) >= 100 and float(np.std(cmd)) > 1e-2:
+                slope, bias = np.polyfit(cmd, act, 1)
+                speed_slope, speed_bias = float(slope), float(bias)
+                speed_resid = float(np.sqrt(np.mean((act - (slope * cmd + bias)) ** 2)))
         return dict(fell=1.0 if fell else 0.0,
                     fail_reason=fail_reason,
                     duration=t - self.ep_start,
@@ -968,8 +1263,16 @@ class Robot:
                     ach_speed=float(self.route.max_s) / move_s if moved else nan,
                     cmd_speed=self.cmd_speed_sum / self.ct_count if self.ct_count else nan,
                     ball_lost=1.0 if self.ball_lost else 0.0,
+                    ball_lost_t=self.ball_lost_t,
+                    foot_ball_dist=(self.foot_dist_sum / self.foot_dist_count
+                                    if self.foot_dist_count else nan),
                     ball_dist=self.ball_dist_sum / self.ball_dist_count if self.ball_dist_count else nan,
-                    completed=completed, success=success, speed_corr_r=speed_corr_r)
+                    completed=completed, success=success, speed_corr_r=speed_corr_r,
+                    speed_slope=speed_slope, speed_bias=speed_bias,
+                    speed_resid=speed_resid,
+                    min_pelvis_z=(self.min_pelvis_z if np.isfinite(self.min_pelvis_z) else nan),
+                    max_tilt_gvec_z=(self.max_tilt_gvec_z
+                                     if np.isfinite(self.max_tilt_gvec_z) else nan))
 
     def _update_dots(self, data):
         npts = self.route.filled + 1; nd = len(self.dots)
@@ -982,3 +1285,35 @@ class Robot:
 
     def base_z(self, data):
         return data.qpos[self.bq + 2]
+
+    def track_fall_margin(self, data):
+        """Record how close this episode came to the fall criteria.
+
+        Storing the raw quantities (lowest pelvis, largest tilt) rather than just
+        the boolean lets ANY threshold be re-derived after the fact -- which is
+        what makes a criterion change auditable instead of a silent re-ruling.
+        They also read as a continuous "margin to failure" in their own right."""
+        self.min_pelvis_z = min(self.min_pelvis_z, float(self.base_z(data)))
+        gvec_z = world_to_body(data.qpos[self.bq + 3:self.bq + 7], [0, 0, -1.0])[2]
+        self.max_tilt_gvec_z = max(self.max_tilt_gvec_z, float(gvec_z))
+
+    def fell(self, data):
+        """Training-matched fall test: pelvis too low OR tilted past ~45 deg.
+
+        Mirrors multiagent_sim/tasks/kick/mdp/terminations.py:fall, which the
+        checkpoints' env.yaml selects. The tilt term is what the height-only test
+        missed: a robot folded over its own knees keeps the pelvis above 0.4 m
+        for a long time after it is unrecoverable."""
+        if self.base_z(data) < FALL_Z:
+            return True
+        gvec_z = world_to_body(data.qpos[self.bq + 3:self.bq + 7], [0, 0, -1.0])[2]
+        return bool(gvec_z > FALL_TILT_GVEC_Z)
+
+    def foot_ball_dist(self, data):
+        """Nearest-foot-to-ball-SURFACE horizontal distance, as training measures
+        it (DribbleRLEnv: min over feet of |foot_xy - ball_xy| - ball_radius,
+        clamped at 0)."""
+        ball_xy = data.qpos[self.ballq:self.ballq + 2]
+        best = min(float(np.hypot(*(data.xpos[b][:2] - ball_xy)))
+                   for b in self.foot_bodies)
+        return max(best - float(self.dr["radius"]), 0.0)

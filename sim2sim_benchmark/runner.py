@@ -45,7 +45,10 @@ def run_condition_table(table, title, stream, *, onnx, reset_file,
     spacing = 2.0 * max_route_len + 20.0
     print(f"[{title}] {len(table)} conditions x {bank * max(1, reps)} episodes; "
           f"{total} to run (~{est_hours:.1f} robot-hours, spacing {spacing:.0f} m)")
-    model, data, robots = engine.build_world(n_robots, spacing, onnx, reset_file, seed)
+    # visual=False: this world is never rendered, so drop the render-only meshes
+    # (~11x less RSS at 32 robots). Physics is unchanged — see _single_robot_xml.
+    model, data, robots = engine.build_world(n_robots, spacing, onnx, reset_file, seed,
+                                             visual=False)
     for rb in robots:
         rb.hold_s = standby_hold_s
         rb.episode_len_default = episode_s
@@ -139,7 +142,7 @@ def record_condition_videos(table, title, video_dir, *, onnx, reset_file, seed=0
     max_route_len = max([engine.ROUTE_CFG["routeLength"]]
                         + [c["route_len_m"] for c in table if c["route_len_m"]])
     model, data, robots = engine.build_world(1, 2.0 * max_route_len + 20.0,
-                                             onnx, reset_file, seed)
+                                             onnx, reset_file, seed, visual=True)
     rb = robots[0]
     rb.hold_s = standby_hold_s
     rb.episode_len_default = episode_s
