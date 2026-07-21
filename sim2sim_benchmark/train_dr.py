@@ -285,6 +285,10 @@ def read_train_dr(path):
         # means the always-active class default applies (engine keeps its own).
         reset_ball_forward_range=_pair(cfg.get("reset_ball_forward_range")),
         reset_ball_bearing_deg=_pair(cfg.get("reset_ball_bearing_deg")),
+        # training standby-PD takeover window (settle_time_range_s); None/(0,0) =
+        # the policy took over on step 0 (all current checkpoints). Drives the
+        # whole-run --settle-s default so the benchmark start matches training.
+        settle_time_range_s=_pair(cfg.get("settle_time_range_s")),
     )
 
 
@@ -333,4 +337,8 @@ def describe(train):
         "class-default dist / bearing (env.yaml did not override)"
         if fr is None and br is None else
         f"dist {rng(fr)} m, bearing {rng(br, '{:.0f}')} deg (env.yaml override)"))
+    st = train.get("settle_time_range_s")
+    lines.append("  settle       " + (
+        "none (policy took over on step 0)" if st is None or st[1] <= 0
+        else f"{rng(st, '{:.2f}')} s standby-PD takeover window"))
     return lines

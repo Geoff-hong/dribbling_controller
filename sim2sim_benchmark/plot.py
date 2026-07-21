@@ -113,6 +113,9 @@ GROUP_LABEL = {
     "ball_push": "ball push dv (m/s)",
     "obs_latency": "ball-obs latency (steps)",
     "act_latency": "action latency (ms)",
+    "reset_ball_dist": "task-start ball distance (m)",
+    "reset_ball_bearing": "task-start ball bearing (deg)",
+    "handover": "deploy standby hold (s)",
     "straight_speed": "cmd speed, straight (m/s)",
     "corner_turn": "|kappa|, corner turn (1/m)",
 }

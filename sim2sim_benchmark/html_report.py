@@ -72,6 +72,9 @@ ROB_GROUP_LABEL = {
     "payload": "torso payload (kg)", "base_com": "torso CoM offset (m)",
     "encoder_offset": "joint encoder offset (rad)",
     "ball_radius_obs": "believed - true ball radius (m)",
+    "reset_ball_dist": "task-start ball distance (m)",
+    "reset_ball_bearing": "task-start ball bearing (deg)",
+    "handover": "deploy standby hold before hand-off (s)",
     "dr_scale": "DR scale alpha",   # legacy CSVs only
 }
 # groups that belong to the capability sections, never the robustness grid

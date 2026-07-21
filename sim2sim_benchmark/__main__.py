@@ -55,7 +55,16 @@ def main():
                          "= the final episode length of both current lineages' "
                          "training curricula (5 -> 10 -> 15 s); evaluating longer "
                          "measures survival at a duration the policy never saw")
-    ap.add_argument("--standby-hold-s", type=float, default=0.0)
+    ap.add_argument("--standby-hold-s", type=float, default=0.0,
+                    help="whole-run FALLBACK stiff-standby hold (s) for conditions "
+                         "that do not pin their own; the robustness 'handover' axis "
+                         "sweeps it per-condition, so leave this 0 for a normal run")
+    ap.add_argument("--settle-s", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                    help="training settle_time_range_s: per-episode standby-PD "
+                         "takeover window U(LO,HI) s on the policy's OWN gains "
+                         "(soft, action overridden to the default pose). Default: "
+                         "read from the checkpoint's env.yaml (all current "
+                         "checkpoints trained with settle OFF -> 0)")
     ap.add_argument("--out-dir", default="eval_result/benchmark",
                     help="output folder for the per-episode CSVs")
     ap.add_argument("--videos", action="store_true",
@@ -97,6 +106,17 @@ def main():
         print(f"[train_dr] {line}")
     engine.configure_train_dr(train)
 
+    # training settle window: --settle-s overrides; else the checkpoint's own
+    # settle_time_range_s (None/(0,0) -> off, which every current checkpoint is)
+    settle_range = None
+    if args.settle_s is not None:
+        settle_range = tuple(sorted(args.settle_s))
+    elif train and train.get("settle_time_range_s") and train["settle_time_range_s"][1] > 0:
+        settle_range = tuple(train["settle_time_range_s"])
+    if settle_range:
+        print(f"[settle] policy takeover window U{settle_range} s (soft gains, "
+              "action = default pose) on every episode")
+
     tables = []
     if args.conditions:
         tables.append(("conditions", load_conditions_json(args.conditions)))
@@ -136,6 +156,7 @@ def main():
     # raising it is itself a free top-up that plain resume already handles.
     run_params = {"seed": args.seed, "route_bank": args.route_bank,
                   "episode_s": args.episode_s, "standby_hold_s": args.standby_hold_s,
+                  "settle_range": list(settle_range) if settle_range else None,
                   "onnx": os.path.basename(args.onnx), "reset": os.path.basename(args.reset)}
     manifest_path = os.path.join(args.out_dir, "conditions.manifest.json")
     new_manifest = topup.build_manifest(tables, engine_state, run_params)
@@ -226,7 +247,8 @@ def main():
                                 n_robots=args.robots, seed=args.seed,
                                 route_bank=args.route_bank, reps=args.reps,
                                 episode_s=args.episode_s,
-                                standby_hold_s=args.standby_hold_s)
+                                standby_hold_s=args.standby_hold_s,
+                                settle_range=settle_range)
         finally:
             # every completed episode is already on disk; just close and summarize
             stream.close()

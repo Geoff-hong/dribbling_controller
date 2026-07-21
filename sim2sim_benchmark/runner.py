@@ -13,7 +13,7 @@ from . import engine
 
 def run_condition_table(table, title, stream, *, onnx, reset_file,
                         n_robots=32, seed=0, route_bank=12, reps=4,
-                        episode_s=20.0, standby_hold_s=0.0):
+                        episode_s=20.0, standby_hold_s=0.0, settle_range=None):
     """Run every condition in `table` for route_bank x reps episodes. Each
     completed episode is written to `stream` (report.EpisodeStream) immediately —
     the CSV is the progress record, and episodes already in it are skipped, so a
@@ -50,7 +50,8 @@ def run_condition_table(table, title, stream, *, onnx, reset_file,
     model, data, robots = engine.build_world(n_robots, spacing, onnx, reset_file, seed,
                                              visual=False)
     for rb in robots:
-        rb.hold_s = standby_hold_s
+        rb.hold_s_default = standby_hold_s   # fallback; the `handover` axis pins per-condition
+        rb.settle_range = settle_range       # whole-run training settle window (or None)
         rb.episode_len_default = episode_s
     mujoco.mj_resetData(model, data)
 
@@ -144,7 +145,7 @@ def record_condition_videos(table, title, video_dir, *, onnx, reset_file, seed=0
     model, data, robots = engine.build_world(1, 2.0 * max_route_len + 20.0,
                                              onnx, reset_file, seed, visual=True)
     rb = robots[0]
-    rb.hold_s = standby_hold_s
+    rb.hold_s_default = standby_hold_s
     rb.episode_len_default = episode_s
     mujoco.mj_resetData(model, data)
     os.makedirs(video_dir, exist_ok=True)
