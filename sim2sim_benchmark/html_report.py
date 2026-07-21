@@ -111,11 +111,16 @@ DIFF_METRICS = [
      stats.mean_stat, False, "down"),
     ("progress", "progress (m)", lambda r: r["progress"], stats.mean_stat, False, "up"),
 ]
-# Every extra run multiplies the bootstrap work (~1.5 s per pair over all five
-# metrics x ~130 conditions). Up to this many runs we compute EVERY pair, so any
-# run can serve as the baseline; beyond it only pairs against the first run are
-# computed and the page says so instead of silently offering a dead control.
-MAX_DIFF_RUNS = 4
+# Up to this many runs we compute EVERY pair, so any run can serve as the
+# subject; beyond it only pairs against the first run are computed and the page
+# says so instead of silently offering a dead control.
+#
+# 8 = what the sidebar's "1-8 toggle" already lets you select, so the picker no
+# longer dies before the run list does. Measured 2026-07-21 on 199 conditions x
+# 6 metrics: 1.4 s per pair, i.e. 14 s at 5 runs and 39 s at 8 (28 pairs) --
+# once, at generation time. The old cap of 4 was set against an estimate of
+# ~1.5 s/pair over ~130 conditions, so it was never the cost that justified it.
+MAX_DIFF_RUNS = 8
 
 
 def _diff_rows(rows, extract):
@@ -789,6 +794,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .foldcard > summary { cursor:pointer; padding:5px 2px; font-size:12.5px;
                         color:var(--muted); }
   .foldcard > summary:hover { color:var(--fg); }
+  /* summary doubles as the card title once every comparison is foldable */
+  .foldcard[open] > summary { color:var(--fg); font-size:13.5px; font-weight:600; }
   .colorkey { display:flex; flex-wrap:wrap; gap:14px; margin:0 0 10px;
               font-size:11.5px; color:var(--muted); }
   .keyitem { display:inline-flex; gap:5px; align-items:center; }
@@ -1031,6 +1038,11 @@ const DIFF_METRICS = __DIFF_METRICS__;
 // axis labels for the difference map: robustness groups come from the data-driven
 // ROB_GROUPS, capability groups are named here (they have their own sections)
 const DIFF_FULL = __DIFF_FULL__;
+// Embedded, not spelled out in the string below: an undefined identifier here
+// only blows up on the >MAX_DIFF_RUNS branch, i.e. exactly the case nobody
+// renders while developing, and the throw takes every section after
+// Significance down with it.
+const MAX_DIFF_RUNS = __MAX_DIFF_RUNS__;
 const ROB_LABEL = Object.assign(Object.fromEntries(ROB_GROUPS), {
   baseline: "nominal (unperturbed)",
   straight_speed: "straight, commanded speed (m/s)",
@@ -1564,7 +1576,8 @@ function renderSummary() {
 // per-condition intervals underneath.
 // baseline = null -> the first selected run. Made explicit (and pickable)
 // because with 3+ checkpoints "whatever happens to be first" is not an answer.
-const signifState = {metric: "survival", baseline: null, expanded: new Set()};
+const signifState = {metric: "survival", baseline: null, expanded: new Set(),
+                     fold: new Map()};
 
 function betterDir(delta, dir) { return dir === "down" ? delta < 0 : delta > 0; }
 
@@ -1598,7 +1611,9 @@ function renderSignificance() {
   }
   if (vis.length > 2 || eligible.length > 1) {
     const brow = h("div", "ctlrow", null, controls);
-    h("span", "ctllabel", "compare against", brow);
+    // "compare against" read as "this one is the yardstick, colour the others"
+    // -- the exact inverse of what the picker does now.
+    h("span", "ctllabel", "subject — green = this run is better", brow);
     for (const o of eligible) {
       const lab = h("label", "chip" + (o.i === base.i ? " on" : ""), null, brow);
       const rb = h("input", null, null, lab);
@@ -1612,32 +1627,43 @@ function renderSignificance() {
       h("span", null, o.r.label, lab);
     }
     if (!DIFF_FULL)
-      h("span", "ctlnote", `— only ${vis[0].r.label} can be the baseline: with `
-        + `more than ${MAX_DIFF_LABEL} runs the report precomputes comparisons `
+      h("span", "ctlnote", `— only ${vis[0].r.label} can be the subject: with `
+        + `more than ${MAX_DIFF_RUNS} runs the report precomputes comparisons `
         + `against the first run only`, brow);
   }
 
-  // With many runs the stacked maps become the same wall this view replaced;
-  // keep the first two comparisons open and fold the rest away.
-  const foldFrom = others.length > 2 ? 2 : others.length;
+  // With many runs the stacked maps become the same wall this view replaced,
+  // so EVERY comparison is collapsible -- the first two used to be rendered
+  // bare, which made the two biggest blocks the only ones you could not get out
+  // of the way. They still start open so the page is useful on arrival.
+  const openUntil = 2;
   others.forEach((other, oi) => {
-    const entries = getDiffs(base.i, other.i, signifState.metric);
-    let host2 = host;
-    if (oi >= foldFrom) {
-      const det = h("details", "foldcard", null, host);
-      const sig0 = (entries || []).filter(e => e.sig);
-      h("summary", null,
-        `${other.r.label} vs ${base.r.label} — ${sig0.length} of `
-        + `${(entries || []).length} conditions differ`, det);
-      host2 = det;
-    }
-    const card = h("div", "card", null, host2);
+    // Oriented SUBJECT-first: deltas are base - other, so a green cell means
+    // "the run you picked is better". getDiffs negates and swaps the CI ends
+    // for us, so every downstream reader (counts, forest, tooltips) follows.
+    // The other orientation is the trap this view kept walking into: you pick
+    // a checkpoint to look at, and green then meant its RIVAL won.
+    const entries = getDiffs(other.i, base.i, signifState.metric);
+    const sig0 = (entries || []).filter(e => e.sig);
+    const det = h("details", "foldcard", null, host);
+    // Remember the user's fold state: every group expand re-renders this whole
+    // section, and reading `oi < openUntil` fresh each time would silently
+    // re-open a card they had just closed.
+    det.open = signifState.fold.has(other.i)
+      ? signifState.fold.get(other.i) : oi < openUntil;
+    det.addEventListener("toggle", () => signifState.fold.set(other.i, det.open));
+    // The summary IS the card title -- a separate heading inside would just
+    // repeat it on every open card.
+    h("summary", null,
+      `${base.r.label} vs ${other.r.label}`
+      + (entries && entries.length
+         ? ` — ${sig0.length} of ${entries.length} conditions differ`
+         : " — no comparable conditions"), det);
+    const card = h("div", "card", null, det);
     // NO run-colour swatch here on purpose: the cells below are coloured by
     // BETTER/WORSE, and a run swatch in the same block invites reading a green
     // cell as "this run's colour" instead of "this run is better" -- which is
     // exactly the collision the series palette makes easy (slot 1 IS green).
-    const head = h("div", "cardhead", null, card);
-    h("span", null, `${other.r.label} vs ${base.r.label}`, head);
     if (!entries || !entries.length) {
       h("div", "note", "no comparable conditions for this metric", card);
       return;
@@ -1661,8 +1687,8 @@ function renderSignificance() {
       h("span", "keyswatch " + cls, null, w);
       h("span", null, text, w);
     };
-    chip("cgood", `${other.r.label} better than ${base.r.label}`);
-    chip("cbad", `${other.r.label} worse`);
+    chip("cgood", `${base.r.label} better than ${other.r.label}`);
+    chip("cbad", `${base.r.label} worse`);
     chip("cnull", "cannot tell apart");
 
     // group rows, most-affected first
@@ -2458,6 +2484,7 @@ def generate(args, live=False, quiet=False):
         "__DIFFS__": js_embed(condition_diffs(parsed, labels)),
         "__DIFF_METRICS__": js_embed([(k, lab, d) for k, lab, _, _, _, d in DIFF_METRICS]),
         "__DIFF_FULL__": js_embed(len(run_dirs) <= MAX_DIFF_RUNS),
+        "__MAX_DIFF_RUNS__": js_embed(MAX_DIFF_RUNS),
         "__REAL_WORLD__": js_embed(REAL_WORLD),
         "__ROB_METRICS__": js_embed(ROB_METRICS),
         "__CAP_METRICS__": js_embed(CAP_METRICS),
