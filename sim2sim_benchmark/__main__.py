@@ -48,8 +48,12 @@ def main():
                     help="fixed route seeds every condition cycles through")
     ap.add_argument("--reps", type=int, default=4,
                     help="episodes per condition = --route-bank x this")
-    ap.add_argument("--episode-s", type=float, default=20.0,
-                    help="episode length for conditions that do not pin their own")
+    ap.add_argument("--episode-s", type=float, default=15.0,
+                    help="episode budget: the length for conditions that do not "
+                         "pin their own, AND a cap on those that do. Default 15 s "
+                         "= the final episode length of both current lineages' "
+                         "training curricula (5 -> 10 -> 15 s); evaluating longer "
+                         "measures survival at a duration the policy never saw")
     ap.add_argument("--standby-hold-s", type=float, default=0.0)
     ap.add_argument("--out-dir", default="eval_result/benchmark",
                     help="output folder for the per-episode CSVs")
@@ -101,6 +105,23 @@ def main():
         tables.append(("capability", capability_conditions(train)))
     if not tables:
         ap.error("pick at least one of --robustness / --capability / --conditions")
+
+    # --episode-s is a CAP, not just the fallback for unpinned conditions: a
+    # condition that pins a longer budget (human_dribble and speed_tracking pin
+    # 20 s) would otherwise evaluate the policy past any length it ever saw in
+    # training, and survival falls monotonically with episode length, so the
+    # extra seconds are a silent handicap rather than a harder test of the same
+    # thing. Shorter pinned budgets (straight 10 s, the turn budgets) are left
+    # alone -- they are fail-fast time limits, not exposure.
+    capped = 0
+    for _title, table in tables:
+        for c in table:
+            if c.get("episode_s") and float(c["episode_s"]) > args.episode_s:
+                c["episode_s"] = args.episode_s
+                capped += 1
+    if capped:
+        print(f"[conditions] capped {capped} condition budgets to "
+              f"--episode-s {args.episode_s:g}s")
 
     import glob as globmod
     import hashlib
