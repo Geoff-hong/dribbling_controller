@@ -72,10 +72,21 @@ FALL_TILT_GVEC_Z = -0.7
 # episode in 3504 and the derived "possession" metric was a flat 100% line.
 #
 # Training's `_first_touch_done` gate is reproduced as "the foot has been within
-# the threshold at least once this episode" -- see policy_step. It is not
-# optional: the reset spawns the ball 0.65 m ahead, i.e. already outside the
+# the TIGHTEST threshold at least once this episode" -- see policy_step. It is
+# not optional: the reset spawns the ball ~0.65 m ahead, i.e. already outside the
 # threshold, so without the gate the sticky flag fires on every episode.
-LOST_BALL_DIST = 0.5
+#
+# EVAL is deliberately NOT bound to the training threshold. Training TERMINATES
+# on 0.5 m foot-surface, which is tight: the ankle_roll body origin sits
+# ~0.10-0.15 m BEHIND the toe, so a 0.5 m foot-origin-to-surface trip is only
+# ~0.4 m toe-to-surface -- a brief kick past the dribble pocket, not a lost ball.
+# So we record the sticky lost flag at a fixed GRID of thresholds: possession is
+# read at an eval-appropriate distance (LOST_BALL_MAIN), while the
+# training-faithful 0.5 m stays available for train_survival. The grid is fixed
+# (not CLI-derived) so the CSV columns are stable across runs.
+LOST_BALL_DISTS = (0.5, 0.8, 1.0)
+LOST_BALL_MAIN = 0.8              # feeds the `ball_lost` column + possession metric
+LOST_BALL_MAIN_IDX = LOST_BALL_DISTS.index(LOST_BALL_MAIN)
 LOST_BALL_T = 0.1
 
 # reset jitter (condition key reset_jitter): deterministic clean-env conditions
@@ -770,8 +781,11 @@ class Robot:
         self.cmd_speed_sum = 0.0               # commanded target_speed accumulator
         self.speed_pairs = None                # per-step (cmd, actual) speed pairs, opt-in
         self.ball_dist_sum = 0.0; self.ball_dist_count = 0
-        self.ball_lost = False; self.lost_since = None
-        self.ball_lost_t = float("nan")
+        # per-threshold sticky lost flag / grace timer / first-loss time
+        n_thr = len(LOST_BALL_DISTS)
+        self.ball_lost = [False] * n_thr
+        self.lost_since = [None] * n_thr
+        self.ball_lost_t = [float("nan")] * n_thr
         self.foot_dist_sum = 0.0; self.foot_dist_count = 0
         self.first_touch = False
         self.min_pelvis_z = float("inf"); self.max_tilt_gvec_z = -float("inf")
@@ -1006,8 +1020,11 @@ class Robot:
         self.cmd_speed_sum = 0.0
         self.speed_pairs = [] if condition["record_speed_pairs"] else None
         self.ball_dist_sum = 0.0; self.ball_dist_count = 0
-        self.ball_lost = False; self.lost_since = None
-        self.ball_lost_t = float("nan")
+        # per-threshold sticky lost flag / grace timer / first-loss time
+        n_thr = len(LOST_BALL_DISTS)
+        self.ball_lost = [False] * n_thr
+        self.lost_since = [None] * n_thr
+        self.ball_lost_t = [float("nan")] * n_thr
         self.foot_dist_sum = 0.0; self.foot_dist_count = 0
         self.first_touch = False
         self.min_pelvis_z = float("inf"); self.max_tilt_gvec_z = -float("inf")
@@ -1118,30 +1135,33 @@ class Robot:
                 self.fail_reason = "off_route"
             elif self.ball_far_fail_m is not None and ball_dist > self.ball_far_fail_m:
                 self.fail_reason = "ball_far"
-        # possession: sticky lost-ball flag on the TRAINING criterion (nearest
-        # foot to ball surface, LOST_BALL_DIST for LOST_BALL_T). Unlike training
+        # possession: sticky lost-ball flag at each LOST_BALL_DISTS threshold
+        # (nearest foot to ball surface, held > LOST_BALL_T). Unlike training
         # this does NOT end the episode -- keeping it a metric is what lets
         # survival and possession be read as separate failure modes.
         foot_dist = self.foot_ball_dist(data)
         self.foot_dist_sum += foot_dist; self.foot_dist_count += 1
-        # first-acquisition gate, standing in for training's `_first_touch_done`.
-        # WITHOUT it the metric is meaningless: the reset places the ball
-        # route_defaults.reset_ball_forward_m = 0.65 m ahead, so foot-to-surface
-        # starts ABOVE the 0.5 m threshold, the 0.1 s timer fills before the robot
-        # has touched anything, and the sticky flag fires on 100% of episodes
-        # (measured 182/182 on the 2026-07-20 smoke run). "Lost" must mean losing
-        # a ball you had.
-        if foot_dist <= LOST_BALL_DIST:
+        # first-acquisition gate (shared across thresholds), standing in for
+        # training's `_first_touch_done`, armed by the TIGHTEST threshold =
+        # "the ball was in the pocket at least once". WITHOUT it the metric is
+        # meaningless: the reset places the ball ~0.65 m ahead, so foot-to-
+        # surface starts ABOVE 0.5 m, the 0.1 s timer fills before the robot has
+        # touched anything, and the sticky flag fires on 100% of episodes
+        # (measured 182/182 on the 2026-07-20 smoke run). "Lost" must mean
+        # losing a ball you had.
+        if foot_dist <= LOST_BALL_DISTS[0]:
             self.first_touch = True
-        if self.first_touch and foot_dist > LOST_BALL_DIST:
-            if self.lost_since is None:
-                self.lost_since = data.time
-            elif (data.time - self.lost_since) >= LOST_BALL_T:
-                if not self.ball_lost:
-                    self.ball_lost_t = data.time - self.move_start
-                self.ball_lost = True
-        else:
-            self.lost_since = None
+        if self.first_touch:
+            for i, dist_thr in enumerate(LOST_BALL_DISTS):
+                if foot_dist > dist_thr:
+                    if self.lost_since[i] is None:
+                        self.lost_since[i] = data.time
+                    elif (data.time - self.lost_since[i]) >= LOST_BALL_T:
+                        if not self.ball_lost[i]:
+                            self.ball_lost_t[i] = data.time - self.move_start
+                        self.ball_lost[i] = True
+                else:
+                    self.lost_since[i] = None
         actions, latent, *_ = self.sess.run(None, {"obs": self._obs(data)})
         self.prev_decoded = actions[0].copy(); self.prev_latent = latent[0].copy()
         self.target = np.clip(self.dq + self.ascale * actions[0], JC - JHW, JC + JHW)
@@ -1262,8 +1282,12 @@ class Robot:
                     progress=float(self.route.max_s),
                     ach_speed=float(self.route.max_s) / move_s if moved else nan,
                     cmd_speed=self.cmd_speed_sum / self.ct_count if self.ct_count else nan,
-                    ball_lost=1.0 if self.ball_lost else 0.0,
-                    ball_lost_t=self.ball_lost_t,
+                    # `ball_lost` mirrors the MAIN threshold (possession metric);
+                    # the full grid is emitted as ball_lost_<thr> for post-hoc
+                    # threshold choice (0.5 feeds train_survival, unchanged).
+                    ball_lost=1.0 if self.ball_lost[LOST_BALL_MAIN_IDX] else 0.0,
+                    ball_lost_t=self.ball_lost_t[LOST_BALL_MAIN_IDX],
+                    ball_lost_grid=[1.0 if f else 0.0 for f in self.ball_lost],
                     foot_ball_dist=(self.foot_dist_sum / self.foot_dist_count
                                     if self.foot_dist_count else nan),
                     ball_dist=self.ball_dist_sum / self.ball_dist_count if self.ball_dist_count else nan,

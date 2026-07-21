@@ -16,6 +16,8 @@ CSV_COLUMNS = ["condition", "group", "axis_value", "rep", "route_seed",
                # foot_ball_dist_m is the TRAINING measure of possession (nearest
                # foot to ball surface); ball_dist_m stays pelvis-to-centre because
                # the ball_far fail-fast threshold is calibrated on it
+               # `ball_lost` above is the MAIN threshold (engine.LOST_BALL_MAIN,
+               # 0.8 m); ball_lost_t_s is its first-loss time.
                "foot_ball_dist_m", "ball_lost_t_s",
                "completed", "success", "speed_corr_r",
                # r is scale/offset invariant (a constant 0.5x cmd scores r=1), so
@@ -24,7 +26,11 @@ CSV_COLUMNS = ["condition", "group", "axis_value", "rep", "route_seed",
                # raw fall-criterion quantities: any threshold can be re-derived
                # from these, so changing FALL_Z stays auditable rather than a
                # silent re-ruling of past runs
-               "min_pelvis_z", "max_tilt_gvec_z"]
+               "min_pelvis_z", "max_tilt_gvec_z",
+               # sticky lost-ball flag at the OTHER grid thresholds: 0.5 m =
+               # training-faithful (feeds train_survival), 1.0 m = looser "really
+               # gone" read. The MAIN threshold's flag is `ball_lost`.
+               "ball_lost_05", "ball_lost_10"]
 PAIRS_COLUMNS = ["axis_value", "rep", "cmd_speed_mps", "ball_speed_mps"]
 TRACES_COLUMNS = ["axis_value", "episode", "step", "cmd_speed_mps",
                   "ball_speed_along_cmd_mps", "ball_speed_abs_mps"]
@@ -53,7 +59,9 @@ def format_episode_row(row):
             _num(row["speed_corr_r"], "{:.3f}"),
             _num(row["speed_slope"], "{:.4f}"), _num(row["speed_bias"], "{:.4f}"),
             _num(row["speed_resid"], "{:.4f}"),
-            _num(row["min_pelvis_z"], "{:.4f}"), _num(row["max_tilt_gvec_z"], "{:.4f}")]
+            _num(row["min_pelvis_z"], "{:.4f}"), _num(row["max_tilt_gvec_z"], "{:.4f}"),
+            # ball_lost_grid = [0.5, 0.8(main), 1.0]; the 0.8 is already `ball_lost`
+            int(row["ball_lost_grid"][0]), int(row["ball_lost_grid"][2])]
 
 
 def write_csv(episode_rows, csv_path):
@@ -307,6 +315,8 @@ def load_summary_rows(csv_path):
                              axis_value=float(r["axis_value"]),
                              rep=r.get("rep", ""), route_seed=r.get("route_seed", ""),
                              fell=num(r["fell"]), ball_lost=num(r["ball_lost"]),
+                             ball_lost_05=num(r.get("ball_lost_05", "")),
+                             ball_lost_10=num(r.get("ball_lost_10", "")),
                              success=num(r["success"]), ach_speed=num(r["ach_speed_mps"]),
                              cmd_speed=num(r["cmd_speed_mps"]),
                              speed_corr_r=num(r["speed_corr_r"]),
