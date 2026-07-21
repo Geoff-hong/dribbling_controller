@@ -12,9 +12,11 @@ One HTML file, no external assets: experiment checkboxes in the sidebar select
 which runs are drawn. A topline summary table leads, then a DIFFERENCE MAP that
 answers "where do these runs actually differ, and is it real" -- every condition
 carries a 95 % bootstrap CI on the difference (paired on route via
-(condition, rep)), and nothing is coloured unless that interval clears zero. At
-the default n=48 the rate noise floor alone is ~7 points, so an uncoloured cell
-means "cannot tell apart", NOT "equal".
+(condition, rep)), and nothing is coloured unless that interval clears zero.
+Resolution scales as 1/sqrt(n): a single condition (n~48) needs a ~20-point gap
+to clear 95 %, one axis pooled (~480) ~6 points, the whole table (~3500) ~2
+points. So an uncoloured single-condition cell means "cannot tell apart" at that
+scale, NOT "equal" -- read the axis trend or raise --reps.
 
 Remaining sections mirror the PNG figures (robustness axes, corner turn, human
 dribble, u-turn, speed, control traces) with hover tooltips, +/-1 SE bands on
@@ -161,9 +163,9 @@ def condition_diffs(parsed, labels):
     negates for the reverse direction.
 
     This is THE view the report was missing: the summary table used to colour
-    any non-zero delta green/red, while the measured noise floor at n=48 is
-    ~7 points. Here a delta is only marked significant when the 95% bootstrap
-    CI on the difference excludes zero.
+    any non-zero delta green/red, while a single condition (n~48) needs a
+    ~20-point gap to clear 95% (per-condition SE ~7 pts). Here a delta is only
+    marked significant when the 95% bootstrap CI on the difference excludes zero.
     """
     n = len(parsed)
     pairs = [(i, j) for i in range(n) for j in range(i + 1, n)
@@ -1010,17 +1012,27 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <section id="sec-signif"><h2><span class="eyebrow">statistics</span>Significant differences</h2>
       <div class="note">Where the selected runs actually differ. Each cell is one
         condition; it is coloured only when the 95&nbsp;% bootstrap CI on the
-        difference clears zero &mdash; at n&nbsp;=&nbsp;48 per condition the noise
-        floor alone is ~7&nbsp;points, so an uncoloured cell means "we cannot
-        tell these apart", not "they are equal". Episodes are paired on
-        (condition,&nbsp;rep) &mdash; the same route in both runs; pairing removes
-        route difficulty but <i>not</i> the shared-<code>mjData</code> slot draw,
-        so it tightens the intervals only modestly.</div>
+        difference clears zero. Read resolution by the SCALE you are looking at
+        (rate noise scales as 1/&radic;n, so it shrinks as you pool):
+        <b>one condition</b> (n&nbsp;&asymp;&nbsp;48) &mdash; a gap must exceed
+        <b>~20&nbsp;points</b> to clear 95&nbsp;% (per-condition SE ~7&nbsp;pts,
+        the difference of two ~10&nbsp;pts);
+        <b>one axis</b> (~10 levels pooled, n&nbsp;&asymp;&nbsp;480) &mdash;
+        <b>~6&nbsp;points</b>, and a monotone trend is itself signal without any
+        single level clearing;
+        <b>the whole table</b> (n&nbsp;&asymp;&nbsp;3500) &mdash;
+        <b>~2&nbsp;points</b> (measured &plusmn;1.9 paired).
+        So an uncoloured single-condition cell means "we cannot tell these apart",
+        not "they are equal" &mdash; look at the axis trend, or raise
+        <code>--reps</code>. Episodes are paired on (condition,&nbsp;rep) &mdash;
+        the same route in both runs; pairing removes route difficulty but
+        <i>not</i> the shared-<code>mjData</code> slot draw, so it tightens the
+        per-condition intervals only modestly.</div>
       <div class="filterrow" id="signif-controls"></div>
       <div id="signif-host"></div>
     </section>
 
-    <section id="sec-robustness"><h2><span class="eyebrow">robustness</span>Perturbation axes &mdash; nominal human routes (20 s)</h2>
+    <section id="sec-robustness"><h2><span class="eyebrow">robustness</span>Perturbation axes &mdash; nominal human routes</h2>
       <div class="note">Each axis perturbs the nominal route bank; dotted line = that run's unperturbed
         baseline. Shaded bands = &plusmn;1 binomial SE. Y scales are shared across axes per metric.</div>
       <div class="legend" id="rob-legend"></div>
@@ -1608,9 +1620,9 @@ function renderSummary() {
       if (dir && k > 0 && vals[k] != null && ref != null) {
         const dv = vals[k] - ref;
         // Colour ONLY when the 95% bootstrap CI on the difference excludes
-        // zero. The measured noise floor at n=48 is ~7 points, so painting
-        // every non-zero delta red/green (what this did before) reports noise
-        // as regression. Metrics with no CI available stay neutral.
+        // zero. A single condition (n~48) needs a ~20-point gap to clear 95%,
+        // so painting every non-zero delta red/green (what this did before)
+        // reports noise as regression. Metrics with no CI available stay neutral.
         const ci = dkey ? nominalDiff(vis[0].i, vis[k].i, dkey) : null;
         if (Math.abs(dv) < 1e-9 && !ci) h("span", "delta", "±0", td);
         else {

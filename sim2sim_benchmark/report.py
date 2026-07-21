@@ -216,8 +216,10 @@ def _rate_pm(flags):
     within a condition are independent draws, since the trajectory depends on
     which robot slot the episode landed on (see the runner's assign_next_episode
     note) and that assignment is effectively random. Report this ALWAYS — at the
-    default reps 4 (n=48) it is ~7 points near p=0.5, wide enough that most
-    single-axis wiggles in these tables are noise."""
+    default reps 4 (n=48) this per-condition SE is ~7 points near p=0.5, so a
+    DIFFERENCE between two single conditions needs ~20 points to be real. That
+    floor shrinks as you pool (1/sqrt(n)): ~6 points across one axis (~480), ~2
+    across the whole table (~3500)."""
     if not len(flags):
         return float("nan"), float("nan")
     p = float(np.mean(flags))
@@ -247,7 +249,9 @@ def print_summary(episode_rows, title):
     print(f"\n=== {title.upper()}: {len(episode_rows)} episodes "
           f"| {len(by_condition)} conditions ===")
     print("every +/- is one standard error (rates binomial, others SEM); two "
-          "conditions differ only when the gap exceeds ~2x the larger SE")
+          "single conditions differ only when the gap exceeds ~2x the larger SE "
+          "(~20 pts for rates at n=48). Pool an axis (~6 pts) or the table (~2) "
+          "for finer reads; the interactive report gives exact per-condition CIs")
     print("v / v/cmd / ct are SURVIVORS-ONLY: an episode truncated by a fall "
           "covers its distance in less time, so an unfiltered mean rises as the "
           "condition gets harder. poss% uses the TRAINING lost-ball criterion "
