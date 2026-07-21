@@ -317,21 +317,21 @@ $PY -m sim2sim_benchmark --robustness --capability \
 # skipping episodes already recorded — a killed run loses nothing; --fresh
 # ignores the existing CSVs and starts over
 
-# interactive single-file HTML report (tensorboard-style): experiment checkboxes,
-# robustness/capability panels, control traces, per-condition video index
+# DEFAULT REPORT: interactive single-file HTML (tensorboard-style): experiment
+# checkboxes, robustness/capability panels, significance view, per-checkpoint
+# training-DR table, control traces, per-condition video index
 $PY -m sim2sim_benchmark.html_report \
     --run-dirs sim2sim_eval_results/runs/m80000 sim2sim_eval_results/runs/m90000 \
     --labels iter80000 iter90000 --out sim2sim_eval_results/compare/report.html
+# or just: $PY -m sim2sim_benchmark.html_report   (auto-discovers runs/ , --serve for live)
 
-# static comparison figures (PNG): one color per experiment
+# LEGACY static PNGs (optional; html_report supersedes these). Only for a
+# browser-less export or the demo/ mock-ups:
 $PY -m sim2sim_benchmark.plot --run-dirs sim2sim_eval_results/runs/m80000 \
     sim2sim_eval_results/runs/m90000 \
     --labels iter80000 iter90000 --out-dir sim2sim_eval_results/compare
-# -> robustness_compare.png                     (perturbation axes)
-#    speed_compare.png                          (max speed + controllability, pooled r)
-#    route_compare.png                          (corner turn)
-#    uturn_compare.png                          (u-turn about-face drill)
-#    speed_traces_<label>.png per experiment    (ball speed vs cmd target traces)
+# -> robustness_compare.png / speed_compare.png / route_compare.png /
+#    uturn_compare.png / speed_traces_<label>.png per experiment
 ```
 
 Preview what the figures look like (mock data, real plotting code):

@@ -3,8 +3,9 @@
 Each selected test runs its condition table to completion and writes
 <out-dir>/robustness.csv / capability.csv (plus a console summary). Episodes
 are flushed to the CSV as they complete, and re-running with the same out-dir
-resumes: episodes already in the CSV are skipped (--fresh starts over). Render
-the comparison figures afterwards with `python -m sim2sim_benchmark.plot`.
+resumes: episodes already in the CSV are skipped (--fresh starts over). Read the
+results with `python -m sim2sim_benchmark.html_report` (the default interactive
+report); `python -m sim2sim_benchmark.plot` renders the legacy static PNGs.
 """
 import argparse
 import csv

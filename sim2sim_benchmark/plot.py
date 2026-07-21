@@ -1,4 +1,12 @@
-"""Comparison figures from benchmark CSVs (engine-independent; numpy+matplotlib only).
+"""LEGACY static PNG comparison figures from benchmark CSVs (engine-independent;
+numpy+matplotlib only).
+
+The interactive `python -m sim2sim_benchmark.html_report` is the default and
+preferred way to read a run — it carries every metric these PNGs do plus the
+significance view, per-checkpoint training DR, and the video index. This module
+is kept for two things only: (a) `demo/make_demo_figures.py` renders the layout
+mock-ups from it, and (b) a quick static export when a browser is unavailable.
+Not run by the benchmark; invoke it explicitly if you want the PNGs.
 
   python -m sim2sim_benchmark.plot \
       --run-dirs eval_result/m80000 eval_result/m90000 \
