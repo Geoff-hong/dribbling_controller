@@ -280,6 +280,11 @@ def read_train_dr(path):
         # to gate the u_turn capability group (0 in the base cmd-mode mix).
         u_turn_share=_uturn_share, human_uturn_share=_human_uturn_share,
         route_v2_geom=cfg.get("route_v2_geom"),
+        # task-start ball placement: only present when the run OVERRODE the class
+        # default (RESET_BALL_FORWARD_RANGE / RESET_BALL_BEARING_DEG); a null here
+        # means the always-active class default applies (engine keeps its own).
+        reset_ball_forward_range=_pair(cfg.get("reset_ball_forward_range")),
+        reset_ball_bearing_deg=_pair(cfg.get("reset_ball_bearing_deg")),
     )
 
 
@@ -322,4 +327,10 @@ def describe(train):
     lines.append(f"  u_turn       " + ("not trained (share 0 in cmd-mode mix)"
                  if max(ut, hu) <= 0.0 else
                  f"trained (peak share u_turn {ut:g}, human_uturn {hu:g})"))
+    fr = train.get("reset_ball_forward_range")
+    br = train.get("reset_ball_bearing_deg")
+    lines.append(f"  ball start   " + (
+        "class-default dist / bearing (env.yaml did not override)"
+        if fr is None and br is None else
+        f"dist {rng(fr)} m, bearing {rng(br, '{:.0f}')} deg (env.yaml override)"))
     return lines

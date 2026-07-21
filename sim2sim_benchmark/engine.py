@@ -95,6 +95,17 @@ LOST_BALL_T = 0.1
 JITTER_YAW_DEG = 5.0
 JITTER_XY = 0.02
 
+# Task-start ball placement (condition key reset_ball_random). Training places
+# the ball per episode at dist * (body-forward rotated by bearing):
+# dribble_env.py RESET_BALL_FORWARD_RANGE / RESET_BALL_BEARING_DEG (active by
+# CLASS DEFAULT even when the env.yaml dumps them null -- see env-yaml-null gotcha).
+# The range below is ball-to-PELVIS distance: the chest variant (0.43, 0.78) was
+# frame-compensated to yield the SAME pelvis distance, so one pelvis-anchored
+# range is faithful to both obs frames. Overridable by configure_train_dr.
+RESET_BALL_DIST_RANGE = (0.5, 0.85)      # trained ball-to-pelvis distance (m)
+RESET_BALL_BEARING_DEG = (-20.0, 20.0)   # trained bearing off body-forward (deg)
+RESET_BALL_DIST_DEFAULT = 0.65           # the fixed placement when not randomized
+
 # Training latency DR, sampled when Robot.latency is on (the pysim --latency
 # flag) and no condition pins the channels. FALLBACK values (the 2026-06-21 v2
 # policy); configure_train_dr() overwrites them from the checkpoint's env.yaml.
@@ -189,10 +200,17 @@ def configure_train_dr(train, sweep_scale=1.5):
     """
     global BALL_DELAY_RANGE, ACT_DELAY_SUBSTEPS, ACT_DELAY_ZERO_PROB, BALL_DAMPING
     global OBS_NOISE, ACTUATOR_GAIN_RANGE, PAYLOAD_KG_RANGE, JOINT_OFFSET_RANGE
-    global BASE_COM_RANGE
+    global BASE_COM_RANGE, RESET_BALL_DIST_RANGE, RESET_BALL_BEARING_DEG
     if train is None:
         print("[train_dr] WARNING: no env.yaml — using hardcoded legacy DR ranges")
         return
+    # ball task-start placement: env.yaml carries these only when the run
+    # OVERRODE the class default, so a null there keeps the (always-active)
+    # class-default range -- see train_dr and the env-yaml-null memory.
+    if train.get("reset_ball_forward_range") is not None:
+        RESET_BALL_DIST_RANGE = tuple(train["reset_ball_forward_range"])
+    if train.get("reset_ball_bearing_deg") is not None:
+        RESET_BALL_BEARING_DEG = tuple(train["reset_ball_bearing_deg"])
     synthetic = []
     nominal = dict(ball_mass=train["ball_mass_nominal"], ball_radius=train["ball_radius_nominal"],
                    ball_friction=train["ball_friction_nominal"])
@@ -290,6 +308,12 @@ DEFAULT_CONDITION = dict(
     ball_obs_delay_steps=None, action_delay_ms=None, reset_jitter=False,
     dr=None, dr_scale=None, ball_damping=None, record_speed_pairs=False,
     route_start_speed=None, route_accel_limit=None,
+    # Task-start ball placement. reset_ball_random=False -> the fixed
+    # RESET_BALL_DIST_DEFAULT straight ahead (bit-identical to the legacy reset,
+    # no rng consumed). True -> place at dist * (forward rotated by bearing),
+    # training-faithful; reset_ball_dist / reset_ball_bearing pin a value
+    # (the robustness axes), None -> sample the trained range.
+    reset_ball_random=False, reset_ball_dist=None, reset_ball_bearing=None,
     # Robot-side DR. Each is a SCALE on the trained magnitude (1.0 = as trained,
     # 0.0 = off) except ball_radius_obs_m, which is an absolute offset.
     #
@@ -970,6 +994,31 @@ class Robot:
             data.qpos[self.bq + 3:self.bq + 7] = qn
             data.qpos[self.bq:self.bq + 2] += self.rng.uniform(-JITTER_XY, JITTER_XY, 2)
             bp[:2] += self.rng.uniform(-JITTER_XY, JITTER_XY, 2)
+        # training-faithful task-start placement (gated so rng is unchanged when
+        # off): ball at dist * (base-forward rotated by bearing) from the pelvis,
+        # replacing the fixed straight-ahead ball_pos. dist/bearing pinned by the
+        # condition (the reset_ball_* axes) or sampled from the trained range.
+        # Base-forward (not chest) is used deliberately: the trained pelvis
+        # distance is frame-agnostic (see RESET_BALL_DIST_RANGE) and data.xquat
+        # for the chest body is stale until the runner's mj_kinematics.
+        if condition["reset_ball_random"]:
+            fwd0 = np.zeros(3)
+            mujoco.mju_rotVecQuat(fwd0, np.array([1.0, 0, 0]),
+                                  data.qpos[self.bq + 3:self.bq + 7].copy())
+            fxy = fwd0[:2] / (np.hypot(fwd0[0], fwd0[1]) or 1.0)
+            # each coord: None -> sample the full trained range; [lo,hi] -> sample
+            # that band (the narrow physics-axis start); scalar -> pin exactly
+            def _draw(val, full):
+                if val is None:
+                    return float(self.rng.uniform(*full))
+                if isinstance(val, (list, tuple)):
+                    return float(self.rng.uniform(float(val[0]), float(val[1])))
+                return float(val)
+            dist = _draw(condition["reset_ball_dist"], RESET_BALL_DIST_RANGE)
+            bearing = np.deg2rad(_draw(condition["reset_ball_bearing"], RESET_BALL_BEARING_DEG))
+            cb, sb = np.cos(bearing), np.sin(bearing)
+            direction = np.array([fxy[0] * cb - fxy[1] * sb, fxy[0] * sb + fxy[1] * cb])
+            bp[:2] = data.qpos[self.bq:self.bq + 2] + dist * direction
         data.qpos[self.ballq:self.ballq + 3] = bp
         data.qpos[self.ballq + 3:self.ballq + 7] = [1, 0, 0, 0]
         data.qvel[self.ballv:self.ballv + 6] = 0.0
