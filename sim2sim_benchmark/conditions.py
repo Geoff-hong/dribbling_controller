@@ -223,6 +223,51 @@ def robustness_conditions(train=None):
         table.append(condition_row(f"radiusobs_{delta:g}", "ball_radius_obs", delta,
                                    dr=NOMINAL_DR,
                                    ball_radius_obs_m=NOMINAL_DR["radius"] + delta))
+
+    # ---- TASK-START ball placement -------------------------------------------
+    # Training places the ball per episode at dist * (forward rotated by bearing)
+    # from the robot -- an ACTIVE DR (class default, see the env-yaml-null gotcha)
+    # the benchmark previously ignored, spawning every ball at a fixed 0.65 m / 0
+    # deg. Two axes sweep it: distance (how far ahead the ball starts) and bearing
+    # (how far off-centre). Each anchors on the trained range and stress-probes
+    # past it; along each axis the OTHER coordinate is held at the narrow
+    # physics-axis start (below) so only the swept coordinate varies.
+    #
+    # PHYSICS_START is the tight start band every NON-baseline condition uses: a
+    # DR/latency/etc. axis should isolate its own parameter, so it gets only a
+    # small start spread (enough to de-determinize survival), NOT the full trained
+    # 0.5-0.85 m x +/-20 deg. The baseline alone samples the full trained start,
+    # so the nominal number reflects the real task-start distribution.
+    PHYSICS_START = (0.6, 0.7)
+    d_lo, d_hi = engine.RESET_BALL_DIST_RANGE
+    dist_vals = sorted(set(round(float(v), 3) for v in np.linspace(0.5 * d_lo, 1.5 * d_hi, 9))
+                       | {round(engine.RESET_BALL_DIST_DEFAULT, 3), round(d_lo, 3), round(d_hi, 3)})
+    print(f"[conditions] reset_ball_dist: axis {tuple(dist_vals)} m "
+          f"(trained {engine.RESET_BALL_DIST_RANGE})")
+    for v in dist_vals:
+        table.append(condition_row(f"resetdist_{v:g}", "reset_ball_dist", v,
+                                   dr=NOMINAL_DR, reset_ball_dist=v, reset_ball_bearing=0.0))
+    b_hi = max(abs(engine.RESET_BALL_BEARING_DEG[0]), abs(engine.RESET_BALL_BEARING_DEG[1]))
+    bearing_vals = sorted({round(float(v), 1) for v in
+                           (-3 * b_hi, -2 * b_hi, -b_hi, -0.5 * b_hi, 0.0,
+                            0.5 * b_hi, b_hi, 2 * b_hi, 3 * b_hi)})
+    print(f"[conditions] reset_ball_bearing: axis {tuple(bearing_vals)} deg "
+          f"(trained {engine.RESET_BALL_BEARING_DEG})")
+    for v in bearing_vals:
+        table.append(condition_row(f"resetbearing_{v:g}", "reset_ball_bearing", v,
+                                   dr=NOMINAL_DR, reset_ball_dist=list(PHYSICS_START),
+                                   reset_ball_bearing=v))
+
+    # Randomized start on every robustness episode. The baseline (dist/bearing
+    # None) samples the FULL trained start so its number is training-faithful;
+    # every other axis gets the narrow PHYSICS_START band + bearing 0, so a drop
+    # is attributable to that axis and not to start variance. The two reset_ball_*
+    # axes above already pin their swept coordinate.
+    for c in table:
+        c["reset_ball_random"] = True
+        if c["group"] not in ("baseline", "reset_ball_dist", "reset_ball_bearing"):
+            c["reset_ball_dist"] = list(PHYSICS_START)
+            c["reset_ball_bearing"] = 0.0
     return table
 
 
