@@ -31,7 +31,7 @@ DEFAULT_ONNX = os.path.join(REPO_DIR, "checkpoints", "g1_dribble_s3_human_dr_ite
 DEFAULT_RESET = os.path.join(REPO_DIR, "config", "g1", "softtouch_mujoco_reset_standby.txt")
 
 ROUTE_CFG = dict(
-    routeLength=20.0, routeSegmentLength=0.25, routeLookahead=0.8, routePreviewArc=1.0,
+    routeLength=50.0, routeSegmentLength=0.25, routeLookahead=0.8, routePreviewArc=1.0,
     routeCurvatureMin=0.0, routeCurvatureMax=0.0, routeSFlipArc=2.5,
     routeHumanKappaCap=0.5, routeHumanPersist=0.6, routeHumanWeaveMin=0.4, routeHumanWeaveMax=1.0,
     routeHumanBigProbability=0.09, routeHumanBigAngleMinDeg=40.0, routeHumanBigAngleMaxDeg=180.0,
