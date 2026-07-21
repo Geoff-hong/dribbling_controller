@@ -98,6 +98,15 @@ REASON_ORDER = ["completed", "timeout", "ball_far", "off_route", "fell"]
 REASON_EXTRA_COLORS = ["var(--rz-x0)", "var(--rz-x1)", "var(--rz-x2)"]
 
 
+def _ball_lost_train(r):
+    """Sticky lost flag at the TRAINING-faithful 0.5 m threshold. New runs carry
+    it in `ball_lost_05`; on pre-multi-threshold runs `ball_lost` itself was the
+    0.5 m flag, so fall back to it. None (unknown) only on truly old runs with no
+    possession column at all."""
+    bl = r.get("ball_lost_05")
+    return bl if bl is not None else r.get("ball_lost")
+
+
 # Metrics the significance machinery compares. (key, label, row-extractor,
 # statistic, is_rate). "down" metrics are handled in the JS by flipping the
 # colour, not by negating the delta.
@@ -108,7 +117,7 @@ DIFF_METRICS = [
     # never-firing flag against a real one -- see condition_stats.
     ("train_survival", "training-faithful survival (%)",
      lambda r: None if r["foot_ball_dist"] is None
-     else (1.0 if (r["fell"] < 0.5 and r["ball_lost"] < 0.5) else 0.0),
+     else (1.0 if (r["fell"] < 0.5 and _ball_lost_train(r) < 0.5) else 0.0),
      stats.rate_stat, True, "up"),
     ("success", "success rate (%)", lambda r: r["success"], stats.rate_stat, True, "up"),
     ("cross_track", "cross-track (m)", lambda r: r["ct"] if r["fell"] < 0.5 else None,
@@ -261,6 +270,11 @@ def read_rows(path):
                 # same table -> stats.bootstrap_diff_ci can pair on it
                 rep=r.get("rep", ""), route_seed=r.get("route_seed", ""),
                 fell=fell, ball_lost=lost,
+                # `ball_lost` is the MAIN threshold (0.8 m, possession); the
+                # sticky flag at the training-faithful 0.5 m rides in ball_lost_05
+                # (absent on pre-multi-threshold runs, where `ball_lost` WAS 0.5)
+                ball_lost_05=_f(r.get("ball_lost_05")),
+                ball_lost_10=_f(r.get("ball_lost_10")),
                 success=_f(r.get("success")),
                 ach=_f(r.get("ach_speed_mps")), cmd=_f(r.get("cmd_speed_mps")),
                 ct=_f(r.get("cross_track_m")), r=_f(r.get("speed_corr_r")),
@@ -308,6 +322,8 @@ def condition_stats(rows, fail_fast=None):
     if fail_fast is None:
         fail_fast = any(r["success"] is not None for r in rows)
     surv_p = 1.0 - float(np.mean([r["fell"] for r in rows]))
+    # possession at the MAIN (eval) threshold; train_survival below uses the
+    # training-faithful 0.5 m flag instead (see _ball_lost_train)
     poss_p = 1.0 - float(np.mean([r["ball_lost"] for r in rows]))
     # TRAINING-faithful survival. Training terminates on fall OR ball_lost OR
     # time_out (env.yaml `terminations`); the benchmark deliberately keeps
@@ -321,7 +337,7 @@ def condition_stats(rows, fail_fast=None):
     # episode in 3500, so recombining it would just restate `survival` under a
     # name that promises training parity.
     train_surv_p = (None if all(r["foot_ball_dist"] is None for r in rows) else
-                    float(np.mean([1.0 if (r["fell"] < 0.5 and r["ball_lost"] < 0.5)
+                    float(np.mean([1.0 if (r["fell"] < 0.5 and _ball_lost_train(r) < 0.5)
                                    else 0.0 for r in rows])))
 
     def rate_se(p, m):
@@ -980,7 +996,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         <code>ball_lost</code> OR <code>time_out</code>), so the gap between the
         two rows is the episodes that stayed up while the ball rolled away. It
         reads &ndash; on runs recorded before the foot-to-ball lost criterion
-        existed.
+        existed. Note the two lost-ball thresholds: <b>training-faithful
+        survival</b> uses the strict 0.5&nbsp;m foot-surface distance training
+        terminates on, while the <b>possession</b> row uses a looser eval
+        threshold (0.8&nbsp;m) &mdash; a brief kick past the dribble pocket is
+        not yet "lost".
         See <a href="#sec-signif">Significance</a> for every condition.</div>
       <div id="summary-host" style="overflow-x:auto"></div></section>
 
