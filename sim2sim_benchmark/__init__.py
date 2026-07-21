@@ -13,13 +13,14 @@ Two separate tests, run from the repo root:
       --reset config/g1/softtouch_mujoco_reset_standby.txt \
       --robots 32 --out-dir eval_result/m80000
 
-  # comparison figures (one color per experiment)
-  python -m sim2sim_benchmark.plot --run-dirs eval_result/m80000 eval_result/m90000 \
-      --labels iter80000 iter90000 --out-dir eval_result
+  # interactive HTML report (DEFAULT — auto-discovers runs/, --serve for live)
+  python -m sim2sim_benchmark.html_report --run-dirs eval_result/m80000 eval_result/m90000 \
+      --labels iter80000 iter90000 --out eval_result/compare/report.html
 
 Modules: engine (Route / Robot / MuJoCo model composition — the pysim core),
 conditions (the tables), runner (queue execution on the engine), report (CSV +
-console summary), plot (comparison figures; engine-independent), pysim (the
+console summary), html_report (the default interactive report), plot (LEGACY
+static PNGs, superseded by html_report; kept for demo/ mock-ups), pysim (the
 interactive / legacy CLI: viewer, --record, --headless, --eval, --sweep).
 
 The runner drives the engine per-episode through Robot.reset(condition=...).
