@@ -149,6 +149,36 @@ def _find_action_delay(cfg):
     return None, None
 
 
+def _cmd_mode_uturn_shares(curriculum):
+    """(u_turn_share, human_uturn_share) the checkpoint's cmd-mode curriculum
+    reaches at ANY point of its schedule — the peak share of route modes 5/6.
+
+    Dispatched on the curriculum term's `func`, NOT its key: a resume run may
+    dump `hard_modes_piecewise` under the legacy key `human_dribble_ramp`
+    (observed in g1_dribble_s3_uturn_vfix_iter60000). We take the schedule
+    MAXIMUM rather than the value at the checkpoint's iteration on purpose:
+    `env.common_step_counter` resets to 0 on every fresh/resume process, so the
+    per-iteration value is not recoverable from the dump, but "did training ever
+    give u_turn any mass" is — and that is exactly the gate the benchmark needs
+    (u_turn/human_uturn modes only exist under the v2 route generator, and are
+    0 in the base cmd-mode mix). Interpolation between knots is a convex blend,
+    so the schedule max equals the max over the knot arrays.
+    """
+    for term in curriculum.values():
+        if not isinstance(term, dict):
+            continue
+        func = str(term.get("func", ""))
+        p = term.get("params") or {}
+        if func.endswith("hard_modes_piecewise"):
+            ut = max([float(v) for v in (p.get("knot_u_turn") or [0.0])])
+            hu = max([float(v) for v in (p.get("knot_human_uturn") or [0.0])])
+            return ut, hu
+        if func.endswith(("human_dribble_ramp", "human_dribble_piecewise")):
+            # modes 5/6 are fixed carve-outs here (default 0 when absent)
+            return float(p.get("u_turn_p") or 0.0), float(p.get("human_uturn_p") or 0.0)
+    return 0.0, 0.0
+
+
 def read_train_dr(path):
     """Parse the checkpoint's env.yaml into a normalized training-DR record.
     Returns None when no env.yaml exists next to `path`."""
@@ -205,6 +235,7 @@ def read_train_dr(path):
     delay_range = _pair((ball_obs.get("params") or {}).get("delay_steps_range"))
     obs_noise = ball_obs.get("noise") or {}
     action_delay_ms, action_delay_zero_prob = _find_action_delay(cfg)
+    _uturn_share, _human_uturn_share = _cmd_mode_uturn_shares(curriculum)
 
     return dict(
         source=env_yaml,
@@ -245,6 +276,10 @@ def read_train_dr(path):
         route_uturn_angle_deg=_pair(cfg.get("route_uturn_angle_deg")),
         route_uturn_cruise_m=_pair(cfg.get("route_uturn_cruise_m")),
         route_vmax=cfg.get("route_vmax"),
+        # cmd-mode curriculum: the peak schedule share of route modes 5/6, used
+        # to gate the u_turn capability group (0 in the base cmd-mode mix).
+        u_turn_share=_uturn_share, human_uturn_share=_human_uturn_share,
+        route_v2_geom=cfg.get("route_v2_geom"),
     )
 
 
@@ -283,4 +318,8 @@ def describe(train):
     lines.append(f"  action lag   {rng(train['action_delay_ms'], '{:.0f}')} ms"
                  + ("" if train["action_delay_zero_prob"] is None
                     else f", zero_prob {train['action_delay_zero_prob']:g}"))
+    ut, hu = train.get("u_turn_share") or 0.0, train.get("human_uturn_share") or 0.0
+    lines.append(f"  u_turn       " + ("not trained (share 0 in cmd-mode mix)"
+                 if max(ut, hu) <= 0.0 else
+                 f"trained (peak share u_turn {ut:g}, human_uturn {hu:g})"))
     return lines

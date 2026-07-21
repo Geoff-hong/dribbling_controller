@@ -279,9 +279,16 @@ def capability_conditions(train=None):
 
     cruise = resolved("route_cruise_range")
     cap = float(resolved("route_human_kappa_cap"))
-    ut_kappa = resolved("route_uturn_kappa")
-    ut_angle = [float(a) for a in resolved("route_uturn_angle_deg")]
-    ut_lead = [float(m) for m in resolved("route_uturn_cruise_m")]
+
+    # u_turn is a v2-route-generator mode with 0 share in the base cmd-mode mix,
+    # so it is only a fair capability probe for a checkpoint whose curriculum
+    # actually gave modes 5/6 mass (see train_dr._cmd_mode_uturn_shares). Gate
+    # the whole group on that, matching how physics axes skip channels the
+    # checkpoint never randomized -- otherwise every human-only policy is scored
+    # on a drill it never trained.
+    u_turn_share = max(train.get("u_turn_share") or 0.0,
+                       train.get("human_uturn_share") or 0.0)
+    u_turn_enabled = u_turn_share > 0.0 and train.get("route_v2_geom") is not False
 
     def grid(start, stop, step):
         return tuple(round(v, 3) for v in np.arange(start, stop + 1e-9, step))
@@ -297,12 +304,22 @@ def capability_conditions(train=None):
     straight_v = grid(round(0.5 * cruise[1] * 4) / 4, max(3.5, 1.75 * cruise[1]), 0.25)
     corner_k = grid(0.4 * cap, 2.0 * cap, 0.2 * cap)
     human_caps = grid(0.2 * cap, 2.2 * cap, 0.2 * cap)
-    uturn_k = tuple(sorted(set(grid(0.5 * ut_kappa[0], min(ut_kappa[0] + 0.5, ut_kappa[1]), 0.25))
-                           | set(grid(ut_kappa[0] + 1.0, ut_kappa[1], 0.5))))
     print(f"[conditions] straight_speed: {straight_v} m/s (trained cruise {cruise})")
     print(f"[conditions] corner_turn: |kappa| {corner_k} (trained cap {cap:g})")
     print(f"[conditions] human_dribble: cap {human_caps} (trained cap {cap:g})")
-    print(f"[conditions] u_turn: |kappa| {uturn_k} (trained {ut_kappa})")
+    if u_turn_enabled:
+        # resolve the u_turn geometry ONLY when the group is built, so a
+        # human-only checkpoint does not print misleading fallback notes for a
+        # drill it will never be scored on
+        ut_kappa = resolved("route_uturn_kappa")
+        ut_angle = [float(a) for a in resolved("route_uturn_angle_deg")]
+        ut_lead = [float(m) for m in resolved("route_uturn_cruise_m")]
+        uturn_k = tuple(sorted(set(grid(0.5 * ut_kappa[0], min(ut_kappa[0] + 0.5, ut_kappa[1]), 0.25))
+                               | set(grid(ut_kappa[0] + 1.0, ut_kappa[1], 0.5))))
+        print(f"[conditions] u_turn: |kappa| {uturn_k} (trained {ut_kappa}, "
+              f"peak share {u_turn_share:g})")
+    else:
+        print(f"[conditions] u_turn: not trained (mode 5/6 share 0) — skipped")
 
     BUDGET_S = 10.0
     FAIL_FAST = dict(offroute_fail_m=0.8, ball_far_fail_m=1.2, episode_s=BUDGET_S,
@@ -327,16 +344,17 @@ def capability_conditions(train=None):
                                    route_mode="human", human_kappa_cap=kappa_cap,
                                    route_len_m=50.0,
                                    **{**FAIL_FAST, "episode_s": 20.0}))
-    for kappa in uturn_k:
-        route_len = 4.0 + np.deg2rad(ut_angle[1]) / kappa + 3.0   # max run-in + turn + exit
-        for sign, tag in ((1.0, "L"), (-1.0, "R")):
-            table.append(condition_row(f"uturn_{tag}_{kappa:g}", "u_turn",
-                                       sign * kappa, route_mode="arc",
-                                       arc_kappa=sign * kappa, lead_in_m=ut_lead,
-                                       arc_angle_deg=ut_angle,
-                                       route_len_m=route_len,
-                                       **{**FAIL_FAST,
-                                          "episode_s": turn_budget(kappa, ut_angle[1], BUDGET_S)}))
+    if u_turn_enabled:
+        for kappa in uturn_k:
+            route_len = 4.0 + np.deg2rad(ut_angle[1]) / kappa + 3.0   # max run-in + turn + exit
+            for sign, tag in ((1.0, "L"), (-1.0, "R")):
+                table.append(condition_row(f"uturn_{tag}_{kappa:g}", "u_turn",
+                                           sign * kappa, route_mode="arc",
+                                           arc_kappa=sign * kappa, lead_in_m=ut_lead,
+                                           arc_angle_deg=ut_angle,
+                                           route_len_m=route_len,
+                                           **{**FAIL_FAST,
+                                              "episode_s": turn_budget(kappa, ut_angle[1], BUDGET_S)}))
     table.append(condition_row("tracking", "speed_tracking",
                                round(0.5 * (cruise[0] + cruise[1]), 2),
                                route_mode="human", route_vmax=list(cruise),
