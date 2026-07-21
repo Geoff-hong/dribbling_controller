@@ -7,6 +7,7 @@ resumes: episodes already in the CSV are skipped (--fresh starts over). Render
 the comparison figures afterwards with `python -m sim2sim_benchmark.plot`.
 """
 import argparse
+import csv
 import os
 import sys
 
@@ -18,7 +19,8 @@ if "--videos" in sys.argv:
 from . import engine
 from .conditions import robustness_conditions, capability_conditions, load_conditions_json
 from .runner import run_condition_table, record_condition_videos
-from .report import EpisodeStream, report_csv
+from .report import EpisodeStream, drop_conditions, report_csv
+from . import topup
 from .train_dr import read_train_dr, describe
 
 
@@ -61,6 +63,12 @@ def main():
                          "condition index, so the union of shards is bit-identical to an "
                          "unsharded run; each shard writes <test>.shardI.csv (merge: keep "
                          "one header, concatenate rows into <test>.csv)")
+    ap.add_argument("--apply-topup", action="store_true",
+                    help="the table changed: DROP the recorded episodes of every "
+                         "condition whose semantics changed, then continue. Run this "
+                         "ONCE without --shard before launching the shards; the shards "
+                         "then simply resume and fill the gaps. Conditions whose "
+                         "fingerprint is unchanged keep their episodes")
     ap.add_argument("--fresh", action="store_true",
                     help="ignore existing CSVs in --out-dir and start over (default: "
                          "resume — episodes already recorded are skipped)")
@@ -98,60 +106,95 @@ def main():
     import hashlib
     import json
 
-    def table_fingerprint(table):
-        # semantic identity of a run's conditions: the FULL table plus the engine
-        # DR state its dr_scale/latency sampling depends on
-        payload = json.dumps({"table": table, "dr": engine.DR,
-                              "ball_delay": engine.BALL_DELAY_RANGE,
-                              "act_delay": engine.ACT_DELAY_SUBSTEPS,
-                              "act_zero": engine.ACT_DELAY_ZERO_PROB},
-                             sort_keys=True, default=list)
-        return hashlib.sha1(payload.encode()).hexdigest()
-
     os.makedirs(args.out_dir, exist_ok=True)
-    # resume guard BEFORE anything is written: episodes are resumed by condition
-    # name alone, so resuming onto a table with different semantics (other
-    # --dr-from/--onnx DR, changed axis derivation) would silently mix data
-    def read_fingerprint(fp_path):
-        # parallel shard launches race reader vs writer; the write below is atomic
-        # (os.replace), so a decode error can only be a half-written file from an
-        # OLD code version — retry briefly, then fail rather than guess
-        import time
-        for _ in range(10):
-            try:
-                return json.load(open(fp_path))["fingerprint"]
-            except (json.JSONDecodeError, KeyError):
-                time.sleep(0.2)
-        ap.error(f"{fp_path}: unreadable/corrupt — delete it (or use --fresh) and rerun")
+    engine_state = {"dr": engine.DR, "ball_delay": engine.BALL_DELAY_RANGE,
+                    "act_delay": engine.ACT_DELAY_SUBSTEPS,
+                    "act_zero": engine.ACT_DELAY_ZERO_PROB}
+    # NOT including reps: extra reps are extra episodes of the SAME condition, so
+    # raising it is itself a free top-up that plain resume already handles.
+    run_params = {"seed": args.seed, "route_bank": args.route_bank,
+                  "episode_s": args.episode_s, "standby_hold_s": args.standby_hold_s,
+                  "onnx": os.path.basename(args.onnx), "reset": os.path.basename(args.reset)}
+    manifest_path = os.path.join(args.out_dir, "conditions.manifest.json")
+    new_manifest = topup.build_manifest(tables, engine_state, run_params)
+    old_manifest = None if args.fresh else topup.load_manifest(manifest_path)
 
+    # Per-condition resume guard, BEFORE anything is written. Episodes resume by
+    # condition name, so a name whose semantics changed must have its old rows
+    # dropped or the two protocols get averaged together.
+    plan = {}
     for title, table in tables:
-        fp = table_fingerprint(table)
-        fp_path = os.path.join(args.out_dir, f"{title}.fingerprint.json")
-        has_csv = bool(globmod.glob(os.path.join(args.out_dir, f"{title}*.csv")))
-        if not args.fresh and os.path.exists(fp_path):
-            if read_fingerprint(fp_path) != fp:
-                ap.error(f"{fp_path}: the existing {title} CSVs were recorded with a "
-                         "DIFFERENT condition table (other --dr-from/--onnx DR or "
-                         "changed axes) — resuming would silently mix incompatible "
-                         "episodes. Use --fresh or a new --out-dir.")
-        elif not args.fresh and has_csv:
-            ap.error(f"{args.out_dir}: {title} CSVs exist but carry no table "
-                     "fingerprint (recorded before DR-anchored tables) — resuming "
-                     "would silently mix incompatible episodes. Use --fresh or a "
-                     "new --out-dir.")
-        tmp_path = f"{fp_path}.tmp.{os.getpid()}"
-        with open(tmp_path, "w") as f:
-            json.dump({"fingerprint": fp, "conditions": [
-                dict(name=c["name"], group=c["group"], axis=c["axis"]) for c in table]},
-                f, indent=2)
-        os.replace(tmp_path, fp_path)   # atomic: concurrent shards never see a partial file
+        plan[title] = topup.classify(new_manifest, old_manifest, title)
+    # episodes actually on disk, per condition — "reusable" is a statement about
+    # the FINGERPRINT, not about coverage, and conflating the two would read as
+    # "already measured" for a condition that was never run
+    def recorded_counts(title):
+        counts = {}
+        for path in (globmod.glob(os.path.join(args.out_dir, f"{title}.csv"))
+                     + globmod.glob(os.path.join(args.out_dir, f"{title}.shard*.csv"))):
+            if "_speed_" in os.path.basename(path):
+                continue
+            try:
+                with open(path, newline="") as f:
+                    for row in list(csv.reader(f))[1:]:
+                        if row:
+                            counts[row[0]] = counts.get(row[0], 0) + 1
+            except OSError:
+                pass
+        return counts
+
+    has_rows = any(recorded_counts(title) for title, _ in tables)
+    for line in topup.describe_drift(old_manifest, new_manifest):
+        print(f"[topup] WARNING: {line}")
+    if old_manifest and topup.describe_drift(old_manifest, new_manifest):
+        print("[topup] WARNING: reused episodes came from that other build — only "
+              "you can judge whether the change was physics-neutral (stripping "
+              "render-only meshes was; moving the obs anchor was not).")
+    if topup.legacy_seeding(old_manifest, has_rows):
+        print("[topup] NOTE: episodes on disk predate name-hash seeding. They are "
+              "kept per condition (never mixed within one), but this dir is no "
+              "longer reproducible from the table alone.")
+    for title, (reusable, changed, fresh, stale) in plan.items():
+        counts = recorded_counts(title)
+        covered = sum(1 for n in reusable if counts.get(n))
+        print(f"[topup] {title}: {len(reusable)} reusable "
+              f"({covered} with episodes on disk, {len(reusable) - covered} not yet run), "
+              f"{len(changed)} changed, {len(fresh)} new, {len(stale)} stale")
+        for label, names in (("changed", changed), ("new", fresh), ("stale", stale)):
+            if names:
+                print(f"[topup]   {label}: {', '.join(names[:8])}"
+                      f"{f' (+{len(names) - 8} more)' if len(names) > 8 else ''}")
+
+    needs_drop = {t: c for t, (_, c, _, _) in plan.items() if c}
+    if needs_drop and not args.apply_topup:
+        ap.error("condition semantics changed for: "
+                 + "; ".join(f"{t}: {', '.join(n)}" for t, n in needs_drop.items())
+                 + ". Their recorded episodes describe a different experiment. Re-run "
+                   "ONCE with --apply-topup (single process, before launching shards) "
+                   "to drop those rows, or use --fresh / a new --out-dir.")
+    if args.apply_topup:
+        if args.shard:
+            ap.error("--apply-topup rewrites the shard CSVs; run it once WITHOUT "
+                     "--shard before launching the shards")
+        for title, names in needs_drop.items():
+            for path in sorted(globmod.glob(os.path.join(args.out_dir, f"{title}.csv"))
+                               + globmod.glob(os.path.join(args.out_dir, f"{title}.shard*.csv"))):
+                if "_speed_" in os.path.basename(path):
+                    continue          # sidecars are handled by drop_conditions itself
+                n = drop_conditions(path, names)
+                if n:
+                    print(f"[topup] dropped {n} episodes from {os.path.basename(path)}")
+    topup.save_manifest(manifest_path, new_manifest)
     # provenance: the parsed training DR + the derived ranges this run tested with
     with open(os.path.join(args.out_dir, "train_dr.json"), "w") as f:
         json.dump({"train": train, "derived_dr": engine.DR,
                    "derived_sweep_ranges": engine.SWEEP_RANGES,
                    "onnx": args.onnx}, f, indent=2, default=list)
     for title, table in tables:
-        table = [{**c, "_seed_index": j} for j, c in enumerate(table)][shard_i::shard_n]
+        # seed index from the condition NAME, not its position: inserting or
+        # reordering an axis must not perturb any other condition's draws
+        table = [{**c, "_seed_index": topup.seed_index(c["name"])}
+                 for c in table][shard_i::shard_n]
         suffix = f".shard{shard_i}" if args.shard else ""
         csv_path = os.path.join(args.out_dir, f"{title}{suffix}.csv")
         stream = EpisodeStream(csv_path, fresh=args.fresh)

@@ -22,6 +22,8 @@ import sys
 import numpy as np
 import matplotlib
 
+from .real_world import real_marker
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -91,12 +93,13 @@ def _draw_route_examples(panel, routes, title):
 SCHEMATIC_COLORS = ["#9dc3e6", "#4f81bd", "#1f3864"]
 
 ROBUSTNESS_GROUPS = ["ball_mass", "ball_radius", "foot_friction", "ball_friction",
-                     "base_push", "ball_push", "obs_latency", "act_latency"]
+                     "ball_damping", "base_push", "ball_push", "obs_latency", "act_latency"]
 GROUP_LABEL = {
     "ball_mass": "ball mass (kg)",
     "ball_radius": "ball radius (m)",
     "foot_friction": "foot friction",
     "ball_friction": "ball friction",
+    "ball_damping": "ball roll brake c (1 m/s rolls 3.5/c m)",
     "dr_scale": "DR scale alpha",   # legacy CSVs only
     "base_push": "base push dv (m/s)",
     "ball_push": "ball push dv (m/s)",
@@ -116,10 +119,15 @@ def load_rows(csv_path):
                 value = record.get(key)
                 return float(value) if value not in (None, "") else float("nan")
             rows.append(dict(group=record["group"], axis=float(record["axis_value"]),
+                             condition=record.get("condition", ""),
+                             rep=record.get("rep", ""),
                              fell=float(record["fell"]), lost=float(record["ball_lost"]),
                              cross_track=num("cross_track_m"), ach_speed=num("ach_speed_mps"),
                              cmd_speed=num("cmd_speed_mps"), success=num("success"),
-                             speed_corr_r=num("speed_corr_r")))
+                             speed_corr_r=num("speed_corr_r"),
+                             progress=num("progress_m"), duration=num("duration_s"),
+                             ball_dist=num("ball_dist_m"),
+                             reason=(record.get("fail_reason") or "").strip()))
     return rows
 
 
@@ -160,13 +168,26 @@ def smooth(values, window=25):
 
 def level_stats(rows):
     """axis value -> survival/possession/success rates (+binomial SE), speed ratio,
-    survivor cross-track."""
+    survivor cross-track, ball-distance percentiles, progress.
+
+    EVERY continuous metric here is SURVIVORS-ONLY. An episode truncated by a
+    fall covers its route distance in less wall time, so an unfiltered
+    ach_speed / speed_ratio mean RISES as the condition gets harder — the metric
+    would move opposite to the thing it is supposed to measure. Filtering also
+    matches cross-track, which was already survivors-only.
+
+    ball_dist_p50/p90 are the continuous form of possession: the binary
+    `ball_lost` flag is near-degenerate in practice (1 of 3504 episodes on the
+    2026-07-20 runs), so the rate panel is a flat 100% line while the underlying
+    distance carries a clean monotone signal.
+    """
     by_axis = {}
     for row in rows:
         by_axis.setdefault(row["axis"], []).append(row)
     stats = {}
     for axis_value, level_rows in sorted(by_axis.items()):
         n = len(level_rows)
+        alive = [r for r in level_rows if r["fell"] < 0.5]
 
         def rate(values):
             values = [v for v in values if np.isfinite(v)]
@@ -175,23 +196,34 @@ def level_stats(rows):
             p = 1.0 - float(np.mean(values))
             return p, np.sqrt(max(p * (1 - p), 1e-4 / len(values)) / len(values))
 
+        def mean_of(key, source):
+            values = [r[key] for r in source if np.isfinite(r.get(key, float("nan")))]
+            return float(np.mean(values)) if values else float("nan")
+
+        def pct_of(key, q, source):
+            values = [r[key] for r in source if np.isfinite(r.get(key, float("nan")))]
+            return float(np.percentile(values, q)) if values else float("nan")
+
         survival, survival_se = rate([r["fell"] for r in level_rows])
         possession, possession_se = rate([r["lost"] for r in level_rows])
         success, success_se = rate([1.0 - r["success"] for r in level_rows
                                     if np.isfinite(r["success"])] or [float("nan")])
-        speed_ratios = [r["ach_speed"] / r["cmd_speed"] for r in level_rows
+        speed_ratios = [r["ach_speed"] / r["cmd_speed"] for r in alive
                         if np.isfinite(r["ach_speed"]) and np.isfinite(r["cmd_speed"])
                         and r["cmd_speed"] > 0.05]
-        ach_speeds = [r["ach_speed"] for r in level_rows if np.isfinite(r["ach_speed"])]
-        survivor_ct = [r["cross_track"] for r in level_rows
-                       if r["fell"] < 0.5 and np.isfinite(r["cross_track"])]
+        survivor_ct = [r["cross_track"] for r in alive if np.isfinite(r["cross_track"])]
         stats[axis_value] = dict(
-            n=n, survival=survival, survival_se=survival_se,
+            n=n, n_alive=len(alive),
+            survival=survival, survival_se=survival_se,
             possession=possession, possession_se=possession_se,
             success=success, success_se=success_se,
             speed_ratio=float(np.mean(speed_ratios)) if speed_ratios else float("nan"),
-            ach_speed=float(np.mean(ach_speeds)) if ach_speeds else float("nan"),
-            cross_track=float(np.mean(survivor_ct)) if survivor_ct else float("nan"))
+            ach_speed=mean_of("ach_speed", alive),
+            cross_track=float(np.mean(survivor_ct)) if survivor_ct else float("nan"),
+            ball_dist_p50=pct_of("ball_dist", 50, level_rows),
+            ball_dist_p90=pct_of("ball_dist", 90, level_rows),
+            progress=mean_of("progress", level_rows),
+            duration=mean_of("duration", level_rows))
     return stats
 
 
@@ -208,12 +240,41 @@ def draw_series(panel, stats, x_values, metric, color, linestyle, label=None, us
                    color=color, ls=linestyle, label=label)
 
 
+REAL_COLOR = "#111111"
+
+
+def _draw_real_marker(panel, group, annotate):
+    """Overlay where the DEPLOYMENT HARDWARE sits on this axis (real_world table):
+    shaded span = measurement spread, dashed line = the measured nominal. Channels
+    that have not been measured get nothing — see the real_world docstring on why
+    an unmarked panel is preferable to a guessed one. Returns True if drawn."""
+    marker = real_marker(group)
+    if marker is None:
+        return False
+    nominal, band, _ = marker
+    if band is not None:
+        panel.axvspan(band[0], band[1], color=REAL_COLOR, alpha=0.07, lw=0, zorder=0)
+    if nominal is not None:
+        panel.axvline(nominal, color=REAL_COLOR, ls="--", lw=1.3, alpha=0.7,
+                      zorder=1, label="real (hardware)" if annotate else None)
+    if annotate:
+        x = nominal if nominal is not None else 0.5 * (band[0] + band[1])
+        panel.annotate("real", xy=(x, 1.0), xycoords=("data", "axes fraction"),
+                       xytext=(3, -10), textcoords="offset points",
+                       fontsize=8, color=REAL_COLOR, alpha=0.8)
+    return True
+
+
 def _style_panel(panel, row_metric, group, is_top, is_bottom, is_left, row_label):
     panel.grid(alpha=0.3)
     if row_metric in ("survival", "possession", "success"):
         panel.set_ylim(-5, 105)
     elif row_metric == "speed_ratio":
-        panel.set_ylim(0, 1.15)
+        # floor at 0 and reserve room up to 1.15, but let the axis GROW past it:
+        # a hard set_ylim(0, 1.15) silently clipped any run that overshoots the
+        # commanded speed, which reads as "no data up there" rather than ">1"
+        low, high = panel.get_ylim()
+        panel.set_ylim(0, max(1.15, high))
     if is_top:
         panel.set_title(GROUP_LABEL.get(group, group), fontsize=10.5)
     if is_bottom:
@@ -232,10 +293,15 @@ def _collect_legend(fig, top_row_panels, n_labels):
 
 
 def robustness_figure(experiments, labels, out_path):
-    """Rows: survival / possession / speed ratio / cross-track. Dotted horizontal
-    lines = each experiment's nominal baseline."""
-    metrics = [("survival", "survival rate (%)"), ("possession", "ball possession (%)"),
-               ("speed_ratio", "speed ratio (achieved/cmd)"),
+    """Rows: survival / ball distance p90 / speed ratio / cross-track. Dotted
+    horizontal lines = each experiment's nominal baseline.
+
+    The p90 ball-distance row replaced the old binary "ball possession" row: the
+    `ball_lost` flag fires on ~1 episode in 3500, so that panel was a flat 100%
+    line in every group while the distance it thresholds degrades cleanly."""
+    metrics = [("survival", "survival rate (%)"),
+               ("ball_dist_p90", "robot-ball distance (m, p90)"),
+               ("speed_ratio", "speed ratio (achieved/cmd, survivors)"),
                ("cross_track", "cross-track (m, survivors)")]
     groups = [g for g in ROBUSTNESS_GROUPS if any(r["group"] == g for e in experiments for r in e)]
     groups += sorted({r["group"] for e in experiments for r in e} - set(groups)
@@ -280,11 +346,15 @@ def robustness_figure(experiments, labels, out_path):
                         panels[row, col].axhline(scale * value, color=color, ls=":",
                                                  lw=0.9, alpha=0.55)
         for row, (metric, row_label) in enumerate(metrics):
+            # marker AFTER the series so the axis limits are already settled;
+            # only the top panel contributes the legend entry / "real" text
+            _draw_real_marker(panels[row, col], group, annotate=(row == 0))
             _style_panel(panels[row, col], metric, group, row == 0,
                          row == len(metrics) - 1, col == 0, row_label)
     _collect_legend(fig, [panels[0, c] for c in range(len(groups))], len(labels))
     fig.suptitle("Sim2sim benchmark — ROBUSTNESS: perturbation axes on nominal routes; "
-                 "one color per experiment, dotted = its nominal baseline", fontsize=12.5)
+                 "one color per experiment, dotted = its nominal baseline, "
+                 "dashed black + shading = the measured REAL hardware value", fontsize=12.5)
     fig.tight_layout(rect=(0, 0.05, 1, 0.95))
     fig.savefig(out_path, dpi=115)
     print(f"saved {out_path}")
