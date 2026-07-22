@@ -289,6 +289,14 @@ def read_train_dr(path):
         # the policy took over on step 0 (all current checkpoints). Drives the
         # whole-run --settle-s default so the benchmark start matches training.
         settle_time_range_s=_pair(cfg.get("settle_time_range_s")),
+        # leg+waist joint friction: the (lo,hi) of the joint_friction startup
+        # event if ACTIVE, else None = the event was removed (--no_joint_friction)
+        # or predates this checkpoint => trained FRICTIONLESS. configure_train_dr
+        # maps None to a nominal 0 (overriding the compiled MJCF 0.1).
+        joint_friction_range=(
+            _pair((events.get("joint_friction") or {}).get("params", {})
+                  .get("friction_distribution_params"))
+            if isinstance(events.get("joint_friction"), dict) else None),
     )
 
 
@@ -341,4 +349,8 @@ def describe(train):
     lines.append("  settle       " + (
         "none (policy took over on step 0)" if st is None or st[1] <= 0
         else f"{rng(st, '{:.2f}')} s standby-PD takeover window"))
+    jf = train.get("joint_friction_range")
+    lines.append("  joint fric   " + (
+        "frictionless (event removed / absent — nominal 0, MJCF 0.1 overridden)"
+        if jf is None else f"trained range {rng(jf, '{:.2f}')} N*m"))
     return lines

@@ -215,6 +215,19 @@ def robustness_conditions(train=None):
             table.append(condition_row(f"{group}_{v:g}", group, v,
                                        dr=NOMINAL_DR, **{key: v}))
 
+    # joint friction (leg+waist dof_frictionloss). The iter-80000 lineage trained
+    # FRICTIONLESS, so nominal is 0 (set by configure_train_dr) -- but the real
+    # robot has 1-10 N*m of it (the training joint_friction event's sim2real DR
+    # estimate is U(0, 1.5) abs), and the benchmark's MJCF silently compiled 0.1.
+    # So this axis is a pure sim2real probe: how much joint friction the policy
+    # tolerates, anchored on that estimate and swept past it. Always built (real
+    # hardware has friction regardless of what training used), like ball_damping.
+    for jf in (0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0):
+        table.append(condition_row(f"jointfric_{jf:g}", "joint_friction", jf,
+                                   dr=NOMINAL_DR, joint_friction=jf))
+    print(f"[conditions] joint_friction: axis {(0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0)} "
+          f"N*m (sim2real probe; trained frictionless, real ~1-10)")
+
     # believed-vs-true ball radius. Training feeds the policy the TRUE radius;
     # the deployment C++ feeds a configured constant, so the real failure mode is
     # the configured value disagreeing with the ball on the floor. Nothing in
