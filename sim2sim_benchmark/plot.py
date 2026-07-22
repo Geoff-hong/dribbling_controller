@@ -216,7 +216,9 @@ def level_stats(rows):
             return float(np.percentile(values, q)) if values else float("nan")
 
         survival, survival_se = rate([r["fell"] for r in level_rows])
-        possession, possession_se = rate([r["lost"] for r in level_rows])
+        # survivors-only: a fall that stops the ball near the feet would else
+        # count as "kept" and push possession above survival
+        possession, possession_se = rate([r["lost"] for r in alive])
         success, success_se = rate([1.0 - r["success"] for r in level_rows
                                     if np.isfinite(r["success"])] or [float("nan")])
         speed_ratios = [r["ach_speed"] / r["cmd_speed"] for r in alive
