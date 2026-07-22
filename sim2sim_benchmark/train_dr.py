@@ -260,6 +260,8 @@ def read_train_dr(path):
                 (cfg.get("observations") or {}).get("policy"), dict) else None,
         actuator_gain_range=_pair(
             event_params("actuator_gains").get("stiffness_distribution_params")),
+        actuator_damping_range=_pair(
+            event_params("actuator_gains").get("damping_distribution_params")),
         payload_kg_range=_pair(
             event_params("add_torso_payload").get("mass_distribution_params")),
         joint_offset_range=_pair(
@@ -280,11 +282,21 @@ def read_train_dr(path):
         # to gate the u_turn capability group (0 in the base cmd-mode mix).
         u_turn_share=_uturn_share, human_uturn_share=_human_uturn_share,
         route_v2_geom=cfg.get("route_v2_geom"),
-        # task-start ball placement: only present when the run OVERRODE the class
-        # default (RESET_BALL_FORWARD_RANGE / RESET_BALL_BEARING_DEG); a null here
-        # means the always-active class default applies (engine keeps its own).
+        # Task-start ball placement. THREE cases, and conflating the last two is
+        # how an old checkpoint silently inherits a DR that did not exist when it
+        # trained:
+        #   value present -> the run overrode the class default; use it
+        #   explicit null -> the key EXISTS in the dump, so the field existed in
+        #                    the training code: the class default was live
+        #   key absent    -> the field did not exist at all in that era, so the
+        #                    ball start was NOT randomized (fixed straight ahead)
+        # g1_dribble_s3_human_dr_iter80000 is the third case: its env.yaml carries
+        # `reset_ball_forward_m: null` and no *_range keys at all, yet the
+        # benchmark was applying today's U(0.5, 0.85) m x +/-20 deg start to it.
         reset_ball_forward_range=_pair(cfg.get("reset_ball_forward_range")),
         reset_ball_bearing_deg=_pair(cfg.get("reset_ball_bearing_deg")),
+        reset_ball_dr_absent=("reset_ball_forward_range" not in cfg
+                              and "reset_ball_bearing_deg" not in cfg),
         # training standby-PD takeover window (settle_time_range_s); None/(0,0) =
         # the policy took over on step 0 (all current checkpoints). Drives the
         # whole-run --settle-s default so the benchmark start matches training.
@@ -342,6 +354,8 @@ def describe(train):
     fr = train.get("reset_ball_forward_range")
     br = train.get("reset_ball_bearing_deg")
     lines.append(f"  ball start   " + (
+        "NOT randomized — env.yaml predates task-start DR (fixed straight ahead)"
+        if train.get("reset_ball_dr_absent") else
         "class-default dist / bearing (env.yaml did not override)"
         if fr is None and br is None else
         f"dist {rng(fr)} m, bearing {rng(br, '{:.0f}')} deg (env.yaml override)"))

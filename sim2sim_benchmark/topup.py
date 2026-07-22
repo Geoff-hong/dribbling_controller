@@ -40,9 +40,38 @@ _COSMETIC = ("name", "group", "axis", "_seed_index")
 # Source files whose content can change simulated behaviour.
 _CODE_FILES = ("engine.py", "runner.py", "conditions.py")
 
+# Bumped whenever a change makes new episodes statistically incomparable to old
+# ones on the SAME condition name. Recorded per run and surfaced by the report,
+# because top-up reuse and cross-run comparison are both silently wrong across a
+# protocol change.
+#   1 -> pre-2026-07-22
+#   2 -> robot DR off at nominal (engine.TRAIN_DR), body-ground contact restored,
+#        mj_setConst after per-episode model edits, per-joint actuator gains,
+#        payload inertia recompute, U(0,dv) ball push, off-route dwell + gate
+PROTOCOL_VERSION = 2
+
 
 def _sha(obj):
     return hashlib.sha1(json.dumps(obj, sort_keys=True, default=list).encode()).hexdigest()
+
+
+def file_sha(path, blocks=()):
+    """Content hash of a file plus any sidecars, None when it does not exist.
+
+    Recording a BASENAME is not provenance: every checkpoint dir here ships its
+    policy as `softtouch_dribble_deploy.onnx`, so six different policies share
+    one name and a resume could not tell them apart. Weights also live in a
+    separate `.onnx.data` sidecar that the graph file's hash does not cover.
+    """
+    if not path or not os.path.exists(path):
+        return None
+    digest = hashlib.sha1()
+    for p in (path,) + tuple(blocks):
+        if os.path.exists(p):
+            with open(p, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    digest.update(chunk)
+    return digest.hexdigest()[:16]
 
 
 def seed_index(name):
@@ -92,6 +121,7 @@ def code_fingerprint(pkg_dir=None):
 def build_manifest(tables, engine_state, run_params):
     """{table title -> {condition name -> fingerprint}} plus provenance."""
     return {"seeding": "name_hash",
+            "protocol": PROTOCOL_VERSION,
             "code": code_fingerprint(),
             "run_params": run_params,
             "engine_state": engine_state,
@@ -156,4 +186,9 @@ def describe_drift(old_manifest, new_manifest):
     if old.get("git_dirty") or new.get("git_dirty"):
         lines.append("working tree was/is dirty — the source hash is the only "
                      "real identity here, the commit alone does not pin it")
+    old_proto = old_manifest.get("protocol", 1)
+    if old_proto != PROTOCOL_VERSION:
+        lines.append(f"PROTOCOL {old_proto} -> {PROTOCOL_VERSION}: the episodes on "
+                     f"disk measure a different experiment under the same condition "
+                     f"names. Re-run into a FRESH --out-dir; do not top up.")
     return lines

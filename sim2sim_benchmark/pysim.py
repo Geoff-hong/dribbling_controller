@@ -337,6 +337,7 @@ def main():
     mujoco.mj_resetData(model, data)
     for rb in robots:
         rb.reset(model, data, 0.0)
+    engine.refresh_model_constants(model, data)
     mujoco.mj_forward(model, data)
 
     period_dt = model.opt.timestep * engine.DECIMATION   # one control period (50 Hz)
@@ -355,6 +356,8 @@ def main():
                             m["cross_track"], m["fell"], m["duration"], m["progress"],
                             m["ach_speed"], m["cmd_speed"], m["ball_lost"], m["ball_dist"]))
             rb.reset(model, data, data.time); resets[j] += 1
+        if ended:
+            engine.refresh_model_constants(model, data)
 
     n_periods = int(args.seconds / period_dt)
     grid_cx = float(np.mean([rb.gx for rb in robots]))
@@ -404,6 +407,7 @@ def main():
                 rb.cond = (pi, lv); rb.reset(model, data, 0.0, dr=dr, route_seed=rseed)
             else:
                 rb.cond = None
+        engine.refresh_model_constants(model, data)
         mujoco.mj_forward(model, data)
         done = 0
         while done < total:
@@ -420,6 +424,8 @@ def main():
                     rb.cond = (pi, lv); rb.reset(model, data, data.time, dr=dr, route_seed=rseed)
                 else:
                     rb.cond = None; rb.reset(model, data, data.time)
+            if ended:
+                engine.refresh_model_constants(model, data)
             if not np.all(np.isfinite(data.qpos)):
                 print("[sweep] DIVERGED"); break
             print(f"\r[sweep] {done}/{total} episodes", end="", flush=True)

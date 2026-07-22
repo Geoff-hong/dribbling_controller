@@ -30,7 +30,23 @@ CSV_COLUMNS = ["condition", "group", "axis_value", "rep", "route_seed",
                # sticky lost-ball flag at the OTHER grid thresholds: 0.5 m =
                # training-faithful (feeds train_survival), 1.0 m = looser "really
                # gone" read. The MAIN threshold's flag is `ball_lost`.
-               "ball_lost_05", "ball_lost_10"]
+               "ball_lost_05", "ball_lost_10",
+               # the three nested success verdicts (engine.episode_metrics):
+               # possession >= route >= strict. `success` above IS the strict one
+               # and stays put so older readers keep working.
+               "success_possession", "success_route",
+               # raw failure-criterion quantities. The CSV used to carry only the
+               # episode MEAN cross-track, so no off-route threshold or dwell
+               # could be re-derived offline and every protocol tweak meant a
+               # multi-hour re-run.
+               "max_cross_track_m", "terminal_cross_track_m", "off_route_t_s",
+               "completed_t_s", "terminal_ball_dist_m", "terminal_foot_ball_dist_m",
+               # robot-side DR actually drawn this episode. Without these the
+               # gain/payload/CoM/encoder draws were invisible and could not be
+               # conditioned out afterwards -- see engine.TRAIN_DR.
+               "dr_gain_kp", "dr_gain_kd", "dr_payload_kg", "dr_com_dx", "dr_com_dy",
+               "dr_com_dz", "dr_joint_offset_rms", "dr_joint_friction_nm",
+               "dr_obs_noise_scale"]
 PAIRS_COLUMNS = ["axis_value", "rep", "cmd_speed_mps", "ball_speed_mps"]
 TRACES_COLUMNS = ["axis_value", "episode", "step", "cmd_speed_mps",
                   "ball_speed_along_cmd_mps", "ball_speed_abs_mps"]
@@ -61,7 +77,17 @@ def format_episode_row(row):
             _num(row["speed_resid"], "{:.4f}"),
             _num(row["min_pelvis_z"], "{:.4f}"), _num(row["max_tilt_gvec_z"], "{:.4f}"),
             # ball_lost_grid = [0.5, 0.8(main), 1.0]; the 0.8 is already `ball_lost`
-            int(row["ball_lost_grid"][0]), int(row["ball_lost_grid"][2])]
+            int(row["ball_lost_grid"][0]), int(row["ball_lost_grid"][2]),
+            _flag(row["success_possession"]), _flag(row["success_route"]),
+            _num(row["max_cross_track"], "{:.5f}"),
+            _num(row["terminal_cross_track"], "{:.5f}"),
+            _num(row["off_route_t"], "{:.3f}"), _num(row["completed_t"], "{:.3f}"),
+            _num(row["terminal_ball_dist"]), _num(row["terminal_foot_ball_dist"]),
+            _num(row["gain_kp"], "{:.5f}"), _num(row["gain_kd"], "{:.5f}"),
+            _num(row["payload"], "{:.5f}"),
+            _num(row["com_dx"], "{:.5f}"), _num(row["com_dy"], "{:.5f}"),
+            _num(row["com_dz"], "{:.5f}"), _num(row["joint_offset_rms"], "{:.5f}"),
+            _num(row["joint_friction"], "{:.4f}"), _num(row["obs_noise"], "{:.4f}")]
 
 
 def write_csv(episode_rows, csv_path):
@@ -75,7 +101,7 @@ def write_csv(episode_rows, csv_path):
 def _read_valid_rows(path, columns):
     """Data rows with exactly len(columns) fields from a possibly truncated CSV.
     Returns (rows, dirty); dirty = the file holds anything else (partial last
-    line from a hard kill, legacy header without the `rep` column) and must be
+    line from a hard kill, legacy header missing columns added since) and must be
     rewritten before appending."""
     if not os.path.exists(path) or os.path.getsize(path) == 0:
         return [], False
@@ -89,6 +115,16 @@ def _read_valid_rows(path, columns):
         if "rep" in columns and header == [c for c in columns if c != "rep"]:
             pad = columns.index("rep")                 # legacy pairs schema
             body = [r[:pad] + [""] + r[pad:] for r in body]
+            dirty = True
+        elif header == columns[:len(header)]:
+            # Columns are only ever APPENDED, so a header that is a prefix of the
+            # current schema is a valid older run: pad the missing tail with ""
+            # (which every reader already treats as "not recorded"). Without this
+            # branch the "unknown schema" fallback below returns no rows, and the
+            # caller's _rewrite() then truncates a finished multi-hour run to its
+            # header the first time anyone resumes or tops it up.
+            pad = [""] * (len(columns) - len(header))
+            body = [r + pad for r in body if len(r) == len(header)]
             dirty = True
         else:
             return [], True                            # unknown schema: start over
