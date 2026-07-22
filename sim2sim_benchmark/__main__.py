@@ -149,15 +149,40 @@ def main():
     import json
 
     os.makedirs(args.out_dir, exist_ok=True)
+    # Everything configure_train_dr() resolves from the checkpoint's env.yaml.
+    # The ball channels were covered; the ROBOT ones were not, so two runs of
+    # different checkpoints could share a fingerprint while sampling different
+    # gain / payload / CoM / encoder / joint-friction ranges. Route geometry and
+    # the MJCF are in for the same reason: neither is hashed by the source
+    # fingerprint, and both change what an episode is.
     engine_state = {"dr": engine.DR, "ball_delay": engine.BALL_DELAY_RANGE,
                     "act_delay": engine.ACT_DELAY_SUBSTEPS,
-                    "act_zero": engine.ACT_DELAY_ZERO_PROB}
+                    "act_zero": engine.ACT_DELAY_ZERO_PROB,
+                    "ball_damping": engine.BALL_DAMPING,
+                    "obs_noise": engine.OBS_NOISE,
+                    "actuator_gain": engine.ACTUATOR_GAIN_RANGE,
+                    "actuator_damping": engine.ACTUATOR_DAMPING_RANGE,
+                    "payload_kg": engine.PAYLOAD_KG_RANGE,
+                    "base_com": engine.BASE_COM_RANGE,
+                    "joint_offset": engine.JOINT_OFFSET_RANGE,
+                    "joint_friction": engine.JOINT_FRICTION_RANGE,
+                    "reset_ball_dist": engine.RESET_BALL_DIST_RANGE,
+                    "reset_ball_bearing": engine.RESET_BALL_BEARING_DEG,
+                    "route_cfg": engine.ROUTE_CFG,
+                    "mjcf": topup.file_sha(engine.SINGLE_MJCF)}
     # NOT including reps: extra reps are extra episodes of the SAME condition, so
     # raising it is itself a free top-up that plain resume already handles.
+    # onnx/reset are hashed by CONTENT: every checkpoint dir names its policy
+    # `softtouch_dribble_deploy.onnx`, so the basename identified six different
+    # policies as one. `robots` is in because slot count changes the numerical
+    # noise (see runner's 29/46/46 note), not the expectation.
     run_params = {"seed": args.seed, "route_bank": args.route_bank,
                   "episode_s": args.episode_s, "standby_hold_s": args.standby_hold_s,
                   "settle_range": list(settle_range) if settle_range else None,
-                  "onnx": os.path.basename(args.onnx), "reset": os.path.basename(args.reset)}
+                  "robots": args.robots,
+                  "onnx": os.path.basename(args.onnx), "reset": os.path.basename(args.reset),
+                  "onnx_sha": topup.file_sha(args.onnx, (args.onnx + ".data",)),
+                  "reset_sha": topup.file_sha(args.reset)}
     manifest_path = os.path.join(args.out_dir, "conditions.manifest.json")
     new_manifest = topup.build_manifest(tables, engine_state, run_params)
     old_manifest = None if args.fresh else topup.load_manifest(manifest_path)

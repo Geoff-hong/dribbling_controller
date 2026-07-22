@@ -86,6 +86,7 @@ def run_condition_table(table, title, stream, *, onnx, reset_file,
     needs_kinematics = any(rb.chest_body is not None for rb in robots)
     for rb in robots:
         assign_next_episode(rb, 0.0)
+    engine.refresh_model_constants(model, data)
     mujoco.mj_forward(model, data)
 
     done = 0
@@ -99,7 +100,7 @@ def run_condition_table(table, title, stream, *, onnx, reset_file,
                 row = dict(
                     condition=condition["name"], group=condition["group"],
                     axis_value=condition["axis"], rep=episode, route_seed=route_seed,
-                    **rb.dr, **rb.episode_metrics(data, data.time))
+                    **rb.dr, **rb.robot_dr, **rb.episode_metrics(data, data.time))
                 pair_rows = []
                 pair_arrays = rb.speed_pair_arrays()
                 if pair_arrays is not None:
@@ -117,6 +118,11 @@ def run_condition_table(table, title, stream, *, onnx, reset_file,
                 stream.write_episode(row, pair_rows, trace_rows)
                 done += 1
             assign_next_episode(rb, data.time)
+        if ended:
+            # every reset above hot-edited this robot's mass / inertia / geom
+            # size on the SHARED model, so the derived constants are stale until
+            # recomputed (once per batch, not per robot)
+            engine.refresh_model_constants(model, data)
         if ended and needs_kinematics:
             # chest-frame obs reads data.xpos/xquat, which a reset's qpos writes do
             # not refresh — the stale first frame would be tiled into every history
@@ -162,6 +168,7 @@ def record_condition_videos(table, title, video_dir, *, onnx, reset_file, seed=0
         rb.rng = np.random.Generator(np.random.PCG64(np.random.SeedSequence(
             (seed, condition.get("_seed_index", index), 0))))
         rb.reset(model, data, data.time, route_seed=0, condition=condition)
+        engine.refresh_model_constants(model, data)
         mujoco.mj_forward(model, data)
         video_path = os.path.join(video_dir, f"{condition['name']}.mp4")
         writer = imageio.get_writer(video_path, fps=effective_fps, codec="libx264",

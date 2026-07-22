@@ -119,7 +119,24 @@ def robustness_conditions(train=None):
     obslag_steps = latency_axis(train.get("ball_obs_delay_steps"), (0, 1, 2, 3, 5, 8))
     actlag_ms = latency_axis(train.get("action_delay_ms"), (0, 10, 20, 30, 40), unit=5)
 
-    table = [condition_row("nominal", "baseline", 0.0, dr=NOMINAL_DR)]
+    # Two baselines. `nominal` is the DEPLOY nominal robot: every robot-DR
+    # channel explicitly off, so it is the clean reference the physics axes are
+    # read against (it used to sample gain/payload/CoM/encoder silently, which
+    # made it neither clean nor reproducible -- see engine.TRAIN_DR).
+    # `train_dr` turns all four back on at the checkpoint's own trained ranges,
+    # so "how much of the gap is just training-level robot DR" stays measurable.
+    table = [condition_row("nominal", "baseline", 0.0, dr=NOMINAL_DR),
+             condition_row("train_dr", "baseline", 1.0, dr=NOMINAL_DR,
+                           actuator_gain_scale=engine.TRAIN_DR,
+                           payload_kg=engine.TRAIN_DR,
+                           base_com_scale=engine.TRAIN_DR,
+                           joint_offset_rad=engine.TRAIN_DR)]
+    if (engine.JOINT_FRICTION_RANGE is not None
+            and engine.JOINT_FRICTION_RANGE[1] > engine.JOINT_FRICTION_RANGE[0]):
+        print(f"[conditions] WARNING: this checkpoint trained joint friction over "
+              f"{engine.JOINT_FRICTION_RANGE} N*m, which every unpinned condition "
+              f"(including `nominal`) samples per episode — the baseline is NOT "
+              f"friction-clean. The joint_friction axis pins it.")
     # per-parameter physics sweeps — the field-standard one-factor-at-a-time
     # protocol (e.g. sim2sim stress tests sweeping friction / mass scale alone):
     # ONE parameter walks a dense grid over the checkpoint's sweep band (training
@@ -251,8 +268,11 @@ def robustness_conditions(train=None):
     # small start spread (enough to de-determinize survival), NOT the full trained
     # 0.5-0.85 m x +/-20 deg. The baseline alone samples the full trained start,
     # so the nominal number reflects the real task-start distribution.
-    PHYSICS_START = (0.6, 0.7)
+    # A checkpoint that predates task-start DR has a DEGENERATE trained range
+    # (engine pins it, see configure_train_dr); it must not be handed a band it
+    # never saw, so PHYSICS_START collapses onto its trained point.
     d_lo, d_hi = engine.RESET_BALL_DIST_RANGE
+    PHYSICS_START = (0.6, 0.7) if d_hi > d_lo else (d_lo, d_hi)
     dist_vals = sorted(set(round(float(v), 3) for v in np.linspace(0.5 * d_lo, 1.5 * d_hi, 9))
                        | {round(engine.RESET_BALL_DIST_DEFAULT, 3), round(d_lo, 3), round(d_hi, 3)})
     print(f"[conditions] reset_ball_dist: axis {tuple(dist_vals)} m "
@@ -261,11 +281,18 @@ def robustness_conditions(train=None):
         table.append(condition_row(f"resetdist_{v:g}", "reset_ball_dist", v,
                                    dr=NOMINAL_DR, reset_ball_dist=v, reset_ball_bearing=0.0))
     b_hi = max(abs(engine.RESET_BALL_BEARING_DEG[0]), abs(engine.RESET_BALL_BEARING_DEG[1]))
-    bearing_vals = sorted({round(float(v), 1) for v in
-                           (-3 * b_hi, -2 * b_hi, -b_hi, -0.5 * b_hi, 0.0,
-                            0.5 * b_hi, b_hi, 2 * b_hi, 3 * b_hi)})
-    print(f"[conditions] reset_ball_bearing: axis {tuple(bearing_vals)} deg "
-          f"(trained {engine.RESET_BALL_BEARING_DEG})")
+    if b_hi <= 0.0:
+        # trained dead-ahead: anchor the probe on the ball-radius scale instead of
+        # on a trained band, and say so rather than emitting nine copies of 0 deg
+        bearing_vals = (-20.0, -10.0, -5.0, 0.0, 5.0, 10.0, 20.0)
+        print(f"[conditions] reset_ball_bearing: axis {bearing_vals} deg "
+              f"(NOT trained — ball started dead ahead; pure sim2real probe)")
+    else:
+        bearing_vals = tuple(sorted({round(float(v), 1) for v in
+                                     (-3 * b_hi, -2 * b_hi, -b_hi, -0.5 * b_hi, 0.0,
+                                      0.5 * b_hi, b_hi, 2 * b_hi, 3 * b_hi)}))
+        print(f"[conditions] reset_ball_bearing: axis {bearing_vals} deg "
+              f"(trained {engine.RESET_BALL_BEARING_DEG})")
     for v in bearing_vals:
         table.append(condition_row(f"resetbearing_{v:g}", "reset_ball_bearing", v,
                                    dr=NOMINAL_DR, reset_ball_dist=list(PHYSICS_START),
@@ -308,10 +335,19 @@ TRAIN_CODE_DEFAULTS = dict(route_cruise_range=(1.1, 2.0), route_uturn_kappa=(2.0
 
 
 def capability_conditions(train=None):
-    """Capability (performance) test: clean nominal env + small reset jitter,
-    extreme commands, fail-fast control criteria (the episode FAILS the moment
-    the ball is >0.8 m off the route or >1.2 m from the robot).
-    Metric = SUCCESS RATE.
+    """Capability (performance) test: DEPLOY-nominal env + small reset jitter,
+    extreme commands, fail-fast control criteria (the episode fails once the ball
+    has been >0.8 m off the route for OFFROUTE_GRACE_S, or is >1.2 m from the
+    robot). Metric = SUCCESS RATE, reported at three nesting strictnesses
+    (possession / route-adherence / strict — see engine.episode_metrics).
+
+    "Deploy-nominal" is NOT "training-clean", and the difference is deliberate:
+    DEPLOY_LATENCY pins the deployment stack's 2-step ball-obs and 10 ms action
+    lag on every condition, and engine.py clips the policy target to 90% of the
+    joint soft limit. Both are properties of the robot this policy ships to,
+    not of the checkpoint. Neither latency has been MEASURED on hardware yet
+    (real_world.py), so this is a stated protocol choice, not a calibration --
+    do not report these numbers as a latency-free baseline.
 
     Axes are ANCHORED on the checkpoint's trained command distribution (env.yaml
     via train_dr; fields the dump lacks fall back to TRAIN_CODE_DEFAULTS with a

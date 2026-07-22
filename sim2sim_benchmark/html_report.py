@@ -90,16 +90,19 @@ CAP_METRICS = [("success", "success rate (%)", "up"),
                ("cross_track", "cross-track (m, survivors)", "down")]
 
 
-# fail_reason -> (legend label, CSS colour var). "timeout"/"completed" are the
-# two readings of an empty fail_reason (see condition_stats).
+# fail_reason -> (legend label, CSS colour var). "timeout"/"completed"/
+# "incomplete" are the three readings of an empty fail_reason (see
+# condition_stats): ran the clock out with no fail-fast, finished cleanly, or
+# never finished the route geometry (scored success=0, so NOT a success colour).
 REASON_STYLE = {
     "completed": ("completed", "var(--rz-done)"),
     "timeout": ("ran full clock", "var(--rz-done)"),
+    "incomplete": ("route unfinished", "var(--rz-x0)"),
     "ball_far": ("ball lost", "var(--rz-far)"),
     "off_route": ("off route", "var(--rz-off)"),
     "fell": ("fell", "var(--rz-fell)"),
 }
-REASON_ORDER = ["completed", "timeout", "ball_far", "off_route", "fell"]
+REASON_ORDER = ["completed", "timeout", "incomplete", "ball_far", "off_route", "fell"]
 # extra slots for reason strings this file has never seen; cycles if exhausted
 REASON_EXTRA_COLORS = ["var(--rz-x0)", "var(--rz-x1)", "var(--rz-x2)"]
 
@@ -126,6 +129,13 @@ DIFF_METRICS = [
      else (1.0 if (r["fell"] < 0.5 and _ball_lost_train(r) < 0.5) else 0.0),
      stats.rate_stat, True, "up"),
     ("success", "success rate (%)", lambda r: r["success"], stats.rate_stat, True, "up"),
+    # the two looser readings of the same episode (engine.episode_metrics):
+    # possession >= route >= strict `success`. None on pre-2026-07-22 runs, which
+    # drops them from the pair rather than comparing against a missing column.
+    ("success_possession", "possession success (%)", lambda r: r["success_possession"],
+     stats.rate_stat, True, "up"),
+    ("success_route", "route-adherence success (%)", lambda r: r["success_route"],
+     stats.rate_stat, True, "up"),
     ("cross_track", "cross-track (m)", lambda r: r["ct"] if r["fell"] < 0.5 else None,
      stats.mean_stat, False, "down"),
     ("foot_ball_dist", "foot-ball distance (m)", lambda r: r["foot_ball_dist"],
@@ -282,6 +292,16 @@ def read_rows(path):
                 ball_lost_05=_f(r.get("ball_lost_05")),
                 ball_lost_10=_f(r.get("ball_lost_10")),
                 success=_f(r.get("success")),
+                # `completed` distinguishes "ran clean to the end of the budget"
+                # from "never finished the arc"; the three nested verdicts and the
+                # raw failure quantities are absent on pre-2026-07-22 runs, so
+                # every one of these is a .get that may stay None
+                completed=_f(r.get("completed")),
+                success_possession=_f(r.get("success_possession")),
+                success_route=_f(r.get("success_route")),
+                max_ct=_f(r.get("max_cross_track_m")),
+                terminal_ct=_f(r.get("terminal_cross_track_m")),
+                off_route_t=_f(r.get("off_route_t_s")),
                 ach=_f(r.get("ach_speed_mps")), cmd=_f(r.get("cmd_speed_mps")),
                 ct=_f(r.get("cross_track_m")), r=_f(r.get("speed_corr_r")),
                 duration=_f(r.get("duration_s")),
@@ -376,6 +396,18 @@ def condition_stats(rows, fail_fast=None):
 
     succ_vals = finite([r["success"] for r in rows])
     succ_p = float(np.mean(succ_vals)) if succ_vals else None
+
+    def rate(key):
+        """Mean of one of the looser success verdicts, None when the run predates
+        the column (so the report shows a gap, not a fake 0%)."""
+        vals = finite([r.get(key) for r in rows])
+        if not vals:
+            return None, None
+        p = float(np.mean(vals))
+        return round(100.0 * p, 2), rate_se(p, len(vals))
+
+    poss_succ, poss_succ_se = rate("success_possession")
+    route_succ, route_succ_se = rate("success_route")
     ratios = [r["ach"] / r["cmd"] for r in alive
               if r["ach"] is not None and r["cmd"] is not None and r["cmd"] > 0.05]
     ct_vals = finite([r["ct"] for r in alive])
@@ -392,7 +424,14 @@ def condition_stats(rows, fail_fast=None):
         # robustness condition there is no fail-fast at all, so it only means the
         # clock ran out -- calling that "completed" would paint an episode that
         # drifted 5 m off route as a success.
+        #
+        # `completed == 0` is the third case and used to be swallowed by the
+        # first: an arc route the robot never finished. engine.episode_metrics
+        # scores those success=0, so painting them "completed" put failures in
+        # the success colour (55 episodes on human_dr_m80000).
         key = r["reason"] or ("completed" if fail_fast else "timeout")
+        if not r["reason"] and fail_fast and r.get("completed") == 0.0:
+            key = "incomplete"
         reasons[key] = reasons.get(key, 0) + 1
     return dict(
         n=n, n_alive=len(alive),
@@ -405,6 +444,8 @@ def condition_stats(rows, fail_fast=None):
         possession_se=(None if poss_p is None else rate_se(poss_p, len(alive))),
         success=None if succ_p is None else round(100.0 * succ_p, 2),
         success_se=None if succ_p is None else rate_se(succ_p, len(succ_vals)),
+        success_possession=poss_succ, success_possession_se=poss_succ_se,
+        success_route=route_succ, success_route_se=route_succ_se,
         speed_ratio=round(float(np.mean(ratios)), 4) if ratios else None,
         speed_ratio_se=mean_se(ratios),
         speed_ratio_n=len(ratios),
@@ -535,14 +576,31 @@ def video_index(run_dir, report_dir):
 def toplines(straight, corner, human, uturn, cap_rows, pairs):
     """Scalar headline numbers for the summary table."""
     def passing(series, threshold=50.0):
-        best = None
-        for p in series:                     # sorted by x; stop at the first failure
+        """Largest x whose success rate still clears the threshold.
+
+        This used to stop at the FIRST point below the threshold and report the
+        top of the initial contiguous run, which is only the same number when the
+        curve degrades monotonically -- and real curves do not. On
+        human_dr_m80000 the straight-speed sweep reads 1.0 -> 40%, 1.25 -> 54%,
+        1.5 -> 58%, so the old rule broke at 1.0 and reported "no passing point"
+        for a policy that clears 50% at 1.5 m/s.
+
+        `contiguous` (the old number) is kept alongside: where the two disagree
+        the curve is non-monotonic, which is itself worth showing rather than
+        silently picking one.
+        """
+        best = contiguous = None
+        broken = False
+        for p in series:                     # sorted by x
             if p.get("success") is None:
                 continue
-            if p["success"] < threshold:
-                break
-            best = p["x"]
-        return best
+            if p["success"] >= threshold:
+                best = p["x"]
+                if not broken:
+                    contiguous = p["x"]
+            else:
+                broken = True
+        return best, contiguous
 
     track = [r for r in cap_rows if r["group"] == "speed_tracking"]
     tr = finite([r["r"] for r in track])
@@ -551,13 +609,23 @@ def toplines(straight, corner, human, uturn, cap_rows, pairs):
         vals = finite([r.get(key) for r in track])
         return round(float(np.mean(vals)), digits) if vals else None
 
+    top = {}
+    for key, series in (("max_speed", straight), ("corner_L", corner["L"]),
+                        ("corner_R", corner["R"]), ("uturn_L", uturn["L"]),
+                        ("uturn_R", uturn["R"]), ("human_cap", human)):
+        best, contiguous = passing(series)
+        top[key] = best
+        top[f"{key}_contiguous"] = contiguous
+        if contiguous != best:
+            # the curve dips below the threshold and comes back: the headline
+            # number is the largest passing point, but the policy is NOT reliable
+            # everywhere below it, and that is worth saying out loud
+            print(f"[html_report] {key}: non-monotonic sweep — clears the threshold "
+                  f"up to {best}, but not continuously from the start "
+                  f"(contiguous limit {contiguous})")
     return dict(
         tracking_slope=avg("slope"), tracking_bias=avg("bias"),
-        tracking_resid=avg("resid"),
-        max_speed=passing(straight),
-        corner_L=passing(corner["L"]), corner_R=passing(corner["R"]),
-        uturn_L=passing(uturn["L"]), uturn_R=passing(uturn["R"]),
-        human_cap=passing(human),
+        tracking_resid=avg("resid"), **top,
         tracking_r=round(float(np.mean(tr)), 3) if tr else None)
 
 
