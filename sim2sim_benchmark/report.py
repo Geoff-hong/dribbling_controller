@@ -252,11 +252,12 @@ def print_summary(episode_rows, title):
           "single conditions differ only when the gap exceeds ~2x the larger SE "
           "(~20 pts for rates at n=48). Pool an axis (~6 pts) or the table (~2) "
           "for finer reads; the interactive report gives exact per-condition CIs")
-    print("v / v/cmd / ct are SURVIVORS-ONLY: an episode truncated by a fall "
-          "covers its distance in less time, so an unfiltered mean rises as the "
-          "condition gets harder. poss% uses the TRAINING lost-ball criterion "
-          "(nearest foot to ball surface > 0.5 m for 0.1 s, after first touch); "
-          "bd90 = 90th pct robot-ball distance, its continuous form.")
+    print("v / v/cmd / ct / poss% are SURVIVORS-ONLY: an episode truncated by a "
+          "fall covers its distance in less time, so an unfiltered mean rises as "
+          "the condition gets harder; and a fall that stops the ball near the "
+          "feet would count as 'kept', pushing possession above survival. poss% "
+          "is the nearest-foot-to-ball-surface lost-ball criterion among "
+          "survivors; bd90 = 90th pct robot-ball distance, its continuous form.")
     print(f"{'condition':<18}{'n':>4}{'surv%':>14}{'succ%':>14}{'poss%':>7}"
           f"{'v(m/s)':>14}{'v/cmd':>7}{'r':>7}{'ct(m)':>14}{'bd90':>7}")
     for (group, axis, name) in sorted(by_condition, key=lambda k: (k[0], k[1])):
@@ -264,7 +265,9 @@ def print_summary(episode_rows, title):
         # survivors define every continuous metric below -- see the note above
         alive = [r for r in rows if r["fell"] < 0.5]
         survival, survival_se = _rate_pm([1.0 - r["fell"] for r in rows])
-        possession, _ = _rate_pm([1.0 - r["ball_lost"] for r in rows])
+        # survivors-only: else a fall that stops the ball near the feet counts as
+        # "kept" and possession climbs ABOVE survival (see html_report note)
+        possession, _ = _rate_pm([1.0 - r["ball_lost"] for r in alive])
         successes = [r["success"] for r in rows if np.isfinite(r["success"])]
         if successes:
             success, success_se = _rate_pm(successes)

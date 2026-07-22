@@ -52,7 +52,7 @@ SERIES_DARK = ["#3987e5", "#2fb84a", "#d55181", "#c98500",
 
 ROB_METRICS = [("survival", "survival rate (%)", "up"),
                ("train_survival", "training-faithful survival (%)", "up"),
-               ("possession", "ball possession (%)", "up"),
+               ("possession", "ball possession (%, survivors)", "up"),
                ("foot_ball_dist_p90", "foot-ball surface distance (m, p90)", "down"),
                ("ball_dist_p90", "robot-ball distance (m, p90)", "down"),
                ("speed_ratio", "speed ratio (achieved/cmd, survivors)", "one"),
@@ -327,9 +327,19 @@ def condition_stats(rows, fail_fast=None):
     if fail_fast is None:
         fail_fast = any(r["success"] is not None for r in rows)
     surv_p = 1.0 - float(np.mean([r["fell"] for r in rows]))
-    # possession at the MAIN (eval) threshold; train_survival below uses the
-    # training-faithful 0.5 m flag instead (see _ball_lost_train)
-    poss_p = 1.0 - float(np.mean([r["ball_lost"] for r in rows]))
+    # possession at the MAIN (eval) threshold, SURVIVORS-ONLY: P(kept ball |
+    # stayed up). Conditioning on survival is deliberate -- an all-rows
+    # possession counts a fall where the ball happened to stop near the feet (or
+    # a fall before first-touch, so the lost-flag never armed) as "kept", i.e. a
+    # FALLEN robot "possessing", which is nonsense. Survivors-only drops the
+    # fallen episodes entirely. This is a CONDITIONAL rate on a different
+    # denominator than survival, so like survivors-only cross-track it is NOT
+    # meant to be compared to survival numerically -- it can sit well above it
+    # (a policy whose only failure mode is falling keeps the ball ~100% of the
+    # time it stays up). The combined "upright AND kept" number that IS <=
+    # survival is train_survival below (fall OR lost, at the 0.5 m flag).
+    poss_p = (1.0 - float(np.mean([r["ball_lost"] for r in alive]))
+              if alive else None)
     # TRAINING-faithful survival. Training terminates on fall OR ball_lost OR
     # time_out (env.yaml `terminations`); the benchmark deliberately keeps
     # ball_lost as a metric so survival and possession read as separate failure
@@ -390,7 +400,8 @@ def condition_stats(rows, fail_fast=None):
                         else round(100.0 * train_surv_p, 2)),
         train_survival_se=(None if train_surv_p is None
                            else rate_se(train_surv_p, n)),
-        possession=round(100.0 * poss_p, 2), possession_se=rate_se(poss_p, n),
+        possession=(None if poss_p is None else round(100.0 * poss_p, 2)),
+        possession_se=(None if poss_p is None else rate_se(poss_p, len(alive))),
         success=None if succ_p is None else round(100.0 * succ_p, 2),
         success_se=None if succ_p is None else rate_se(succ_p, len(succ_vals)),
         speed_ratio=round(float(np.mean(ratios)), 4) if ratios else None,
@@ -1541,8 +1552,9 @@ const SGROUPS = [
     ["robot-ball dist (m, p90)", "down", r => r.nominal && r.nominal.ball_dist_p90,
      r => r.nominal && r.nominal.ball_dist_p90 != null
        ? `${fmtVal(r.nominal.ball_dist_p90)}` : null],
-    ["possession (%)", "up", r => r.nominal && r.nominal.possession,
-     r => r.nominal ? `${fmtVal(r.nominal.possession)} ±${fmtVal(r.nominal.possession_se)}` : null],
+    ["possession (%, survivors)", "up", r => r.nominal && r.nominal.possession,
+     r => r.nominal && r.nominal.possession != null
+       ? `${fmtVal(r.nominal.possession)} ±${fmtVal(r.nominal.possession_se)}` : null],
     ["speed ratio (survivors)", "one", r => r.nominal && r.nominal.speed_ratio,
      r => r.nominal && r.nominal.speed_ratio != null
        ? `${fmtVal(r.nominal.speed_ratio)} ±${fmtVal(r.nominal.speed_ratio_se)}`
