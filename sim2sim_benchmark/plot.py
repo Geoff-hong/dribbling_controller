@@ -116,6 +116,7 @@ GROUP_LABEL = {
     "reset_ball_dist": "task-start ball distance (m)",
     "reset_ball_bearing": "task-start ball bearing (deg)",
     "handover": "deploy standby hold (s)",
+    "joint_friction": "leg+waist joint friction (N*m)",
     "straight_speed": "cmd speed, straight (m/s)",
     "corner_turn": "|kappa|, corner turn (1/m)",
 }

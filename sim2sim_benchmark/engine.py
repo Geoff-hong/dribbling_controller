@@ -180,6 +180,11 @@ ACTUATOR_GAIN_RANGE = None    # kp/kd multiplier
 PAYLOAD_KG_RANGE = None       # added to torso_link mass
 JOINT_OFFSET_RANGE = None     # encoder calibration error on default_joint_pos
 BASE_COM_RANGE = None         # {axis: (lo, hi)} offset of torso_link CoM
+# leg+waist joint frictionloss (N*m). (lo, hi) -> sampled per episode; a
+# degenerate (0, 0) means the checkpoint trained FRICTIONLESS (event removed /
+# absent) and the benchmark sets 0 rather than the compiled MJCF 0.1; None ->
+# leave the compiled default (only when no env.yaml resolved).
+JOINT_FRICTION_RANGE = None
 
 
 def _expand(pair, scale, lo_clamp=0.02):
@@ -201,6 +206,7 @@ def configure_train_dr(train, sweep_scale=1.5):
     global BALL_DELAY_RANGE, ACT_DELAY_SUBSTEPS, ACT_DELAY_ZERO_PROB, BALL_DAMPING
     global OBS_NOISE, ACTUATOR_GAIN_RANGE, PAYLOAD_KG_RANGE, JOINT_OFFSET_RANGE
     global BASE_COM_RANGE, RESET_BALL_DIST_RANGE, RESET_BALL_BEARING_DEG
+    global JOINT_FRICTION_RANGE
     if train is None:
         print("[train_dr] WARNING: no env.yaml — using hardcoded legacy DR ranges")
         return
@@ -251,6 +257,15 @@ def configure_train_dr(train, sweep_scale=1.5):
     PAYLOAD_KG_RANGE = train.get("payload_kg_range")
     JOINT_OFFSET_RANGE = train.get("joint_offset_range")
     BASE_COM_RANGE = train.get("base_com_range")
+    # joint friction: a real trained range if the event was active, else a
+    # degenerate (0, 0) meaning the checkpoint trained frictionless (event
+    # removed / predates it) -> the benchmark sets 0, NOT the compiled MJCF 0.1
+    jf = train.get("joint_friction_range")
+    JOINT_FRICTION_RANGE = tuple(jf) if jf is not None else (0.0, 0.0)
+    print(f"[train_dr] joint friction: "
+          + ("trained frictionless — nominal 0 (overrides the MJCF 0.1 default)"
+             if JOINT_FRICTION_RANGE == (0.0, 0.0)
+             else f"trained range {JOINT_FRICTION_RANGE} N*m (sampled per episode)"))
     if not OBS_NOISE:
         print("[train_dr] WARNING: no obs noise in env.yaml — the benchmark will "
               "run NOISE-FREE, which is easier than the training distribution")
@@ -333,7 +348,10 @@ DEFAULT_CONDITION = dict(
     # instead of sampling the training range. The obs_noise sweep group carries
     # the sensitivity information (0 -> 4x), which is where it belongs.
     obs_noise_scale=0.0, actuator_gain_scale=None, payload_kg=None,
-    base_com_scale=None, joint_offset_rad=None, ball_radius_obs_m=None)
+    base_com_scale=None, joint_offset_rad=None, ball_radius_obs_m=None,
+    # leg+waist joint frictionloss (absolute N*m). None -> the trained nominal
+    # (0 for the frictionless lineage); a scalar pins it (the joint_friction axis).
+    joint_friction=None)
 
 
 def make_condition(**overrides):
@@ -783,6 +801,14 @@ class Robot:
         self.torso_body = nid(mujoco.mjtObj.mjOBJ_BODY, "torso_link")
         self.torso_mass0 = float(model.body_mass[self.torso_body])
         self.torso_ipos0 = model.body_ipos[self.torso_body].copy()
+        # dof addresses of the joints the training joint_friction event targets
+        # (legs + waist; arms are second-order for dribbling and were excluded).
+        # frictionloss0 is the compiled MJCF default, restored when a condition
+        # does not touch the channel.
+        self.jf_dofs = np.array([self.vadr[i] for i, nm in enumerate(self.jnames)
+                                 if re.search(r"(hip|knee|ankle|waist)", nm)])
+        self.jf_frictionloss0 = (model.dof_frictionloss[self.jf_dofs].copy()
+                                 if len(self.jf_dofs) else np.array([]))
         # distinct color per robot for ball + its route dots
         self.color = COLORS[k % len(COLORS)]
         model.geom_rgba[self.ball_geom] = [*self.color, 1.0]
@@ -921,6 +947,25 @@ class Robot:
             self.dq = self.dq0 + self.rng.uniform(-float(off), float(off), len(self.dq0))
         else:
             self.dq = self.dq0.copy()
+
+        # 6. joint friction (leg+waist dof_frictionloss). The iter-80000 lineage
+        # trained FRICTIONLESS (the joint_friction event was removed / predates
+        # it), but the MJCF compiles a 0.1 default and the deploy robot has real
+        # friction, so this is BOTH a training-faithful nominal (0 here) and a
+        # sim2real probe (the joint_friction axis sweeps it). condition pins an
+        # absolute N*m; None -> JOINT_FRICTION_RANGE (a real range is sampled, a
+        # degenerate (v,v) is set without a draw so the frictionless rng stream
+        # is unchanged); range None -> keep the compiled default.
+        if len(self.jf_dofs):
+            jf = condition["joint_friction"]
+            if jf is not None:
+                model.dof_frictionloss[self.jf_dofs] = float(jf)
+            elif JOINT_FRICTION_RANGE is not None:
+                lo, hi = JOINT_FRICTION_RANGE
+                model.dof_frictionloss[self.jf_dofs] = (
+                    lo if hi <= lo else float(u(lo, hi)))
+            else:
+                model.dof_frictionloss[self.jf_dofs] = self.jf_frictionloss0
 
     def sample_dr(self, model):
         u = self.rng.uniform
