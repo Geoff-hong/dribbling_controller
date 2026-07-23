@@ -83,11 +83,14 @@ ROB_GROUP_LABEL = {
 # groups that belong to the capability sections, never the robustness grid
 CAP_GROUPS = {"baseline", "straight_speed", "corner_turn", "u_turn",
               "human_dribble", "speed_tracking"}
-CAP_METRICS = [("success", "success rate (%)", "up"),
+CAP_METRICS = [("success", "strict completion success (%)", "up"),
+               ("success_route", "route-control success (%)", "up"),
+               ("success_possession", "upright + ball at termination (%)", "up"),
+               ("cross_track_success", "cross-track (m, strict successes)", "down"),
                ("survival", "survival rate (%)", "up"),
                ("progress", "progress before termination (m)", "up"),
                ("ball_dist_p90", "robot-ball distance (m, p90)", "down"),
-               ("cross_track", "cross-track (m, survivors)", "down")]
+               ("cross_track", "cross-track (m, upright; fail-fast censored)", "down")]
 
 
 # fail_reason -> (legend label, CSS colour var). "timeout"/"completed"/
@@ -117,7 +120,7 @@ def _ball_lost_train(r):
 
 
 # Metrics the significance machinery compares. (key, label, row-extractor,
-# statistic, is_rate). "down" metrics are handled in the JS by flipping the
+# statistic, is_rate, direction). "down" metrics are handled in the JS by flipping the
 # colour, not by negating the delta.
 DIFF_METRICS = [
     ("survival", "survival rate (%)", lambda r: 1.0 - r["fell"], stats.rate_stat, True, "up"),
@@ -128,7 +131,8 @@ DIFF_METRICS = [
      lambda r: None if r["foot_ball_dist"] is None
      else (1.0 if (r["fell"] < 0.5 and _ball_lost_train(r) < 0.5) else 0.0),
      stats.rate_stat, True, "up"),
-    ("success", "success rate (%)", lambda r: r["success"], stats.rate_stat, True, "up"),
+    ("success", "strict completion success (%)", lambda r: r["success"],
+     stats.rate_stat, True, "up"),
     # the two looser readings of the same episode (engine.episode_metrics):
     # possession >= route >= strict `success`. None on pre-2026-07-22 runs, which
     # drops them from the pair rather than comparing against a missing column.
@@ -136,6 +140,9 @@ DIFF_METRICS = [
      stats.rate_stat, True, "up"),
     ("success_route", "route-adherence success (%)", lambda r: r["success_route"],
      stats.rate_stat, True, "up"),
+    ("cross_track_success", "cross-track (m, strict successes)",
+     lambda r: r["ct"] if r["success"] is not None and r["success"] > 0.5 else None,
+     stats.mean_stat, False, "down"),
     ("cross_track", "cross-track (m)", lambda r: r["ct"] if r["fell"] < 0.5 else None,
      stats.mean_stat, False, "down"),
     ("foot_ball_dist", "foot-ball distance (m)", lambda r: r["foot_ball_dist"],
@@ -264,10 +271,23 @@ def _f(value):
     return v if np.isfinite(v) else None
 
 
+def nested_strict_success(raw_success, route_success, completed):
+    """Repair/derive strict success from the two constraints it must contain.
+
+    Protocol-2 CSVs already carry ``success_route`` and ``completed``, but their
+    raw ``success`` column was computed independently and can therefore exceed
+    route success. ``completed is None`` means the route has no finite arc and
+    reaching the full episode budget is the completion criterion.
+    """
+    if route_success is None:
+        return raw_success
+    return 1.0 if (route_success > 0.5 and completed != 0.0) else 0.0
+
+
 def read_rows(path):
     if not os.path.exists(path):
         return []
-    out, bad = [], 0
+    out, bad, repaired = [], 0, 0
     with open(path, newline="") as f:
         reader = csv.DictReader(f)
         tail_col = reader.fieldnames[-1] if reader.fieldnames else None
@@ -279,6 +299,13 @@ def read_rows(path):
             if None in (fell, lost, axis) or not r.get("condition"):
                 bad += 1
                 continue
+            raw_success = _f(r.get("success"))
+            completed = _f(r.get("completed"))
+            route_success = _f(r.get("success_route"))
+            strict_success = nested_strict_success(raw_success, route_success, completed)
+            if (raw_success is not None and strict_success is not None
+                    and raw_success != strict_success):
+                repaired += 1
             out.append(dict(
                 condition=r["condition"], group=r.get("group", ""), axis=axis,
                 # rep keys the route: the runner assigns route_seed = rep % bank,
@@ -291,14 +318,14 @@ def read_rows(path):
                 # (absent on pre-multi-threshold runs, where `ball_lost` WAS 0.5)
                 ball_lost_05=_f(r.get("ball_lost_05")),
                 ball_lost_10=_f(r.get("ball_lost_10")),
-                success=_f(r.get("success")),
+                success=strict_success,
                 # `completed` distinguishes "ran clean to the end of the budget"
                 # from "never finished the arc"; the three nested verdicts and the
                 # raw failure quantities are absent on pre-2026-07-22 runs, so
                 # every one of these is a .get that may stay None
-                completed=_f(r.get("completed")),
+                completed=completed,
                 success_possession=_f(r.get("success_possession")),
-                success_route=_f(r.get("success_route")),
+                success_route=route_success,
                 max_ct=_f(r.get("max_cross_track_m")),
                 terminal_ct=_f(r.get("terminal_cross_track_m")),
                 off_route_t=_f(r.get("off_route_t_s")),
@@ -317,6 +344,9 @@ def read_rows(path):
                 reason=(r.get("fail_reason") or "").strip()))
     if bad:
         print(f"[html_report] {path}: skipped {bad} malformed rows")
+    if repaired:
+        print(f"[html_report] {path}: repaired strict-success nesting in "
+              f"{repaired} legacy rows from success_route + completed")
     return out
 
 
@@ -332,11 +362,14 @@ def condition_stats(rows, fail_fast=None):
     armed, so a finite success column is an exact marker for it -- no group-name
     list to keep in sync.
 
-    Continuous metrics are SURVIVORS-ONLY (`alive`). An episode truncated by a
+    Most continuous metrics are SURVIVORS-ONLY (`alive`). An episode truncated by a
     fall covers its route distance in less wall time, so an unfiltered
     ach_speed / speed_ratio mean RISES as the condition gets harder -- it moves
     opposite to what it claims to measure. cross-track was already filtered this
     way; ach/ratio now match it, and every panel reports the sample it used.
+    Capability additionally reports ``cross_track_success`` on strict successes
+    only. This is the CT companion to strict success rate; the survivor CT is
+    retained and explicitly labelled as fail-fast-censored diagnostic data.
 
     foot_ball_dist / ball_dist percentiles are the continuous form of
     possession. Pre-2026-07-20 runs used a 1.5 m / 2.0 s pelvis-to-ball criterion
@@ -411,6 +444,9 @@ def condition_stats(rows, fail_fast=None):
     ratios = [r["ach"] / r["cmd"] for r in alive
               if r["ach"] is not None and r["cmd"] is not None and r["cmd"] > 0.05]
     ct_vals = finite([r["ct"] for r in alive])
+    strict_success_rows = [r for r in rows
+                           if r["success"] is not None and r["success"] > 0.5]
+    ct_success_vals = finite([r["ct"] for r in strict_success_rows])
     ach_vals = finite([r["ach"] for r in alive])
     dur_vals = finite([r["duration"] for r in rows])
     prog_vals = finite([r["progress"] for r in rows])
@@ -452,6 +488,10 @@ def condition_stats(rows, fail_fast=None):
         cross_track=round(float(np.mean(ct_vals)), 4) if ct_vals else None,
         cross_track_se=mean_se(ct_vals),
         cross_track_n=len(ct_vals),      # survivors only -- smaller than n
+        cross_track_success=(round(float(np.mean(ct_success_vals)), 4)
+                             if ct_success_vals else None),
+        cross_track_success_se=mean_se(ct_success_vals),
+        cross_track_success_n=len(ct_success_vals),
         ach_speed=round(float(np.mean(ach_vals)), 4) if ach_vals else None,
         ach_speed_se=mean_se(ach_vals),
         ach_speed_n=len(ach_vals),
@@ -576,7 +616,7 @@ def video_index(run_dir, report_dir):
 def toplines(straight, corner, human, uturn, cap_rows, pairs):
     """Scalar headline numbers for the summary table."""
     def passing(series, threshold=50.0):
-        """Largest x whose success rate still clears the threshold.
+        """Largest x whose strict success rate still clears the threshold.
 
         This used to stop at the FIRST point below the threshold and report the
         top of the initial contiguous run, which is only the same number when the
@@ -1120,14 +1160,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div id="rob-host"></div></section>
 
     <section id="sec-corner"><h2><span class="eyebrow">capability</span>Corner turn</h2>
-      <div class="note">150&ndash;180&deg; arc, 12 s, fail-fast; success = finished the turn, no fall,
-        ball kept. Turn radius = 1/&kappa;.</div>
+      <div class="note">150&ndash;180&deg; arc, fail-fast. Strict success = route-control success
+        plus finishing the turn; turn radius = 1/&kappa;. Cross-track is shown both on strict
+        successes and, separately, on all upright but potentially early-truncated episodes.</div>
       <div class="legend" id="corner-legend"></div>
       <div class="grid" id="corner-grid"></div></section>
 
     <section id="sec-human"><h2><span class="eyebrow">capability</span>Human dribble</h2>
       <div class="note">Human-route generator with curvature capped at &kappa;<sub>cap</sub> (larger
-        = sharper routes), 20 s fail-fast; success = kept control for 20 s.</div>
+        = sharper routes), fail-fast for the configured episode budget. Three verdicts expose
+        upright+ball at termination, route control, and strict full-budget success separately.</div>
       <div class="legend" id="human-legend"></div>
       <div class="grid" id="human-grid"></div></section>
 
@@ -1542,12 +1584,12 @@ function runSeries(run, i, pts, metric, extra = {}) {
   return {
     x: pts.map(p => p.x), y: pts.map(p => p[metric] == null ? null : p[metric]),
     // band whenever the metric ships an SE, not just for the rate metrics:
-    // speed_ratio / cross_track / ach_speed carry a SEM too, and a bare mean
-    // line reads as far more certain than n=48 episodes justify
+    // speed_ratio / cross-track variants / ach_speed carry a SEM too, and a
+    // bare mean line reads as far more certain than n=48 episodes justify
     se: pts.some(p => p[metric + "_se"] != null)
         ? pts.map(p => p[metric + "_se"]) : null,
-    // per-metric sample size: cross_track / speed_ratio / ach_speed are
-    // survivors-only, so the condition's episode count p.n overstates them
+    // per-metric sample size: cross-track variants / speed_ratio / ach_speed use
+    // conditioned subsets, so the condition's episode count p.n overstates them
     n: pts.map(p => p[metric + "_n"] != null ? p[metric + "_n"] : p.n),
     label: run.label + (extra.suffix || ""), cvar: sv(i), runIdx: i,
     dash: extra.dash,
@@ -1635,7 +1677,7 @@ const SGROUPS = [
      "cross_track"],
   ]],
   ["speed & controllability", [
-    ["max straight speed @≥50% success (m/s)", "up", r => r.top.max_speed],
+    ["max straight speed @≥50% strict success (m/s)", "up", r => r.top.max_speed],
     ["controllability pooled r", "up", r => r.pairs && r.pairs.r],
     ["cmd→ball speed slope", "one", r => r.pairs && r.pairs.slope],
     ["tracking mean per-episode r", "up", r => r.top.tracking_r],
@@ -1648,7 +1690,7 @@ const SGROUPS = [
     ["corner max |κ| right (1/m)", "up", r => r.top.corner_R],
     ["u-turn max |κ| left (1/m)", "up", r => r.top.uturn_L],
     ["u-turn max |κ| right (1/m)", "up", r => r.top.uturn_R],
-    ["human κ-cap @≥50% success (1/m)", "up", r => r.top.human_cap],
+    ["human κ-cap @≥50% strict success (1/m)", "up", r => r.top.human_cap],
   ]],
 ];
 function betterOf(a, b, dir) {
@@ -2025,13 +2067,18 @@ function renderRobustness() {
   }
 }
 function capDomains(vis) {
-  const dom = {success: [0, 102], survival: [0, 102], possession: [0, 102]};
-  let ct = 0;
+  const dom = {success: [0, 102], success_route: [0, 102],
+               success_possession: [0, 102], survival: [0, 102], possession: [0, 102]};
+  let ct = 0, ctSuccess = 0;
   for (const {r} of vis)
     for (const pts of [r.corner.L, r.corner.R, r.human, r.uturn.L, r.uturn.R])
-      for (const p of pts || [])
+      for (const p of pts || []) {
         if (p.cross_track != null) ct = Math.max(ct, p.cross_track);
+        if (p.cross_track_success != null)
+          ctSuccess = Math.max(ctSuccess, p.cross_track_success);
+      }
   dom.cross_track = [0, ct * 1.08 + 1e-6];
+  dom.cross_track_success = [0, ctSuccess * 1.08 + 1e-6];
   return dom;
 }
 function renderTurns(gridId, key, xLabel, dom, legendId) {
@@ -2079,7 +2126,8 @@ function renderSpeed() {
   const vis = visible();
   legendChips(document.getElementById("speed-legend"),
               runChips([{cvar: "var(--muted)", dash: DASH.ref, label: "achieved = commanded"}]));
-  for (const [metric, mLabel, dir] of [["success", "max speed: success rate (%)", "up"],
+  for (const [metric, mLabel, dir] of [["success", "max speed: strict success (%)", "up"],
+                                       ["success_possession", "upright + ball at termination (%)", "up"],
                                        ["survival", "max speed: survival rate (%)", "up"]]) {
     const p = panel(g, mLabel, dir);
     const series = vis.map(({r, i}) => runSeries(r, i, r.straight, metric));

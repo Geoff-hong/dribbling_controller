@@ -7,7 +7,7 @@ Two separate tests, run from the repo root:
   #   metrics: survival / possession / speed ratio / cross-track
   # capability: clean env, extreme command, fail-fast control criteria
   #   axes: straight-line max speed | corner-turn max curvature
-  #   metric: success rate
+  #   metrics: nested possession/route/strict success + cross-track
   python -m sim2sim_benchmark --robustness --capability \
       --onnx /abs/path/softtouch_dribble_deploy.onnx \
       --reset config/g1/softtouch_mujoco_reset_standby.txt \

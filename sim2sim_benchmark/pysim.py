@@ -287,6 +287,9 @@ def main():
     ap.add_argument("--push-interval-s", type=float, default=5.0, help="seconds between pushes")
     ap.add_argument("--ball-delay-steps", type=int, default=None, help="pin ball-obs lag (policy steps)")
     ap.add_argument("--act-delay-ms", type=float, default=None, help="pin action lag (ms)")
+    ap.add_argument("--bridge-delay-ms", type=float, default=None,
+                    help="C++ bridge staleness on ball+base obs (default 10 = deploy parity; "
+                         "0 = legacy fresh-state)")
     ap.add_argument("--jitter", action="store_true", help="small reset yaw/xy jitter (de-determinize clean env)")
     ap.add_argument("--sweep-scale", type=float, default=1.5,
                     help="--sweep envelope as a multiple of the checkpoint's training DR range")
@@ -328,7 +331,8 @@ def main():
         push_dv=args.push_dv, ball_push_dv=args.ball_push_dv,
         push_interval_s=args.push_interval_s,
         ball_obs_delay_steps=args.ball_delay_steps, action_delay_ms=args.act_delay_ms,
-        reset_jitter=args.jitter)
+        reset_jitter=args.jitter,
+        **({} if args.bridge_delay_ms is None else {"bridge_delay_ms": args.bridge_delay_ms}))
     for rb in robots:
         rb.latency = args.latency
         rb.hold_s = args.standby_hold_s

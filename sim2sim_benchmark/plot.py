@@ -130,12 +130,24 @@ def load_rows(csv_path):
             def num(key):
                 value = record.get(key)
                 return float(value) if value not in (None, "") else float("nan")
+            raw_success = num("success")
+            route_success = num("success_route")
+            completed = num("completed")
+            # Protocol-2 CSVs can violate route >= strict. Reconstruct the
+            # nested verdict when the newer route column is available; NaN
+            # completion means no finite arc geometry to finish.
+            if np.isfinite(route_success):
+                success = 1.0 if (route_success > 0.5
+                                  and (not np.isfinite(completed)
+                                       or completed != 0.0)) else 0.0
+            else:
+                success = raw_success
             rows.append(dict(group=record["group"], axis=float(record["axis_value"]),
                              condition=record.get("condition", ""),
                              rep=record.get("rep", ""),
                              fell=float(record["fell"]), lost=float(record["ball_lost"]),
                              cross_track=num("cross_track_m"), ach_speed=num("ach_speed_mps"),
-                             cmd_speed=num("cmd_speed_mps"), success=num("success"),
+                             cmd_speed=num("cmd_speed_mps"), success=success,
                              speed_corr_r=num("speed_corr_r"),
                              progress=num("progress_m"), duration=num("duration_s"),
                              ball_dist=num("ball_dist_m"),

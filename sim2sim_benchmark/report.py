@@ -294,8 +294,11 @@ def print_summary(episode_rows, title):
           "feet would count as 'kept', pushing possession above survival. poss% "
           "is the nearest-foot-to-ball-surface lost-ball criterion among "
           "survivors; bd90 = 90th pct robot-ball distance, its continuous form.")
-    print(f"{'condition':<18}{'n':>4}{'surv%':>14}{'succ%':>14}{'poss%':>7}"
-          f"{'v(m/s)':>14}{'v/cmd':>7}{'r':>7}{'ct(m)':>14}{'bd90':>7}")
+    print("For capability, strict% is the nested full-budget/completion verdict. "
+          "The HTML report also exposes route-control, upright+ball, and CT on "
+          "strict successes; ct|up below is the fail-fast-censored upright subset.")
+    print(f"{'condition':<18}{'n':>4}{'surv%':>14}{'strict%':>14}{'poss%':>7}"
+          f"{'v(m/s)':>14}{'v/cmd':>7}{'r':>7}{'ct|up(m)':>14}{'bd90':>7}")
     for (group, axis, name) in sorted(by_condition, key=lambda k: (k[0], k[1])):
         rows = by_condition[(group, axis, name)]
         # survivors define every continuous metric below -- see the note above

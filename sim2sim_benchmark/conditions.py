@@ -11,10 +11,18 @@ from .engine import make_condition, route_cmd_mode
 from .real_world import REAL_WORLD
 
 NOMINAL_DR = dict(mass=0.391, radius=0.10, foot=0.8, ball=0.5)   # deploy nominal
-# every condition pins latency to the deployment nominal — the REAL robot
-# pipeline's ball-obs lag (2 policy steps) and action lag (10 ms), a property of
-# the deployment stack, not of the checkpoint; the latency axes override their own
-DEPLOY_LATENCY = dict(ball_obs_delay_steps=2, action_delay_ms=10)
+# Match the C++ ros2_control sim2sim path exactly. Its structural timing (read
+# from mujoco_sim_ros2 PhysicsLoop + MujocoRos2Control::update):
+#   - action: CM write lands in the SAME sim step's mj_step2 -> 0 delay;
+#   - ball AND base state: published by the bridge at 100 Hz from the physics
+#     thread, consumed via subscriptions in the CM executor thread, so the
+#     policy tick always reads the PREVIOUS publish -> one publish period
+#     (10 ms) stale. engine models this as bridge_delay_ms (DEFAULT_CONDITION
+#     default 10), so every condition carries it implicitly.
+# The two SYNTHETIC channels stay zero at nominal: real vision/actuation
+# latency is unmeasured (real_world.py) and must not be guessed in. Latency
+# axes stack exactly one synthetic channel on top of the structural hop.
+CPP_SIM2SIM_LATENCY = dict(ball_obs_delay_steps=0, action_delay_ms=0)
 
 # Roll brake: the real value sits far outside the trained one (see real_world),
 # so this axis is REAL-anchored, not training-anchored.
@@ -23,7 +31,7 @@ REAL_BALL_DAMPING_BAND = REAL_WORLD["ball_damping"]["band"]
 
 
 def condition_row(name, group, axis, **overrides):
-    for key, value in DEPLOY_LATENCY.items():
+    for key, value in CPP_SIM2SIM_LATENCY.items():
         overrides.setdefault(key, value)
     return {**make_condition(**overrides), "name": name, "group": group, "axis": float(axis)}
 
@@ -341,13 +349,14 @@ def capability_conditions(train=None):
     robot). Metric = SUCCESS RATE, reported at three nesting strictnesses
     (possession / route-adherence / strict — see engine.episode_metrics).
 
-    "Deploy-nominal" is NOT "training-clean", and the difference is deliberate:
-    DEPLOY_LATENCY pins the deployment stack's 2-step ball-obs and 10 ms action
-    lag on every condition, and engine.py clips the policy target to 90% of the
-    joint soft limit. Both are properties of the robot this policy ships to,
-    not of the checkpoint. Neither latency has been MEASURED on hardware yet
-    (real_world.py), so this is a stated protocol choice, not a calibration --
-    do not report these numbers as a latency-free baseline.
+    "Deploy-nominal" here means parity with the C++ sim2sim implementation:
+    ball/base observations one bridge publish (10 ms, engine bridge_delay_ms)
+    stale, fresh joint state, position target applied the same sim step, and no
+    synthetic queue on top. Hardware latency has not been measured yet
+    (real_world.py), so the nominal benchmark does not guess one. The dedicated
+    latency axes report sensitivity with the other synthetic channel held at
+    zero. engine.py still clips the policy target to 90% of the joint soft
+    limit, as the C++ controller does.
 
     Axes are ANCHORED on the checkpoint's trained command distribution (env.yaml
     via train_dr; fields the dump lacks fall back to TRAIN_CODE_DEFAULTS with a
@@ -498,6 +507,8 @@ def load_conditions_json(path):
             for key in ("episode_s", "offroute_fail_m", "ball_far_fail_m"):
                 if condition[key] is not None and float(condition[key]) <= 0:
                     raise ValueError(f"{key} must be > 0")
+            if condition["bridge_delay_ms"] is not None and float(condition["bridge_delay_ms"]) < 0:
+                raise ValueError("bridge_delay_ms must be >= 0 (10 = C++ sim2sim parity)")
             if condition["ball_damping"] is not None and float(condition["ball_damping"]) < 0:
                 raise ValueError("ball_damping must be >= 0 (0 = free-rolling ball)")
         except (ValueError, KeyError) as e:
