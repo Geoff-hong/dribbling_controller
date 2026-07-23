@@ -347,13 +347,19 @@ def csv_floats(s):
 #           sample the full training DR. push_dv / ball_push_dv kick the base/ball
 #           every push_interval_s (random phase + direction).
 # Latency   bridge_delay_ms models the C++ sim2sim topic hop: the ball bridge
-#           publishes ball AND base state at 100 Hz from the physics thread, and
-#           the controller's subscriptions run in the CM executor thread, so the
-#           same-step publish never arrives before the policy tick -- every
-#           commandTerm-derived obs (ball pos/vel, base pose/ang-vel, obs frame,
-#           route input) is one publish period (10 ms = 2 sub-steps) stale, while
-#           joint pos/vel (CM read) stay fresh. Default 10 = C++ parity; 0 turns
-#           the hop off (legacy fresh-state behavior).
+#           publishes ball AND base state at 100 Hz from the physics thread and
+#           the controller's subscriptions run in the CM executor thread, so
+#           every commandTerm-derived obs (ball pos/vel, base pose/ang-vel, obs
+#           frame, route input) is a little stale while joint pos/vel (CM read)
+#           stay fresh. MEASURED on the C++ stack (2026-07-23, 648 ticks, stamps
+#           logged in the controller): staleness is NOT a constant publish
+#           period -- the physics thread steps in bursts with ~1 ms sleeps, so
+#           DDS delivery often wins the race. Per-tick distribution:
+#           0 ms 22% | 5 ms 60% | 10 ms 18% (median 5 ms). The engine samples
+#           {0, period/2, period} sub-step staleness per tick with p =
+#           (0.2, 0.6, 0.2) from a dedicated rng stream. bridge_delay_ms is the
+#           PUBLISH PERIOD (default 10 = C++ parity); 0 turns the hop off
+#           (legacy fresh-state behavior).
 #           ball_obs_delay_steps / action_delay_ms pin a SYNTHETIC channel on top
 #           (vision-pipeline / actuation-queue probes; the ball steps stack onto
 #           the bridge staleness); None -> the --latency flag decides (random
@@ -976,6 +982,7 @@ class Robot:
         # deploy controller reads from topics (see DEFAULT_CONDITION Latency)
         self.bridge_delay = 0                  # sub-steps; reset() sets from the condition
         self.bridge_hist = None
+        self.bridge_rng = None
         self._snap = None
 
     def apply_dr(self, model, dr):
@@ -1270,10 +1277,15 @@ class Robot:
         self.ball_delay = 0; self.act_delay = 0
         # bridge staleness (C++ topic hop, ball + base together). Independent of
         # lat_active: it is the structural deploy-stack property, not a synthetic
-        # probe, and it consumes no rng.
+        # probe. bridge_delay is the MAX staleness (one publish period) in
+        # sub-steps; each tick draws {0, half, max} from the measured mixture
+        # (see the Latency doc above) on a dedicated stream, so enabling or
+        # disabling the hop leaves every other per-episode draw bit-identical.
         self.bridge_delay = int(round(float(condition["bridge_delay_ms"] or 0.0)
                                       / (model.opt.timestep * 1000.0)))
         self.bridge_hist = None; self._snap = None
+        self.bridge_rng = (np.random.Generator(np.random.PCG64(np.random.SeedSequence(
+            int(self.rng.integers(0, 2**31 - 1))))) if self.bridge_delay > 0 else None)
         pin_ball = condition["ball_obs_delay_steps"] is not None
         pin_act = condition["action_delay_ms"] is not None
         self.lat_active = self.latency or pin_ball or pin_act
@@ -1366,14 +1378,18 @@ class Robot:
 
     def _bridge_snapshot(self, data):
         """The bridge sample the deploy controller would consume at this policy
-        tick: bridge_delay sub-steps old (the same-step publish never beats the
-        tick across the executor-thread hop). First tick after a reset sees the
-        reset state itself, matching the C++ bridge's publish-on-reset."""
+        tick. Staleness is drawn per tick from the distribution MEASURED on the
+        C++ stack (0 / half / one publish period at p = 0.2 / 0.6 / 0.2 -- the
+        physics thread steps in bursts, so DDS delivery often beats the tick).
+        First tick after a reset sees the reset state itself, matching the C++
+        bridge's publish-on-reset."""
         if self.bridge_delay <= 0:
             return self._bridge_state(data)
         if self.bridge_hist is None:
             self.bridge_hist = np.tile(self._bridge_state(data), (self.bridge_delay + 1, 1))
-        return self.bridge_hist[self.bridge_delay]
+        back = int(self.bridge_rng.choice(
+            (0, max(1, self.bridge_delay // 2), self.bridge_delay), p=(0.2, 0.6, 0.2)))
+        return self.bridge_hist[back]
 
     def _obs(self, data):
         snap = self._snap if self._snap is not None else self._bridge_snapshot(data)
