@@ -295,13 +295,18 @@ truncation bias) with one CSV row per episode:
   traces into `capability_speed_traces.csv`; no fail-fast, 20 s episodes.
 
 All nominal conditions match the C++ sim2sim path's timing exactly: ball AND
-base observations (obs frame, route input included) are one bridge publish
-(`bridge_delay_ms`, 10 ms at the 100 Hz bridge) stale — the C++ topic hop never
-delivers the same-step publish before the policy tick — while joint state is
-fresh and the action applies the same sim step. No synthetic latency on top
-(ball lag 0 steps, action lag 0 ms). The latency axes vary one synthetic channel
-at a time on top of that structural staleness; real hardware latency remains
-unmeasured and is not guessed into the baseline. Episodes per condition = `--route-bank`
+base observations (obs frame, route input included) cross the 100 Hz bridge
+topic hop, whose per-tick staleness was MEASURED on the C++ stack (stamps
+logged in the controller, 2026-07-23) as 0 ms 22% / 5 ms 60% / 10 ms 18% —
+the physics thread steps in bursts, so delivery often beats the tick. The
+engine samples that distribution per tick (`bridge_delay_ms` = the publish
+period); joint state is fresh and the action applies the same sim step. No
+synthetic latency on top (ball lag 0 steps, action lag 0 ms). The latency axes
+vary one synthetic channel at a time on top of that structural staleness; real
+hardware latency remains unmeasured and is not guessed into the baseline.
+Getting this staleness right matters: modeling it as a FIXED 10 ms cost 14 pts
+of mean straight-speed success (58% vs 72%) and manufactured a spurious
+low-speed off-route failure mode. Episodes per condition = `--route-bank`
 (12) x `--reps` (4).  Every per-episode random draw — route geometry, cruise
 pace, corner lead/angle, DR sampling, reset jitter, push phases — is a pure
 function of (benchmark seed, condition, rep), so independently-run experiments
