@@ -56,7 +56,10 @@ _CODE_FILES = ("engine.py", "runner.py", "conditions.py")
 #        topic hop (ball + base obs, obs frame and route input one publish =
 #        10 ms stale; joints fresh; action same-step); default --episode-s
 #        15 s -> 12 s
-PROTOCOL_VERSION = 4
+#   5 -> bridge staleness corrected from fixed 10 ms to the distribution
+#        MEASURED on the C++ stack (0/5/10 ms at 22/60/18% per tick): the
+#        physics thread steps in bursts, so the same-step publish often wins
+PROTOCOL_VERSION = 5
 
 
 def _sha(obj):

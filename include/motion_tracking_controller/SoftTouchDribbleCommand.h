@@ -72,6 +72,9 @@ class SoftTouchDribbleCommandTerm : public CommandTerm {
   vector3_t getPelvisPositionWorld() const;
   quaternion_t getPelvisOrientationWorld() const;
   vector3_t getBaseAngularVelocityBody() const;
+  // sim2sim parity debug: sample stamps for measuring the topic-hop staleness
+  scalar_t getBallPositionStamp() const { return getBallState().positionStamp; }
+  scalar_t getBasePoseStamp() const { return getBaseState().poseStamp; }
 
  protected:
   size_t getSize() const override { return 6; }

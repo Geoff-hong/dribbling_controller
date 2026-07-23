@@ -24,7 +24,7 @@ class LatencyProtocolTest(unittest.TestCase):
                          (0, 10))
 
     def test_protocol_was_bumped_for_incomparable_nominal(self):
-        self.assertGreaterEqual(PROTOCOL_VERSION, 4)
+        self.assertGreaterEqual(PROTOCOL_VERSION, 5)
 
     def test_every_condition_carries_the_cpp_bridge_staleness(self):
         # the 100 Hz topic hop is structural to the C++ stack, so it must be on

@@ -83,6 +83,7 @@ controller_interface::CallbackReturn SoftTouchDribbleController::on_init() {
     auto_declare<std::string>("softtouch.action.command_mode", "rl_controller");
     auto_declare("softtouch.action.effort_limit", std::vector<double>{});
     auto_declare<double>("softtouch.action.policy_update_period_s", 0.02);
+    auto_declare<std::string>("softtouch.debug.obs_dump_path", "");
     auto_declare<bool>("softtouch.action.clip_target_to_joint_range", true);
     auto_declare<double>("softtouch.action.joint_limit_factor", 0.9);
     auto_declare("softtouch.action.joint_limit_lower", std::vector<double>{});
@@ -332,6 +333,9 @@ void SoftTouchDribbleController::loadSoftTouchConfig() {
     throw std::runtime_error("softtouch.action.command_mode must be 'rl_controller', 'position_target', or 'effort_pd'.");
   }
   actionPolicyPeriod_ = node->get_parameter("softtouch.action.policy_update_period_s").as_double();
+  obsDumpPath_ = node->get_parameter("softtouch.debug.obs_dump_path").as_string();
+  obsDump_.reset();
+  obsDumpSeq_ = 0;
   if (actionPolicyPeriod_ < scalar_t(0.0)) {
     throw std::runtime_error("softtouch.action.policy_update_period_s must be non-negative.");
   }
@@ -472,6 +476,25 @@ controller_interface::return_type SoftTouchDribbleController::updatePositionTarg
     effortTargetPolicyOrder_ = softtouchPolicy_->forward(policyObs);
     lastEffortPolicyUpdateTime_ = now;
     hasEffortTarget_ = true;
+    if (!obsDumpPath_.empty()) {
+      if (!obsDump_) {
+        obsDump_ = std::make_shared<std::ofstream>(obsDumpPath_, std::ios::trunc);
+        obsDump_->precision(17);
+      }
+      const vector3_t ball = commandTerm_->getBallPositionWorld();
+      const vector3_t ballVel = commandTerm_->getBallLinearVelocityWorld();
+      const vector3_t pelvis = commandTerm_->getPelvisPositionWorld();
+      const quaternion_t pq = commandTerm_->getPelvisOrientationWorld();
+      const vector3_t bav = commandTerm_->getBaseAngularVelocityBody();
+      *obsDump_ << obsDumpSeq_++ << " " << now << " "
+                << commandTerm_->getBallPositionStamp() << " "
+                << commandTerm_->getBasePoseStamp() << " " << ball.transpose() << " "
+                << ballVel.transpose() << " " << pelvis.transpose() << " "
+                << pq.w() << " " << pq.x() << " " << pq.y() << " " << pq.z() << " "
+                << bav.transpose() << " | " << policyObs.transpose() << " | "
+                << effortTargetPolicyOrder_.transpose() << "\n";
+      obsDump_->flush();
+    }
   } else if (policyObs.size() != static_cast<Eigen::Index>(softtouchPolicy_->getObservationSize())) {
     policyObs = observationManager_->getValue();
   }

@@ -15,10 +15,12 @@ NOMINAL_DR = dict(mass=0.391, radius=0.10, foot=0.8, ball=0.5)   # deploy nomina
 # from mujoco_sim_ros2 PhysicsLoop + MujocoRos2Control::update):
 #   - action: CM write lands in the SAME sim step's mj_step2 -> 0 delay;
 #   - ball AND base state: published by the bridge at 100 Hz from the physics
-#     thread, consumed via subscriptions in the CM executor thread, so the
-#     policy tick always reads the PREVIOUS publish -> one publish period
-#     (10 ms) stale. engine models this as bridge_delay_ms (DEFAULT_CONDITION
-#     default 10), so every condition carries it implicitly.
+#     thread, consumed via subscriptions in the CM executor thread. MEASURED
+#     staleness per policy tick (2026-07-23, stamps logged in the controller):
+#     0 ms 22% | 5 ms 60% | 10 ms 18% -- the physics thread steps in bursts,
+#     so delivery often beats the tick. engine samples that distribution per
+#     tick via bridge_delay_ms (DEFAULT_CONDITION default 10 = the publish
+#     period), so every condition carries it implicitly.
 # The two SYNTHETIC channels stay zero at nominal: real vision/actuation
 # latency is unmeasured (real_world.py) and must not be guessed in. Latency
 # axes stack exactly one synthetic channel on top of the structural hop.
@@ -350,13 +352,13 @@ def capability_conditions(train=None):
     (possession / route-adherence / strict — see engine.episode_metrics).
 
     "Deploy-nominal" here means parity with the C++ sim2sim implementation:
-    ball/base observations one bridge publish (10 ms, engine bridge_delay_ms)
-    stale, fresh joint state, position target applied the same sim step, and no
-    synthetic queue on top. Hardware latency has not been measured yet
-    (real_world.py), so the nominal benchmark does not guess one. The dedicated
-    latency axes report sensitivity with the other synthetic channel held at
-    zero. engine.py still clips the policy target to 90% of the joint soft
-    limit, as the C++ controller does.
+    ball/base observations carry the MEASURED bridge-hop staleness (0/5/10 ms
+    at 22/60/18% per tick, engine bridge_delay_ms), fresh joint state, position
+    target applied the same sim step, and no synthetic queue on top. Hardware
+    latency has not been measured yet (real_world.py), so the nominal benchmark
+    does not guess one. The dedicated latency axes report sensitivity with the
+    other synthetic channel held at zero. engine.py still clips the policy
+    target to 90% of the joint soft limit, as the C++ controller does.
 
     Axes are ANCHORED on the checkpoint's trained command distribution (env.yaml
     via train_dr; fields the dump lacks fall back to TRAIN_CODE_DEFAULTS with a

@@ -10,7 +10,9 @@
 #include <std_msgs/msg/float64.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
+#include <fstream>
 #include <limits>
+#include <memory>
 
 namespace legged {
 
@@ -69,6 +71,10 @@ class SoftTouchDribbleController : public RlController {
   std::vector<size_t> policyToModelJointIndex_;
   bool clipJointTarget_ = true;
   scalar_t jointTargetLimitFactor_ = 0.9;
+  // sim2sim parity debug: per-policy-tick obs/action dump (empty = off)
+  std::string obsDumpPath_;
+  std::shared_ptr<std::ofstream> obsDump_;
+  int obsDumpSeq_ = 0;
 
   std::string ballPoseTopic_ = "/softtouch/ball/pose";
   std::string ballTwistTopic_ = "/softtouch/ball/twist";
