@@ -386,20 +386,20 @@
         <pair name="right_foot6_floor" geom1="right_foot6_collision" geom2="floor" condim="4" solref="0.01 1" friction="0.8 0.8 0.04"/>
         <pair name="right_foot7_floor" geom1="right_foot7_collision" geom2="floor" condim="4" solref="0.01 1" friction="0.8 0.8 0.04"/>
             <pair name="floor_ball" geom1="floor" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.5 0.5 0.005 0.0001 0.0001"/>
-        <pair name="left_foot1_collision_ball" geom1="left_foot1_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.5 0.5 0.005 0.0001 0.0001"/>
-        <pair name="left_foot2_collision_ball" geom1="left_foot2_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.5 0.5 0.005 0.0001 0.0001"/>
-        <pair name="left_foot3_collision_ball" geom1="left_foot3_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.5 0.5 0.005 0.0001 0.0001"/>
-        <pair name="left_foot4_collision_ball" geom1="left_foot4_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.5 0.5 0.005 0.0001 0.0001"/>
-        <pair name="left_foot5_collision_ball" geom1="left_foot5_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.5 0.5 0.005 0.0001 0.0001"/>
-        <pair name="left_foot6_collision_ball" geom1="left_foot6_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.5 0.5 0.005 0.0001 0.0001"/>
-        <pair name="left_foot7_collision_ball" geom1="left_foot7_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.5 0.5 0.005 0.0001 0.0001"/>
-        <pair name="right_foot1_collision_ball" geom1="right_foot1_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.5 0.5 0.005 0.0001 0.0001"/>
-        <pair name="right_foot2_collision_ball" geom1="right_foot2_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.5 0.5 0.005 0.0001 0.0001"/>
-        <pair name="right_foot3_collision_ball" geom1="right_foot3_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.5 0.5 0.005 0.0001 0.0001"/>
-        <pair name="right_foot4_collision_ball" geom1="right_foot4_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.5 0.5 0.005 0.0001 0.0001"/>
-        <pair name="right_foot5_collision_ball" geom1="right_foot5_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.5 0.5 0.005 0.0001 0.0001"/>
-        <pair name="right_foot6_collision_ball" geom1="right_foot6_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.5 0.5 0.005 0.0001 0.0001"/>
-        <pair name="right_foot7_collision_ball" geom1="right_foot7_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.5 0.5 0.005 0.0001 0.0001"/>
+        <pair name="left_foot1_collision_ball" geom1="left_foot1_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.65 0.65 0.005 0.0001 0.0001"/>
+        <pair name="left_foot2_collision_ball" geom1="left_foot2_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.65 0.65 0.005 0.0001 0.0001"/>
+        <pair name="left_foot3_collision_ball" geom1="left_foot3_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.65 0.65 0.005 0.0001 0.0001"/>
+        <pair name="left_foot4_collision_ball" geom1="left_foot4_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.65 0.65 0.005 0.0001 0.0001"/>
+        <pair name="left_foot5_collision_ball" geom1="left_foot5_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.65 0.65 0.005 0.0001 0.0001"/>
+        <pair name="left_foot6_collision_ball" geom1="left_foot6_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.65 0.65 0.005 0.0001 0.0001"/>
+        <pair name="left_foot7_collision_ball" geom1="left_foot7_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.65 0.65 0.005 0.0001 0.0001"/>
+        <pair name="right_foot1_collision_ball" geom1="right_foot1_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.65 0.65 0.005 0.0001 0.0001"/>
+        <pair name="right_foot2_collision_ball" geom1="right_foot2_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.65 0.65 0.005 0.0001 0.0001"/>
+        <pair name="right_foot3_collision_ball" geom1="right_foot3_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.65 0.65 0.005 0.0001 0.0001"/>
+        <pair name="right_foot4_collision_ball" geom1="right_foot4_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.65 0.65 0.005 0.0001 0.0001"/>
+        <pair name="right_foot5_collision_ball" geom1="right_foot5_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.65 0.65 0.005 0.0001 0.0001"/>
+        <pair name="right_foot6_collision_ball" geom1="right_foot6_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.65 0.65 0.005 0.0001 0.0001"/>
+        <pair name="right_foot7_collision_ball" geom1="right_foot7_collision" geom2="softtouch_ball_geom" condim="6" solref="0.01 1" friction="0.65 0.65 0.005 0.0001 0.0001"/>
     </contact>
 
     <sensor>

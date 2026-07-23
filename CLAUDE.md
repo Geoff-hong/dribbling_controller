@@ -1,3 +1,26 @@
+## Alignment target: the C++ deploy stack, NOT Isaac
+
+`sim2sim_benchmark` exists to predict what the **C++/ROS 2 deploy stack** does.
+Isaac is the thing being checked — aligning the benchmark to Isaac would mean
+validating a simulator against itself, which measures nothing.
+
+- **Behaviour and implementation → match C++.** Control mode, PD execution,
+  actuator type, timestep/integrator, target clipping, effort limits,
+  observation construction, ball-state staleness handling, hand-off timing.
+  When the benchmark and C++ differ, C++ wins — even where Isaac looks "more
+  correct". The C++ sim2sim and the benchmark share `mjcf/g1_softtouch_dribble.xml`,
+  so the MJCF is common ground: a change there hits both.
+- **Numeric parameters → come from training.** DR ranges, PD gains, action
+  scale, joint/geometry values, curriculum-derived anchors. These describe the
+  checkpoint being evaluated, so they are read from its `env.yaml` (`train_dr.py`)
+  or the training URDF.
+- A discrepancy vs Isaac is a **finding about sim2real transfer**, not a
+  benchmark bug. Do not "fix" the benchmark toward Isaac. Example: the benchmark
+  applies PD as explicit torque on `<motor>` actuators, where Isaac uses an
+  implicit PhysX drive; that costs ~15 pts of survival under latency, and it is
+  CORRECT because the C++ system interface computes the same explicit torque
+  against the same MJCF.
+
 ## Workflow
 - **Eval artifacts: keep only valid runs.** If a play/eval turns out to be
   misconfigured (wrong friction/DR, wrong era, wrong mode mix — anything that
@@ -8,6 +31,11 @@
 - **Smoke tests are disposable.** Move smoke-test scripts/outputs to
   `~/Desktop/trash/` as soon as they've served their purpose — same session,
   not "later".
+- **Eval videos go in the run, never elsewhere.** Recorded clips belong under
+  `sim2sim_eval_results/runs/<run>/videos/<title>/<condition>.mp4` (the layout
+  `record_condition_videos` already writes). Do NOT drop them on `~/Desktop/`,
+  in the scratchpad, or any ad-hoc folder — put them next to the run whose
+  policy they show.
 - Before evaluating a checkpoint, read its own params/command.txt (or
   env.yaml/README) and match ITS training params — friction, ball damping,
   latency, reset distribution, curriculum state at that iteration. A

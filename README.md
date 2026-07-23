@@ -260,11 +260,15 @@ truncation bias) with one CSV row per episode:
   routes, fixed route bank).  Axes: `dr_scale` (all DR params jointly, centered
   training ranges x alpha), `base_push` / `ball_push` (velocity kicks every 5 s,
   random direction/phase), `obs_latency` (ball-obs lag, steps), `act_latency`
-  (action lag, ms).  Metrics: survival rate, ball possession (ball >1.5 m from
-  the pelvis for >2 s = lost), achieved/commanded speed ratio, cross-track.
+  (action lag, ms).  Metrics: survival rate, ball possession (sticky nearest-foot
+  to ball-surface threshold), achieved/commanded speed ratio, cross-track.
 - **Capability** — clean nominal env (+ small reset jitter), extreme commands,
-  fail-fast control criteria: the episode FAILS the moment the ball is >0.8 m
-  off the route or >1.2 m from the robot; 10 s budget; metric = SUCCESS RATE.
+  fail-fast control criteria: the episode fails after the ball remains >0.8 m
+  off the route for the configured dwell, or exceeds 1.2 m from the robot.
+  The report shows three nested verdicts: upright+possession at termination,
+  route-control success, and strict completion success. It also shows cross-track
+  both on strict successes (the primary companion to success rate) and on all
+  upright episodes (a diagnostic that may be censored by fail-fast).
   `straight_speed` sweeps the commanded speed on a straight route (success =
   kept control for the whole 10 s).  `corner_turn` is the turn-into-corner
   test: a random straight lead-in (1.5-4 m), ONE arc of 150-180 deg (random) at
@@ -290,13 +294,25 @@ truncation bias) with one CSV row per episode:
   into `capability_speed_pairs.csv`, and the first 8 episodes dump full-rate
   traces into `capability_speed_traces.csv`; no fail-fast, 20 s episodes.
 
-All conditions pin latency to the deployment nominal (ball lag 2 steps, action
-lag 10 ms) unless the axis varies it.  Episodes per condition = `--route-bank`
+All nominal conditions match the C++ sim2sim path's timing exactly: ball AND
+base observations (obs frame, route input included) are one bridge publish
+(`bridge_delay_ms`, 10 ms at the 100 Hz bridge) stale — the C++ topic hop never
+delivers the same-step publish before the policy tick — while joint state is
+fresh and the action applies the same sim step. No synthetic latency on top
+(ball lag 0 steps, action lag 0 ms). The latency axes vary one synthetic channel
+at a time on top of that structural staleness; real hardware latency remains
+unmeasured and is not guessed into the baseline. Episodes per condition = `--route-bank`
 (12) x `--reps` (4).  Every per-episode random draw — route geometry, cruise
 pace, corner lead/angle, DR sampling, reset jitter, push phases — is a pure
 function of (benchmark seed, condition, rep), so independently-run experiments
 compare on IDENTICAL paired episodes; pick any set of run dirs to merge at
 plot time.  A custom table can be run with `--conditions table.json`.
+
+The current condition protocol is v4 (bridge-staleness timing parity, 12 s
+default episode budget). It also matches the C++ human-route lazy extension and
+`std::mt19937` float stream, and enforces the nested success invariant. Episode
+rows from earlier protocols are not valid top-ups for v4; write a new run
+directory (or explicitly apply the top-up migration) before comparing scores.
 
 Benchmark outputs live under `sim2sim_eval_results/`: `runs/<node>/` holds one
 checkpoint's eval artifacts (CSVs, logs, `videos/<test>/`), `compare/` holds
