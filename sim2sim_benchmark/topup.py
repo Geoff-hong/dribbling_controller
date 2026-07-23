@@ -48,7 +48,15 @@ _CODE_FILES = ("engine.py", "runner.py", "conditions.py")
 #   2 -> robot DR off at nominal (engine.TRAIN_DR), body-ground contact restored,
 #        mj_setConst after per-episode model edits, per-joint actuator gains,
 #        payload inertia recompute, U(0,dv) ball push, off-route dwell + gate
-PROTOCOL_VERSION = 2
+#   3 -> nominal synthetic latency 2 steps / 10 ms -> C++-parity 0 / 0;
+#        strict success truly nests inside route/possession; human routes use
+#        the C++ lazy generator and exact mt19937 float stream (no Python-only
+#        clearance redraw/governor, and equal seeds now mean equal routes)
+#   4 -> full C++ sim2sim timing parity: bridge_delay_ms models the 100 Hz
+#        topic hop (ball + base obs, obs frame and route input one publish =
+#        10 ms stale; joints fresh; action same-step); default --episode-s
+#        15 s -> 12 s
+PROTOCOL_VERSION = 4
 
 
 def _sha(obj):

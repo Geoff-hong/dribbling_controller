@@ -32,7 +32,7 @@ def main():
                          "routes; metrics = survival / possession / speed / tracking")
     ap.add_argument("--capability", action="store_true",
                     help="straight-line max speed + corner-turn max curvature with fail-fast "
-                         "control criteria; metric = success rate")
+                         "control criteria; metrics = nested success rates + cross-track")
     ap.add_argument("--conditions", default="",
                     help="run a custom JSON condition table instead of the built-in ones")
     ap.add_argument("--onnx", default=engine.DEFAULT_ONNX, help="deployment policy ONNX")
@@ -49,12 +49,13 @@ def main():
                     help="fixed route seeds every condition cycles through")
     ap.add_argument("--reps", type=int, default=4,
                     help="episodes per condition = --route-bank x this")
-    ap.add_argument("--episode-s", type=float, default=15.0,
+    ap.add_argument("--episode-s", type=float, default=12.0,
                     help="episode budget: the length for conditions that do not "
-                         "pin their own, AND a cap on those that do. Default 15 s "
-                         "= the final episode length of both current lineages' "
-                         "training curricula (5 -> 10 -> 15 s); evaluating longer "
-                         "measures survival at a duration the policy never saw")
+                         "pin their own, AND a cap on those that do. Default 12 s, "
+                         "inside the final 15 s episode length of both current "
+                         "lineages' training curricula (5 -> 10 -> 15 s); evaluating "
+                         "longer than training measures survival at a duration the "
+                         "policy never saw")
     ap.add_argument("--standby-hold-s", type=float, default=0.0,
                     help="whole-run FALLBACK stiff-standby hold (s) for conditions "
                          "that do not pin their own; the robustness 'handover' axis "
@@ -132,8 +133,11 @@ def main():
     # 20 s) would otherwise evaluate the policy past any length it ever saw in
     # training, and survival falls monotonically with episode length, so the
     # extra seconds are a silent handicap rather than a harder test of the same
-    # thing. Shorter pinned budgets (straight 10 s, the turn budgets) are left
-    # alone -- they are fail-fast time limits, not exposure.
+    # thing. Shorter pinned budgets (straight 10 s, most turn budgets) are left
+    # alone -- they are fail-fast time limits, not exposure. NOTE: at the 12 s
+    # default the gentlest corner_turn budgets (kappa 0.2 -> 15 s, 0.3 -> 13 s)
+    # are also capped, which eats their turn_budget slack margin; a timeout
+    # there can be budget-clipping, not lost control (--episode-s 15 restores).
     capped = 0
     for _title, table in tables:
         for c in table:

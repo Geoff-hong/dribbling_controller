@@ -35,13 +35,6 @@ ROUTE_CFG = dict(
     routeCurvatureMin=0.0, routeCurvatureMax=0.0, routeSFlipArc=2.5,
     routeHumanKappaCap=0.5, routeHumanPersist=0.6, routeHumanWeaveMin=0.4, routeHumanWeaveMax=1.0,
     routeHumanBigProbability=0.09, routeHumanBigAngleMinDeg=40.0, routeHumanBigAngleMaxDeg=180.0,
-    routeHumanCumCapDeg=190.0,
-    # human-route self-clearance: sections farther apart than the window along
-    # the route must stay at least this far apart in space, otherwise the ball's
-    # nearest-segment projection (global, as in training) can jump branches.
-    # 1.8 m = 2x the off-route fail distance (0.8 m) + margin, and still admits a
-    # single 180-deg turn at kappa_eff ~1.05 (legs 1.9 m apart).
-    routeMinClearanceM=1.8, routeClearanceWindowM=5.0,
     routeKvScale=0.75, routeVmax=2.0, routeLazyExtend=True, routeInitSegments=9,
     routeExtendChunk=1, routeExtendAheadMarginSegments=10,
     # optional training-style velocity onset (vfix planner): accel-limited speed
@@ -353,8 +346,18 @@ def csv_floats(s):
 #           ranges scaled by alpha (0 -> centers, 1 -> training DR); neither ->
 #           sample the full training DR. push_dv / ball_push_dv kick the base/ball
 #           every push_interval_s (random phase + direction).
-# Latency   ball_obs_delay_steps / action_delay_ms pin a channel exactly;
-#           None -> the --latency flag decides (random training latency DR).
+# Latency   bridge_delay_ms models the C++ sim2sim topic hop: the ball bridge
+#           publishes ball AND base state at 100 Hz from the physics thread, and
+#           the controller's subscriptions run in the CM executor thread, so the
+#           same-step publish never arrives before the policy tick -- every
+#           commandTerm-derived obs (ball pos/vel, base pose/ang-vel, obs frame,
+#           route input) is one publish period (10 ms = 2 sub-steps) stale, while
+#           joint pos/vel (CM read) stay fresh. Default 10 = C++ parity; 0 turns
+#           the hop off (legacy fresh-state behavior).
+#           ball_obs_delay_steps / action_delay_ms pin a SYNTHETIC channel on top
+#           (vision-pipeline / actuation-queue probes; the ball steps stack onto
+#           the bridge staleness); None -> the --latency flag decides (random
+#           training latency DR).
 # Tracking  record_speed_pairs: keep per-step (commanded speed, ball speed along
 #           the commanded direction) pairs for the speed-controllability test.
 DEFAULT_CONDITION = dict(
@@ -362,6 +365,7 @@ DEFAULT_CONDITION = dict(
     human_kappa_cap=None, lead_in_m=1.0, arc_angle_deg=None,
     offroute_fail_m=None, ball_far_fail_m=None, episode_s=None,
     push_dv=0.0, ball_push_dv=0.0, push_interval_s=5.0,
+    bridge_delay_ms=10.0,
     ball_obs_delay_steps=None, action_delay_ms=None, reset_jitter=False,
     dr=None, dr_scale=None, ball_damping=None, record_speed_pairs=False,
     route_start_speed=None, route_accel_limit=None,
@@ -389,9 +393,10 @@ DEFAULT_CONDITION = dict(
     # benchmark's ability to separate checkpoints.
     # The deeper reason: training noise is a REGULARIZER, not a measurement of
     # the deployment sensors -- nobody has measured those. This mirrors how
-    # conditions.DEPLOY_LATENCY pins latency to the deployment stack's value
-    # instead of sampling the training range. The obs_noise sweep group carries
-    # the sensitivity information (0 -> 4x), which is where it belongs.
+    # conditions.CPP_SIM2SIM_LATENCY pins synthetic latency to zero for C++
+    # sim2sim parity instead of sampling the training range. The obs_noise sweep
+    # group carries the sensitivity information (0 -> 4x), which is where it
+    # belongs.
     obs_noise_scale=0.0, actuator_gain_scale=None, payload_kg=None,
     base_com_scale=None, joint_offset_rad=None, ball_radius_obs_m=None,
     # leg+waist joint frictionloss (absolute N*m). None -> the trained nominal
@@ -421,10 +426,44 @@ def pearson_r(x, y, min_samples=100, min_x_std=1e-2):
     return float(np.corrcoef(x, y)[0, 1])
 
 
+def capability_success_verdicts(fell, kept_ball, fail_reason, completed):
+    """Return the three nested capability verdicts.
+
+    ``completed`` is NaN for routes with no finite geometry to finish, where
+    reaching the episode budget is sufficient. For finite arcs it is 0/1.
+    Keeping this logic pure makes the invariant auditable and testable without
+    constructing a MuJoCo episode.
+    """
+    possession = 1.0 if (not fell and kept_ball) else 0.0
+    route = 1.0 if (possession and fail_reason == "") else 0.0
+    strict = 1.0 if (route and completed != 0.0) else 0.0
+    return possession, route, strict
+
+
+class CppMt19937Uniform:
+    """libstdc++ ``mt19937 + uniform_real_distribution<double>`` in Python.
+
+    NumPy's legacy RandomState has the same standardized MT19937 state/seed and
+    uint32 stream, but its float conversion is different. libstdc++'s
+    ``generate_canonical`` combines two draws low-word first; spelling that out
+    makes route seed 42 describe the same random route in C++ and Python.
+    """
+    _R = 1 << 32
+
+    def __init__(self, seed):
+        self.state = np.random.RandomState(np.uint32(seed))
+
+    def uniform(self, low, high):
+        low_word = int(self.state.randint(0, self._R, dtype=np.uint32))
+        high_word = int(self.state.randint(0, self._R, dtype=np.uint32))
+        canonical = (low_word + high_word * self._R) / float(self._R * self._R)
+        return float(low + (high - low) * canonical)
+
+
 class Route:
     def __init__(self, cfg, seed):
         self.cfg = dict(cfg)   # own copy: --matrix conditions override vmax/length per robot
-        self.rng = np.random.Generator(np.random.PCG64(seed))
+        self.rng = CppMt19937Uniform(seed)
         self.const_kappa = None   # not None -> constant-curvature arc (signed 1/m)
         self.lead_segments = 0    # straight lead-in before the arc starts
         self.lead_range = None    # (min,max) m -> lead length drawn per episode from route rng
@@ -438,7 +477,6 @@ class Route:
         self._alloc()
         self.filled = 0; self.end_heading = 0.0; self.last_seg = -1
         self.h_sign = 1.0; self.big_remain = 0.0; self.big_sign = 1.0
-        self.heading_cum = 0.0
         self.last_s = 0.0; self.max_s = 0.0   # ball arc-length progress along the route
 
     def _alloc(self):
@@ -483,54 +521,26 @@ class Route:
                 self.arc_segments = None; self.arc_kappa_eff = None; self.arc_end_s = None
         max_seg = len(self.speed)
         origin = np.asarray(origin, float); forward = self._unit(np.asarray(forward, float))
-        if cmd_mode == 4:
-            # human routes are built EAGERLY and re-drawn (same rng stream, so a
-            # given route_seed stays deterministic) until no two far-apart route
-            # sections come closer than the clearance -> the ball can never sit
-            # nearer to another branch of its own route
-            best_clearance, best_state = -np.inf, None
-            for _ in range(30):
-                self._build(max_seg, True, origin, forward)
-                clearance = self._self_clearance()
-                if clearance >= self.cfg["routeMinClearanceM"]:
-                    best_state = None
-                    break
-                if clearance > best_clearance:
-                    best_clearance = clearance
-                    best_state = (self.points.copy(), self.speed.copy(),
-                                  self.end_heading, self.filled)
-            if best_state is not None:
-                self.points, self.speed, self.end_heading, self.filled = best_state
-        else:
-            init = (int(np.clip(self.cfg["routeInitSegments"], 1, max_seg))
-                    if self.cfg["routeLazyExtend"] else max_seg)
-            self._build(init, True, origin, forward)
+        # Match SoftTouchDribbleRoute exactly: every mode, including human, is
+        # initially built only to routeInitSegments and then extended in chunks
+        # as the ball advances. The previous Python-only eager build, 30x
+        # self-clearance rejection, and cumulative-heading governor changed both
+        # the route distribution and which future segments the global projection
+        # could see, so success/CT were not measuring the C++ task.
+        init = (int(np.clip(self.cfg["routeInitSegments"], 1, max_seg))
+                if self.cfg["routeLazyExtend"] else max_seg)
+        self._build(init, True, origin, forward)
         return self.update(origin)
-
-    def _self_clearance(self):
-        """Smallest spatial distance between route points farther apart than the
-        clearance window along the route (inf when the route is short)."""
-        ds = self.cfg["routeSegmentLength"]
-        window = int(self.cfg["routeClearanceWindowM"] / ds)
-        pts = self.points[: self.filled + 1]
-        if len(pts) <= window + 1:
-            return np.inf
-        dist = np.hypot(*(pts[None, :, :] - pts[:, None, :]).transpose(2, 0, 1))
-        index = np.arange(len(pts))
-        far = np.abs(index[None, :] - index[:, None]) > window
-        return float(dist[far].min())
 
     def update(self, ball_xy):
         """Serve the route command for the current ball position.
 
-        This reproduces training's LEGACY serve (dribble_env.py: nearest-segment
-        projection + per-segment speed lookup, no rate limiter, no served-speed
-        accel cap), which is what every checkpoint under checkpoints/ trained on
-        -- their env.yaml either lacks `route_v2_vel` or carries null. A
-        route_v2_vel=True checkpoint would need the v2 serve instead: an s*
-        projection rate limiter (ROUTE_PROJ_RATE_M = 0.06 m/step) and a 3.0 m/s^2
-        clamp on the served speed. Benchmarking one against this serve would
-        measure the serve, not the policy.
+        This matches the deployed C++ SoftTouchDribbleRoute serve: nearest
+        projection over the currently filled segments, per-segment speed lookup,
+        and no served-speed rate limiter. It also matches the legacy training
+        serve used by every checkpoint currently under checkpoints/. A future
+        route_v2_vel=True checkpoint would require an explicit deploy-stack
+        upgrade before this benchmark can evaluate it fairly.
 
         One known and accepted deviation from training's timing: the command is
         recomputed from the CURRENT ball state just before the observation is
@@ -578,7 +588,6 @@ class Route:
             theta = np.arctan2(forward[1], forward[0])
             self.h_sign = 1.0 if self._u(0, 1) < 0.5 else -1.0
             self.big_remain = 0.0; self.big_sign = 1.0; self.points[0] = org
-            self.heading_cum = 0.0   # net signed heading for the loop governor
         if self.const_kappa is not None:
             # constant-curvature arc (capability axis): straight lead-in so the
             # reset transient settles before the turn starts, then constant kappa
@@ -597,8 +606,8 @@ class Route:
             kappa = np.zeros(num)   # mode 0: straight line, speed = constant vmax
         heading = theta; point = np.asarray(org, float).copy()
         if init:
-            # ramp state restarts on every fresh build (incl. clearance re-draws);
-            # lazy extension continues from the stored end-of-route speed
+            # ramp state restarts on every fresh route; lazy extension continues
+            # from the stored end-of-route speed
             self._ramp_v = self.cfg.get("routeStartSpeed")
         for i in range(num):
             point = point + np.array([np.cos(heading), np.sin(heading)]) * ds
@@ -616,32 +625,19 @@ class Route:
     def _human_kappa(self, num):
         cap = self.cfg["routeHumanKappaCap"]; ds = self.cfg["routeSegmentLength"]
         amin = np.deg2rad(self.cfg["routeHumanBigAngleMinDeg"]); amax = np.deg2rad(self.cfg["routeHumanBigAngleMaxDeg"])
-        cum_cap = np.deg2rad(self.cfg["routeHumanCumCapDeg"])
         out = np.zeros(num)
         for i in range(num):
             in_big = self.big_remain > 0.0
             if not in_big and self._u(0, 1) < self.cfg["routeHumanBigProbability"]:
                 angle = self._u(amin, amax)
                 self.big_remain = max(2.0, np.ceil(angle / (cap * ds)))
-                sign = 1.0 if self._u(0, 1) < 0.5 else -1.0
-                # loop GOVERNOR (as in the training route builder): flip the turn
-                # direction when a same-direction turn would push the net signed
-                # heading past +/-cum_cap -> the route can never close a loop.
-                cum_sign = np.sign(self.heading_cum)
-                if (abs(self.heading_cum) + angle) > cum_cap and sign == cum_sign != 0.0:
-                    sign = -cum_sign
-                self.big_sign = sign; in_big = True
+                self.big_sign = 1.0 if self._u(0, 1) < 0.5 else -1.0
+                in_big = True
             if self._u(0, 1) > self.cfg["routeHumanPersist"]:
                 self.h_sign = -self.h_sign
-            # weave-side governor: this generator's weave is strong (0.4-1.0 x cap,
-            # unlike the near-straight cruise of the new training one), so weave
-            # drift alone can wind past the cap — beyond it, weave only back to 0
-            if abs(self.heading_cum) > cum_cap and self.h_sign == np.sign(self.heading_cum):
-                self.h_sign = -np.sign(self.heading_cum)
             mag = self._u(self.cfg["routeHumanWeaveMin"], self.cfg["routeHumanWeaveMax"]) * cap
             out[i] = self.big_sign * cap if in_big else self.h_sign * mag
             if in_big: self.big_remain -= 1.0
-            self.heading_cum += out[i] * ds
         return out
 
     def _extend(self):
@@ -700,6 +696,8 @@ def step_control_period(model, data, robots, standby_hold_s=0.0):
         for rb in robots:
             rb.apply(data)
         mujoco.mj_step(model, data)
+        for rb in robots:
+            rb.record_bridge(data)
     t = data.time
     return [j for j, rb in enumerate(robots)
             if rb.fell(data) or rb.fail_reason or (t - rb.ep_start) >= rb.episode_len]
@@ -974,6 +972,11 @@ class Robot:
         self.ball_radius_obs_m = None          # None -> feed the true (DR'd) radius
         self.obs_noise = {}
         self.obs_rng = np.random.Generator(np.random.PCG64(np.random.SeedSequence(0)))
+        # C++ bridge staleness: per-sub-step snapshot ring of everything the
+        # deploy controller reads from topics (see DEFAULT_CONDITION Latency)
+        self.bridge_delay = 0                  # sub-steps; reset() sets from the condition
+        self.bridge_hist = None
+        self._snap = None
 
     def apply_dr(self, model, dr):
         self.dr = dict(dr)
@@ -990,23 +993,21 @@ class Robot:
         model.geom_rbound[self.ball_geom] = r
         model.dof_damping[self.ballv:self.ballv + 3] = 0.0
         model.dof_damping[self.ballv + 3:self.ballv + 6] = c * I
-        # Contact friction, resolved the way PhysX resolves it in training.
-        # Each shape carries its own coefficient AND its own combine mode, and
-        # PhysX takes the HIGHER-priority mode of the pair
-        # (average < min < multiply < max). In this scene:
-        #   robot bodies  mu = dr["foot"] (G1_BODY_MATERIAL_DR 0.5-1.0), "average"
-        #                 (IsaacLab RigidBodyMaterialCfg default, never overridden)
-        #   ball          mu = dr["ball"] (0.475-0.525),                 "average"
-        #   terrain       mu = 1.0,                                      "multiply"
-        # ->  foot-floor : multiply wins -> mu_foot * 1.0 = dr["foot"]
-        #     floor-ball : multiply wins -> mu_ball * 1.0 = dr["ball"]
-        #     foot-ball  : both "average" -> (mu_foot + mu_ball) / 2
-        # The foot-ball pair used to get dr["ball"] alone, which is only right at
-        # the very bottom of the foot-friction range. It also meant the
-        # foot_friction sweep axis moved the foot-GROUND friction while leaving
-        # the foot-BALL friction pinned -- i.e. it measured half of what it
-        # claimed to. At the deploy nominal the correct value is (0.8+0.5)/2 =
-        # 0.65 against the 0.5 used before.
+        # Contact friction. MuJoCo's <pair> takes the EFFECTIVE coefficient
+        # directly, where PhysX derives it from the two materials plus a combine
+        # mode -- that difference is implementation, and the pair mechanism is
+        # what the deploy stack uses. But the effective VALUE is a physical
+        # parameter, so it comes from the materials training was calibrated on:
+        #   robot bodies  mu = dr["foot"] (0.5-1.0), combine "average"
+        #   ball          mu = dr["ball"] (0.475-0.525), combine "average"
+        #   terrain       mu = 1.0, combine "multiply"  (wins: multiply > average)
+        # ->  foot-floor  mu_foot * 1.0        = dr["foot"]   (MJCF declares 0.8)
+        #     floor-ball  mu_ball * 1.0        = dr["ball"]   (MJCF declares 0.5)
+        #     foot-ball   (mu_foot + mu_ball)/2 = 0.65 nominal (MJCF declares 0.5!)
+        # The MJCF's foot-ball value is the odd one out and is wrong for the
+        # materials it is meant to represent -- and since the C++ sim2sim drives
+        # the same MJCF, it inherits that error. The MJCF has been corrected to
+        # 0.65 alongside this, so both stacks get the right nominal.
         foot_ball = 0.5 * (ff + bf)
         for pid in self.foot_pairs:
             model.pair_friction[pid][0] = ff; model.pair_friction[pid][1] = ff
@@ -1161,7 +1162,7 @@ class Robot:
         # is reproduced -> conditions and experiments are compared on paired routes,
         # cancelling route-difficulty variance (which otherwise dwarfs the effects).
         if route_seed is not None:
-            self.route.rng = np.random.Generator(np.random.PCG64(int(route_seed)))
+            self.route.rng = CppMt19937Uniform(int(route_seed))
         condition = condition if condition is not None else self.default_condition
         # route-shape overrides (capability conditions); None -> global defaults.
         # route_vmax: scalar pins the pace; [min,max] samples it per episode from
@@ -1267,6 +1268,12 @@ class Robot:
         # sampling) is unchanged when everything is off.
         self.ball_pos_hist = None; self.ball_vel_hist = None
         self.ball_delay = 0; self.act_delay = 0
+        # bridge staleness (C++ topic hop, ball + base together). Independent of
+        # lat_active: it is the structural deploy-stack property, not a synthetic
+        # probe, and it consumes no rng.
+        self.bridge_delay = int(round(float(condition["bridge_delay_ms"] or 0.0)
+                                      / (model.opt.timestep * 1000.0)))
+        self.bridge_hist = None; self._snap = None
         pin_ball = condition["ball_obs_delay_steps"] is not None
         pin_act = condition["action_delay_ms"] is not None
         self.lat_active = self.latency or pin_ball or pin_act
@@ -1280,10 +1287,10 @@ class Robot:
             if self.rng.random() >= ACT_DELAY_ZERO_PROB:
                 self.act_delay = int(self.rng.integers(ACT_DELAY_SUBSTEPS[0], ACT_DELAY_SUBSTEPS[1] + 1))
         # ring depths sized to the actual delays (pinned delays can exceed the training range)
-        # Tiled with the RESET POSE, not the default joint pos: with the
-        # deploy-nominal 10 ms action lag the first control period's early
+        # Tiled with the RESET POSE, not the default joint pos: whenever an
+        # action-delay condition is nonzero, the first control period's early
         # sub-steps PD toward whatever is in this ring, so seeding it with dq gave
-        # every episode a small startup kick away from the pose it just reset to.
+        # the episode a small startup kick away from the pose it just reset to.
         self.tgt_hist = np.tile(data.qpos[self.qadr].copy(),
                                 (max(2, -(-self.act_delay // DECIMATION) + 1), 1))
         self.substep = 0
@@ -1329,24 +1336,63 @@ class Robot:
         self.offroute_since = None; self.max_crosstrack = 0.0
         self.off_route_t = float("nan"); self.completed_t = float("nan")
 
+    # bridge snapshot layout: bq 0:4 | pelvis 4:7 | bav 7:10 | ball_pos 10:13 |
+    # ball_vel 13:16 | fq 16:20 | fpos 20:23  (fq/fpos = the ball/cmd anchor
+    # frame -- pelvis, or chest for --v2_body_frame policies)
+    def _bridge_state(self, data):
+        bq = data.qpos[self.bq + 3:self.bq + 7]
+        pelvis = data.qpos[self.bq:self.bq + 3]
+        if self.chest_body is None:
+            fq, fpos = bq, pelvis
+        else:
+            fq = data.xquat[self.chest_body]
+            fpos = data.xpos[self.chest_body] + rot_vec(fq, self.chest_offset)
+        return np.concatenate([bq, pelvis, data.qvel[self.bv + 3:self.bv + 6],
+                               data.qpos[self.ballq:self.ballq + 3],
+                               data.qvel[self.ballv:self.ballv + 3], fq, fpos])
+
+    def record_bridge(self, data):
+        """Record one bridge sample; called after EVERY physics sub-step (the C++
+        bridge publishes on the 5 ms grid, sub-sampled to 100 Hz -- recording every
+        sub-step keeps the ring index a pure 'sub-steps ago')."""
+        if self.bridge_delay <= 0:
+            return
+        state = self._bridge_state(data)
+        if self.bridge_hist is None:
+            self.bridge_hist = np.tile(state, (self.bridge_delay + 1, 1))
+        else:
+            self.bridge_hist = np.roll(self.bridge_hist, 1, axis=0)
+            self.bridge_hist[0] = state
+
+    def _bridge_snapshot(self, data):
+        """The bridge sample the deploy controller would consume at this policy
+        tick: bridge_delay sub-steps old (the same-step publish never beats the
+        tick across the executor-thread hop). First tick after a reset sees the
+        reset state itself, matching the C++ bridge's publish-on-reset."""
+        if self.bridge_delay <= 0:
+            return self._bridge_state(data)
+        if self.bridge_hist is None:
+            self.bridge_hist = np.tile(self._bridge_state(data), (self.bridge_delay + 1, 1))
+        return self.bridge_hist[self.bridge_delay]
+
     def _obs(self, data):
-        bq = data.qpos[self.bq + 3:self.bq + 7]; pelvis = data.qpos[self.bq:self.bq + 3]
-        bav = data.qvel[self.bv + 3:self.bv + 6]
+        snap = self._snap if self._snap is not None else self._bridge_snapshot(data)
+        bq = snap[0:4]; pelvis = snap[4:7]
+        bav = snap[7:10]
         q = data.qpos[self.qadr] - self.dq; qd = data.qvel[self.vadr]
         cmd = self.cmd
         w, x, y, z = bq
         yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
         # anchor of the ball/cmd obs terms: pelvis root, or the chest frame
         # (torso_link + local offset, rotating with the waist DOFs) for
-        # --v2_body_frame policies
-        if self.chest_body is None:
-            fq, fpos = bq, pelvis
-        else:
-            fq = data.xquat[self.chest_body]
-            fpos = data.xpos[self.chest_body] + rot_vec(fq, self.chest_offset)
-        # ball obs in the anchor frame, optionally lagged by the per-episode camera latency
-        ball_b_cur = world_to_body(fq, data.qpos[self.ballq:self.ballq + 3] - fpos)
-        ball_vb_cur = world_to_body(fq, data.qvel[self.ballv:self.ballv + 3])
+        # --v2_body_frame policies. All of bq/pelvis/bav/fq/fpos/ball come from
+        # the SAME bridge snapshot -- in the C++ path they are one consistent
+        # 100 Hz publish, one hop (bridge_delay) old -- while joint q/qd above
+        # are fresh (the CM read). ball_obs_delay_steps stacks its synthetic
+        # per-policy-step lag on top of that staleness.
+        fq = snap[16:20]; fpos = snap[20:23]
+        ball_b_cur = world_to_body(fq, snap[10:13] - fpos)
+        ball_vb_cur = world_to_body(fq, snap[13:16])
         if self.lat_active:
             if self.ball_pos_hist is None:
                 K = self.ball_delay + 1
@@ -1409,7 +1455,11 @@ class Robot:
 
     def policy_step(self, data, hold=False, settle=False):
         self._holding = hold
-        self.cmd = self.route.update(data.qpos[self.ballq:self.ballq + 2].copy())
+        # one bridge snapshot per tick: the route command (refreshRouteCommand)
+        # and every commandTerm-derived obs term consume the SAME stale sample,
+        # exactly like the C++ controller update
+        self._snap = self._bridge_snapshot(data)
+        self.cmd = self.route.update(self._snap[10:12].copy())
         self._update_dots(data)
         if hold:
             # deploy standby hold: stiff PD toward the standby pose (no policy),
@@ -1615,9 +1665,8 @@ class Robot:
             completed = 1.0 if self.route.max_s >= self.route.arc_end_s + 0.5 else 0.0
         if self.offroute_fail_m is not None or self.ball_far_fail_m is not None:
             kept_ball = not self.ball_lost[LOST_BALL_MAIN_IDX]
-            success_possession = 1.0 if (not fell and kept_ball) else 0.0
-            success_route = 1.0 if (success_possession and fail_reason == "") else 0.0
-            success = 1.0 if (fail_reason == "" and completed != 0.0) else 0.0
+            success_possession, success_route, success = capability_success_verdicts(
+                fell, kept_ball, fail_reason, completed)
         # Controllability. r alone does NOT measure it: correlation is invariant
         # to scale and offset, so a policy that runs at a constant 0.5x the
         # commanded speed scores r = 1.0. The regression of actual on commanded
