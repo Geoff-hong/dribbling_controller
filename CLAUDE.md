@@ -21,6 +21,23 @@ validating a simulator against itself, which measures nothing.
   CORRECT because the C++ system interface computes the same explicit torque
   against the same MJCF.
 
+## Branch model (since 2026-07-26 history split)
+- `main` = the C++/ROS 2 deploy stack ONLY. No benchmark/eval code.
+- `benchmark` = full tree: everything on main PLUS `sim2sim_benchmark/`,
+  `tests/`, `tools/calibration/`. All eval work happens on this branch.
+- Sync is ONE-WAY: on `benchmark`, periodically run `git merge main`.
+  NEVER merge `benchmark` into `main`. Promote a validated asset (e.g. a
+  winning mjcf variant) to main by cherry-pick, not merge.
+- Commit routing: changes to `mjcf/`, `config/`, C++ code, launch files and
+  deploy tools go on `main` — even when motivated by benchmark work (the MJCF
+  is common ground; committing it on main keeps both stacks on one model).
+  Experimental mjcf variants under evaluation stay on `benchmark` until they
+  win. `sim2sim_benchmark/`, `tests/`, `tools/calibration/` go on `benchmark`.
+- Docs: `README.md` (main) covers deploy; eval docs live in
+  `sim2sim_benchmark/README.md` (benchmark branch). Edit CLAUDE.md on main
+  only, so it flows to benchmark via merge without conflicts.
+- Old pre-split history is archived at tag `backup/pre-split-20260726`.
+
 ## Workflow
 - **Eval artifacts: keep only valid runs.** If a play/eval turns out to be
   misconfigured (wrong friction/DR, wrong era, wrong mode mix — anything that
