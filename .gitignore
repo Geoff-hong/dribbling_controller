@@ -21,3 +21,15 @@ data/
 
 # Local checkpoint scratch dir
 temp_checkpoints/
+
+# Local editor / agent state
+.vscode/
+.agents/
+.codex/
+
+# MuJoCo viewer debug dumps (F-key exports) and logs
+/MJDATA.TXT
+/MJMODEL.TXT
+/MUJOCO_LOG.TXT
+/mjmodel.mjb
+/mjmodel.xml
