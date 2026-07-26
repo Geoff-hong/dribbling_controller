@@ -1,0 +1,35 @@
+# Local Claude Code state
+.claude/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Sim2sim evaluation artifacts (large media / generated)
+eval_result/
+sim2sim_eval_results/
+*.mp4
+
+# Local checkpoint symlink to external SoftTouch dir
+/checkpoints
+
+# DR sweep generated MJCF variants
+mjcf/dr_variants/
+
+# Local scratch data (report smoke tests, browser profiles)
+data/
+
+# Local checkpoint scratch dir
+temp_checkpoints/
+
+# Local editor / agent state
+.vscode/
+.agents/
+.codex/
+
+# MuJoCo viewer debug dumps (F-key exports) and logs
+/MJDATA.TXT
+/MJMODEL.TXT
+/MUJOCO_LOG.TXT
+/mjmodel.mjb
+/mjmodel.xml
