@@ -24,6 +24,31 @@ import onnxruntime as ort
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # dribbling_controller/
 SINGLE_MJCF = os.path.join(REPO_DIR, "mjcf", "g1_softtouch_dribble.xml")
+# foot collision variant: the 7 capsules per foot replaced by the ankle_roll
+# STL mesh (one geom + one floor/ball pair per side); everything else identical
+MESHFOOT_MJCF = os.path.join(REPO_DIR, "mjcf", "g1_softtouch_dribble_meshfoot.xml")
+# hybrid variant: the 7 capsules keep floor contact + self-collision, and a
+# contype=0 ankle_roll STL mesh geom carries the ball contact via explicit
+# <pair>s (auto capsule-ball contacts are cut by <exclude>) — OP3-style split
+HYBRIDFOOT_MJCF = os.path.join(REPO_DIR, "mjcf", "g1_softtouch_dribble_hybridfoot.xml")
+_DEFAULT_SINGLE_MJCF = SINGLE_MJCF
+
+
+def set_meshfoot(on):
+    """Select the mesh-foot-collision MJCF variant for every world built after
+    this call. Clears the single-robot XML cache — an already-compiled model is
+    unaffected, so flip this BEFORE build_world()/compose()."""
+    global SINGLE_MJCF
+    SINGLE_MJCF = MESHFOOT_MJCF if on else _DEFAULT_SINGLE_MJCF
+    _single_robot_xml.cache_clear()
+
+
+def set_hybridfoot(on):
+    """Capsules for floor contact, ankle_roll STL mesh for ball contact only.
+    Same cache semantics as set_meshfoot()."""
+    global SINGLE_MJCF
+    SINGLE_MJCF = HYBRIDFOOT_MJCF if on else _DEFAULT_SINGLE_MJCF
+    _single_robot_xml.cache_clear()
 # default policy/reset pair: the DR-trained v2 checkpoint committed under
 # checkpoints/, which was trained with standby-pose reset mixing -> standby reset
 DEFAULT_ONNX = os.path.join(REPO_DIR, "checkpoints", "g1_dribble_s3_human_dr_iter80000",
@@ -40,10 +65,30 @@ ROUTE_CFG = dict(
     # optional training-style velocity onset (vfix planner): accel-limited speed
     # profile from routeStartSpeed along arc length. None -> legacy step commands.
     routeStartSpeed=None, routeAccelLimit=None,
+    # ---- v2 velocity chain (training route_v2_vel=True; SPEED_MODEL_V2.md) ----
+    # routeV2Vel=True replicates the TRAINING speed model for v2vel checkpoints:
+    # per-episode cruise mixture + pace modulation on the raw bound, two-slope
+    # brake + two-stage accel planning, and a windowed / rate-limited / C1
+    # B-spline serve. The C++ deploy stack still serves the legacy law, so this
+    # switch is a training-faithful PROBE, not deploy parity. Values below are
+    # the training class defaults (env.yaml null = default is live).
+    routeV2Vel=False,
+    routeCruiseRange=(1.1, 2.0), routeCruiseSlowRange=(0.5, 1.1), routeCruiseSlowProb=0.25,
+    routePaceModDepthRange=(0.0, 0.5), routePaceModWavelengthRange=(3.5, 6.0),
+    routeBrakeSlopeNear=1.0, routeBrakeSlopeFar=0.5, routeBrakeDumpDv=1.25,
+    routeAccelBurst=2.0, routeAccelBurstVmax=1.3, routeAccelSustain=0.6,
+    routeV2StartSpeed=0.6, routeProjWindowBackSegs=2, routeProjWindowFwdSegs=8,
+    routeProjRateM=0.06, routeCmdAccelCap=3.0,
+    routeNextSpeedArcM=1.8,   # LOOKAHEAD + PREVIEW_ARC (training NEXT_SPEED_ARC_M=None)
+    # training lazy-extend cadence for the v2 plan (init/chunk/margin 22/10/22,
+    # not the C++ 9/1/10): the virtual-stop tail of a partial plan must stay
+    # beyond the obs horizon or extensions become visible obs steps (D5)
+    routeV2InitSegments=22, routeV2ExtendChunk=10, routeV2AheadMarginSegments=22,
 )
 CMD_MODE = 4
 JOINT_LIMIT_FACTOR = 0.9
 DECIMATION = 4
+CONTROL_DT = 0.02   # policy period: 0.005 s physics * DECIMATION (training step_dt)
 # Fall criterion, matched term-for-term to the TRAINING termination
 # (multiagent_sim/tasks/kick/mdp/terminations.py:fall, which the checkpoints'
 # env.yaml selects): pelvis below height_min OR tilted past ~45 deg, where the
@@ -124,6 +169,10 @@ ACT_DELAY_ZERO_PROB = 0.3
 EFFORT_LIMIT = np.array([88., 88., 88., 139., 139., 50., 88., 88., 50., 139., 139.,
                          25., 25., 50., 50., 25., 25., 50., 50., 25., 25., 25., 25.,
                          25., 25., 5., 5., 5., 5.])
+# URDF no-load speed limits, per joint (rad/s): knee-class 20, hip-class 32,
+# everything else 37. Used by the motor_curve torque-speed ceiling.
+VEL_LIMIT = np.where(EFFORT_LIMIT == 139., 20.,
+                     np.where(EFFORT_LIMIT == 88., 32., 37.))
 JLO = np.array([-2.5307, -2.5307, -2.618, -0.5236, -2.9671, -0.52, -2.7576, -2.7576, -0.52,
                 -0.087267, -0.087267, -3.0892, -3.0892, -0.87267, -0.87267, -1.5882, -2.2515,
                 -0.2618, -0.2618, -2.618, -2.618, -1.0472, -1.0472, -1.97222, -1.97222,
@@ -172,6 +221,16 @@ SWEEP_RANGES = dict(ball_mass=(0.3325, 0.4495), ball_radius=(0.09, 0.11),
 # Reference points: 4.0 = grass calibration (the trained value), 0.9 = the
 # 2026-07-17 hardware measurement on the indoor test floor (free-roll k ~0.26/s).
 BALL_DAMPING = 4.0
+
+# Rigid-ground contact stiffness: the solref timeconst the MJCF declares on the
+# foot-floor <pair>s. A condition's ground_solref_tc overrides it per robot (the
+# soft/elastic-ground probe); None restores this default on the next reset.
+GROUND_SOLREF_TC = 0.01
+
+# Ball-floor ROLLING friction the MJCF declares (Coulomb roll brake — stops a
+# slow ball dead, unlike the viscous damping which lets it creep forever).
+# 2026-07-24 turf decay fit: a = 0.120 + 0.465*v -> coeff ~0.0017 with c=1.63.
+BALL_ROLL_FRIC = 0.0001
 
 # ---- robot-side DR --------------------------------------------------------
 # Everything above perturbs the BALL. These four channels perturb the ROBOT, and
@@ -375,6 +434,12 @@ DEFAULT_CONDITION = dict(
     ball_obs_delay_steps=None, action_delay_ms=None, reset_jitter=False,
     dr=None, dr_scale=None, ball_damping=None, record_speed_pairs=False,
     route_start_speed=None, route_accel_limit=None,
+    # v2 speed-model probe (route_v2_vel=True checkpoints): serve the TRAINING
+    # v2 velocity chain instead of the legacy/C++ law. route_cruise: None ->
+    # training cruise mixture (normal + slow episodes); scalar -> pin cruise
+    # AND kill pace modulation (clean constant-pace probe); [min,max] -> sample
+    # cruise there per episode (slow mixture off, modulation on).
+    route_v2_vel=False, route_cruise=None,
     # Task-start ball placement. reset_ball_random=False -> the fixed
     # RESET_BALL_DIST_DEFAULT straight ahead (bit-identical to the legacy reset,
     # no rng consumed). True -> place at dist * (forward rotated by bearing),
@@ -407,7 +472,36 @@ DEFAULT_CONDITION = dict(
     base_com_scale=None, joint_offset_rad=None, ball_radius_obs_m=None,
     # leg+waist joint frictionloss (absolute N*m). None -> the trained nominal
     # (0 for the frictionless lineage); a scalar pins it (the joint_friction axis).
-    joint_friction=None)
+    joint_friction=None,
+    # Soft/elastic-ground probe: solref timeconst (s) on the foot-floor pairs.
+    # None -> the MJCF rigid default (GROUND_SOLREF_TC); larger = springier
+    # ground the foot sinks into (dampratio stays 1, critically damped). Static
+    # sink under single-leg support is roughly g*tc^2: 0.03 ~ 1 cm, 0.05 ~ 2.5 cm.
+    ground_solref_tc=None,
+    # Ball-floor rolling friction coefficient (Coulomb roll brake). None -> the
+    # MJCF default (BALL_ROLL_FRIC). Pairs with ball_damping: turf calibration
+    # 2026-07-24 is ball_roll_fric=0.0017 + ball_damping=1.63.
+    ball_roll_fric=None,
+    # Ball contact solref dampratio on the floor-ball and foot-ball pairs.
+    # None -> the MJCF critically-damped 1.0 (impact restitution e~0.2, a dead
+    # ball). 0.6 measured e~0.57 at kick speeds (real ball vs shoe 0.5-0.65);
+    # e collapses toward 0 at low impact speeds, so gentle dribbling touches
+    # are unaffected. <=0.3 is numerically unstable (energy gain) - avoid.
+    ball_bounce_dampratio=None,
+    # Mocap-imperfection probes (2026-07 sim2real). ball_obs_bias: constant
+    # WORLD-frame offset (x,y,z m) on the observed ball center (visible-surface
+    # centroid bias; measured harmless up to 6 cm). chest_yaw_bias_deg: constant
+    # BODY-frame yaw miscalibration of the obs-frame rigid body (5 deg harmless,
+    # >=10 deg doubles ball_lost, 20 deg accelerates falls).
+    ball_obs_bias=None, chest_yaw_bias_deg=None,
+    # Motor realism. motor_curve: enable the linear torque-speed ceiling
+    # tau_max(w) = peak * (1 - |w|/VEL_LIMIT) (the flat URDF-peak clip is
+    # optimistic at swing speeds). motor_peak_scale: scale EFFORT_LIMIT for the
+    # firmware variant (G1 basic knee 90 -> ~0.65, EDU knee 120 -> ~0.86).
+    motor_curve=False, motor_peak_scale=None,
+    # motor_vel_scale: shrink the curve's zero-torque speed to scale*VEL_LIMIT
+    # (1.0 = URDF no-load speed; 0.5 = twice as steep, torque dies at half speed)
+    motor_vel_scale=None)
 
 
 def make_condition(**overrides):
@@ -470,6 +564,13 @@ class Route:
     def __init__(self, cfg, seed):
         self.cfg = dict(cfg)   # own copy: --matrix conditions override vmax/length per robot
         self.rng = CppMt19937Uniform(seed)
+        # v2 speed-param stream, SEPARATE from the geometry rng: the same
+        # route_seed then produces identical route geometry with v2 on or off,
+        # so the speed models can be A/B-compared on paired routes
+        self.rng2 = CppMt19937Uniform(seed + 7919)
+        self.v2 = False           # routeV2Vel, latched per episode at reset()
+        self.cruise_override = None   # (lo,hi) from route_cruise; None -> training mixture
+        self.cruise_pinned = False    # scalar route_cruise: also kills pace modulation
         self.const_kappa = None   # not None -> constant-curvature arc (signed 1/m)
         self.lead_segments = 0    # straight lead-in before the arc starts
         self.lead_range = None    # (min,max) m -> lead length drawn per episode from route rng
@@ -489,8 +590,11 @@ class Route:
         n = max(1, int(round(self.cfg["routeLength"] / max(self.cfg["routeSegmentLength"], 1e-9))))
         if not hasattr(self, "speed") or len(self.speed) != n:
             self.points = np.zeros((n + 1, 2)); self.speed = np.zeros(n)
+            self.speed_raw = np.zeros(n)   # v2: pre-plan bound (training route_speed_raw)
 
     def _u(self, lo, hi): return self.rng.uniform(lo, hi)
+
+    def _u2(self, lo, hi): return self.rng2.uniform(lo, hi)
 
     @staticmethod
     def _unit(v):
@@ -500,11 +604,28 @@ class Route:
         self.cmd_mode = cmd_mode; self.cmd_sign = -1.0 if cmd_mode == 2 else 1.0
         self.last_seg = -1; self.filled = 0
         self.last_s = 0.0; self.max_s = 0.0
+        self._s_prev = 0.0; self._v_prev = None   # v2 serve state (projection + speed clamp)
         self._alloc()   # condition overrides may have changed routeLength
         # per-episode cruise pace (training samples ROUTE_CRUISE_RANGE the same way);
         # drawn from the route rng -> route_seed reproduces the pace too
         if self.vmax_range is not None:
             self.cfg["routeVmax"] = float(self._u(*self.vmax_range))
+        self.v2 = bool(self.cfg.get("routeV2Vel"))
+        if self.v2:
+            # Per-episode v2 speed-law params, all drawn unconditionally from the
+            # dedicated rng2 stream (fixed draw count -> the stream stays aligned
+            # across conditions; geometry rng untouched -> paired routes).
+            lo, hi = (self.cruise_override if self.cruise_override is not None
+                      else self.cfg["routeCruiseRange"])
+            slow = self._u2(0.0, 1.0) < self.cfg["routeCruiseSlowProb"]
+            cr_norm = self._u2(lo, hi)
+            cr_slow = self._u2(*self.cfg["routeCruiseSlowRange"])
+            use_slow = slow and self.cruise_override is None
+            self.cruise = min(cr_slow if use_slow else cr_norm, self.cfg["routeVmax"])
+            depth = self._u2(*self.cfg["routePaceModDepthRange"])
+            self.pace_depth = 0.0 if self.cruise_pinned else depth
+            self.pace_wavelen = self._u2(*self.cfg["routePaceModWavelengthRange"])
+            self.pace_phase = self._u2(0.0, 2.0 * np.pi)
         # turn-into-corner test: draw per-episode lead length / arc angle from the
         # route rng (route_seed-controlled -> the same seed reproduces the same
         # lead+angle across conditions and experiments, pairing the comparisons)
@@ -533,7 +654,8 @@ class Route:
         # self-clearance rejection, and cumulative-heading governor changed both
         # the route distribution and which future segments the global projection
         # could see, so success/CT were not measuring the C++ task.
-        init = (int(np.clip(self.cfg["routeInitSegments"], 1, max_seg))
+        init_key = "routeV2InitSegments" if self.v2 else "routeInitSegments"
+        init = (int(np.clip(self.cfg[init_key], 1, max_seg))
                 if self.cfg["routeLazyExtend"] else max_seg)
         self._build(init, True, origin, forward)
         return self.update(origin)
@@ -541,12 +663,14 @@ class Route:
     def update(self, ball_xy):
         """Serve the route command for the current ball position.
 
-        This matches the deployed C++ SoftTouchDribbleRoute serve: nearest
-        projection over the currently filled segments, per-segment speed lookup,
-        and no served-speed rate limiter. It also matches the legacy training
-        serve used by every checkpoint currently under checkpoints/. A future
-        route_v2_vel=True checkpoint would require an explicit deploy-stack
-        upgrade before this benchmark can evaluate it fairly.
+        Default (legacy) serve matches the deployed C++ SoftTouchDribbleRoute:
+        nearest projection over the currently filled segments, per-segment speed
+        lookup, and no served-speed rate limiter — the serve every pre-v2vel
+        checkpoint trained against. With routeV2Vel the v2 TRAINING serve runs
+        instead (_update_v2: windowed projection, s* rate limiter, C1 B-spline
+        speed + accel cap), for route_v2_vel=True checkpoints. The C++ stack has
+        NOT been upgraded to the v2 serve, so v2 here probes the training-side
+        command model, not deploy parity.
 
         One known and accepted deviation from training's timing: the command is
         recomputed from the CURRENT ball state just before the observation is
@@ -555,6 +679,8 @@ class Route:
         the 0.8 m off-route threshold.
         """
         self._extend(); ball_xy = np.asarray(ball_xy, float)
+        if self.v2:
+            return self._update_v2(ball_xy)
         filled = max(1, self.filled)
         # a tight constant-curvature arc revisits the same xy after one lap, so a
         # GLOBAL nearest-segment projection can jump back a whole lap; restrict the
@@ -580,6 +706,60 @@ class Route:
                     target_dir=self._unit(self._point_at(s + self.cfg["routeLookahead"]) - ball_xy),
                     next_target_dir=self._unit(self._point_at(s + self.cfg["routeLookahead"] + self.cfg["routePreviewArc"]) - ball_xy),
                     crosstrack=float(np.sqrt(best_d2)))
+
+    def _update_v2(self, ball_xy):
+        """Training v2 serve (_update_cmd_from_field, route_v2_vel=True).
+
+        P1a windowed projection around the previous match (kills leg-flip
+        teleports on reversals), P1b per-step s* rate limiter, P2 C1 quadratic
+        B-spline speed serve with a per-step accel cap; next speed is the spline
+        at s* + routeNextSpeedArcM (1.8 m, NOT the 0.8 m legacy lookahead).
+        Direction stays the same pure-pursuit law as the legacy serve."""
+        ds = self.cfg["routeSegmentLength"]
+        last_fill = max(0, self.filled - 1)
+        prev = self.last_seg if self.last_seg >= 0 else 0
+        lo = max(0, prev - int(self.cfg["routeProjWindowBackSegs"]))
+        hi = min(last_fill, prev + int(self.cfg["routeProjWindowFwdSegs"]))
+        best_d2 = np.inf; best_t = 0.0; best_seg = lo
+        for i in range(lo, hi + 1):
+            a = self.points[i]; b = self.points[i + 1]; ab = b - a
+            ab2 = max(ab @ ab, 1e-9)
+            t = np.clip((ball_xy - a) @ ab / ab2, 0.0, 1.0); proj = a + t * ab
+            d2 = (ball_xy - proj) @ (ball_xy - proj)
+            if d2 < best_d2:
+                best_d2, best_t, best_seg = d2, t, i
+        s_cand = (best_seg + best_t) * ds
+        rate = self.cfg["routeProjRateM"]
+        s_star = max(0.0, min(max(s_cand, self._s_prev - rate), self._s_prev + rate))
+        self._s_prev = s_star
+        self.last_seg = min(int(s_star / ds), last_fill)
+        self.last_s = s_star; self.max_s = max(self.max_s, s_star)
+        # cross-track vs the rate-limited projection point (== perpendicular
+        # distance whenever the limiter is inactive, the honest-tracking case)
+        ct = float(np.linalg.norm(ball_xy - self._point_at(s_star)))
+        v_raw = self._speed_spline(s_star)
+        v_cap = self.cfg["routeCmdAccelCap"] * CONTROL_DT
+        v = (v_raw if self._v_prev is None
+             else float(np.clip(v_raw, self._v_prev - v_cap, self._v_prev + v_cap)))
+        self._v_prev = v
+        return dict(target_speed=v,
+                    next_target_speed=self._speed_spline(s_star + self.cfg["routeNextSpeedArcM"]),
+                    target_dir=self._unit(self._point_at(s_star + self.cfg["routeLookahead"]) - ball_xy),
+                    next_target_dir=self._unit(self._point_at(s_star + self.cfg["routeLookahead"] + self.cfg["routePreviewArc"]) - ball_xy),
+                    crosstrack=ct)
+
+    def _speed_spline(self, s):
+        """C1 uniform quadratic B-spline over the planned speed nodes (node j at
+        s = j*ds, evaluated at span parameter t = s/ds - j + 0.5), indices
+        clamped to the filled range — training _route_speed_at_arclen."""
+        ds = self.cfg["routeSegmentLength"]
+        last = max(0, self.filled - 1)
+        u = s / ds
+        jn = int(np.floor(u + 0.5))
+        t = float(np.clip(u - jn + 0.5, 0.0, 1.0))
+        jm = min(max(jn - 1, 0), last); j0 = min(max(jn, 0), last); jp = min(max(jn + 1, 0), last)
+        b0 = 0.5 * (1.0 - t) ** 2; b2 = 0.5 * t * t; b1 = 1.0 - b0 - b2
+        return float(b0 * self.speed[jm] + b1 * self.speed[j0] + b2 * self.speed[jp])
 
     def _point_at(self, arc):
         max_f = max(0.0, self.filled - 1e-4)
@@ -619,14 +799,31 @@ class Route:
             point = point + np.array([np.cos(heading), np.sin(heading)]) * ds
             self.points[seg_off + 1 + i] = point
             kabs = max(abs(kappa[i]), 1e-3)
-            v = min(self.cfg["routeVmax"], np.sqrt(self.cfg["routeKvScale"] / kabs))
-            if self.cfg.get("routeAccelLimit"):
-                v0 = v if self._ramp_v is None else self._ramp_v
-                v = min(v, np.sqrt(v0 * v0 + 2.0 * self.cfg["routeAccelLimit"] * ds))
-                self._ramp_v = v
-            self.speed[seg_off + i] = v
+            kv = np.sqrt(self.cfg["routeKvScale"] / kabs)
+            if self.v2:
+                # v2 raw bound: min(kv-coupling, modulated cruise). The legacy
+                # routeStartSpeed/routeAccelLimit vfix knobs are ignored here —
+                # the v2 planner below IS the training onset/brake shaping.
+                s_abs = (seg_off + i) * ds
+                cmod = self.cruise * (1.0 + 0.5 * self.pace_depth
+                                      * np.sin(2.0 * np.pi * s_abs / self.pace_wavelen
+                                               + self.pace_phase))
+                v = min(kv, float(np.clip(cmod, 0.4, self.cfg["routeVmax"])))
+                self.speed_raw[seg_off + i] = v
+            else:
+                v = min(self.cfg["routeVmax"], kv)
+                if self.cfg.get("routeAccelLimit"):
+                    v0 = v if self._ramp_v is None else self._ramp_v
+                    v = min(v, np.sqrt(v0 * v0 + 2.0 * self.cfg["routeAccelLimit"] * ds))
+                    self._ramp_v = v
+                self.speed[seg_off + i] = v
             heading += kappa[i] * ds
         self.end_heading = heading; self.filled = seg_off + num
+        if self.v2:
+            if init:
+                # start clamp baked into raw[0] (survives re-plans, training P0.4)
+                self.speed_raw[0] = min(self.speed_raw[0], self.cfg["routeV2StartSpeed"])
+            self._plan(init)
 
     def _human_kappa(self, num):
         cap = self.cfg["routeHumanKappaCap"]; ds = self.cfg["routeSegmentLength"]
@@ -646,11 +843,51 @@ class Route:
             if in_big: self.big_remain -= 1.0
         return out
 
+    def _plan(self, init):
+        """Training _plan_route_speed (v2): derive the served speed from the raw
+        bound over the filled prefix — virtual stop at a partial fill end,
+        backward two-slope hold-then-dump brake, forward two-stage accel in v²
+        space. All passes are min-plus scans (cummin over x − c·j), run on the
+        whole filled prefix after every build/extension so extensions can RAISE
+        the tail where new segments removed end-of-route pessimism."""
+        ds = self.cfg["routeSegmentLength"]
+        near = self.cfg["routeBrakeSlopeNear"]; far = self.cfg["routeBrakeSlopeFar"]
+        b_off = self.cfg["routeBrakeDumpDv"] * (1.0 - far / near)
+        m = self.filled
+        idx = np.arange(m, dtype=float)
+        spd = self.speed_raw[:m].copy()
+        if m < len(self.speed):
+            # lazy partial fill: plan to a full stop at the filled end, so the
+            # not-yet-built continuation can only raise speeds later (D5)
+            d_end = (m - idx) * ds
+            spd = np.minimum(spd, np.minimum(near * d_end, b_off + far * d_end))
+        g1 = spd + idx * (near * ds)
+        h1 = np.minimum.accumulate(g1[::-1])[::-1]
+        g2 = spd + idx * (far * ds)
+        h2 = np.minimum.accumulate(g2[::-1])[::-1]
+        spd = np.minimum(spd, np.minimum(h1 - idx * (near * ds),
+                                         h2 - idx * (far * ds) + b_off))
+        if init:
+            spd[0] = min(spd[0], self.cfg["routeV2StartSpeed"])
+        a_b = self.cfg["routeAccelBurst"]; a_s = self.cfg["routeAccelSustain"]
+        rho = a_s / a_b; vb2 = self.cfg["routeAccelBurstVmax"] ** 2
+        cb = 2.0 * a_b * ds; cs = 2.0 * a_s * ds
+        u = spd * spd
+        below = u <= vb2
+        s1 = np.minimum.accumulate(np.where(below, u, np.inf) - idx * cb) + idx * cb
+        s2 = (np.minimum.accumulate(np.where(below, rho * u, np.inf) - idx * cs)
+              + idx * cs + vb2 * (1.0 - rho))
+        s3 = np.minimum.accumulate(np.where(~below, u, np.inf) - idx * cs) + idx * cs
+        u_lim = np.minimum(np.minimum(s1, s2), s3)
+        self.speed[:m] = np.minimum(spd, np.sqrt(u_lim))
+
     def _extend(self):
         if not self.cfg["routeLazyExtend"] or self.last_seg < 0: return
         max_seg = len(self.speed)
-        if self.filled >= max_seg or (self.filled - self.last_seg) >= self.cfg["routeExtendAheadMarginSegments"]: return
-        num = min(self.cfg["routeExtendChunk"], max_seg - self.filled)
+        margin_key = "routeV2AheadMarginSegments" if self.v2 else "routeExtendAheadMarginSegments"
+        chunk_key = "routeV2ExtendChunk" if self.v2 else "routeExtendChunk"
+        if self.filled >= max_seg or (self.filled - self.last_seg) >= self.cfg[margin_key]: return
+        num = min(self.cfg[chunk_key], max_seg - self.filled)
         if num > 0: self._build(num, False)
 
 
@@ -739,10 +976,18 @@ def _single_robot_xml(visual):
     if visual:
         return open(SINGLE_MJCF).read()
     root = ET.parse(SINGLE_MJCF).getroot()
+    # meshes referenced by COLLISION geoms (the meshfoot variant) must survive
+    # the strip, or headless worlds would silently lose the foot contacts
+    keep = {g.attrib["mesh"] for g in root.iter("geom")
+            if "mesh" in g.attrib and g.attrib.get("class") == "collision"}
     for parent in root.iter():
         for child in list(parent):
-            if child.tag == "mesh" or (child.tag == "geom" and "mesh" in child.attrib):
-                parent.remove(child)
+            if child.tag == "mesh":
+                if child.attrib.get("name", child.attrib.get("file", "")) not in keep:
+                    parent.remove(child)
+            elif child.tag == "geom" and "mesh" in child.attrib:
+                if child.attrib.get("class") != "collision":
+                    parent.remove(child)
     return ET.tostring(root, encoding="unicode")
 
 
@@ -926,6 +1171,10 @@ class Robot:
             nm = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_PAIR, pid)
             if nm is None or not nm.startswith(self.pfx):
                 continue
+            if "shinshell" in nm:
+                # shin-ball geometry pair (hybridfoot): fixed params that mirror
+                # the auto contact it replaces — exempt from foot/ball DR rewrites
+                continue
             if "ball" not in nm:
                 self.foot_pairs.append(pid)
             elif "floor" in nm:
@@ -975,6 +1224,14 @@ class Robot:
         self.push_dv = 0.0; self.ball_push_dv = 0.0; self.push_interval_s = 5.0
         self.next_push_t = None; self.next_ball_push_t = None
         self.ball_damping = None               # per-condition override; None -> BALL_DAMPING
+        self.ground_solref_tc = None           # per-condition override; None -> GROUND_SOLREF_TC
+        self.ball_roll_fric = None             # per-condition override; None -> BALL_ROLL_FRIC
+        self.ball_bounce_dampratio = None      # per-condition override; None -> MJCF 1.0
+        self.ball_obs_bias = None              # world-frame ball-center estimate bias
+        self.chest_bias_quat = None            # obs-frame calibration error (body yaw)
+        self.motor_curve = False               # torque-speed ceiling on
+        self.motor_vel_scale = 1.0             # curve steepness (zero-torque speed scale)
+        self.effort_limit = EFFORT_LIMIT       # per-episode peak (variant scale)
         self.ball_radius_obs_m = None          # None -> feed the true (DR'd) radius
         self.obs_noise = {}
         self.obs_rng = np.random.Generator(np.random.PCG64(np.random.SeedSequence(0)))
@@ -1020,8 +1277,23 @@ class Robot:
             model.pair_friction[pid][0] = ff; model.pair_friction[pid][1] = ff
         for pid in self.foot_ball_pairs:
             model.pair_friction[pid][0] = foot_ball; model.pair_friction[pid][1] = foot_ball
+        rf = (BALL_ROLL_FRIC if self.ball_roll_fric is None
+              else float(self.ball_roll_fric))
+        zeta = (1.0 if self.ball_bounce_dampratio is None
+                else float(self.ball_bounce_dampratio))
         for pid in self.floor_ball_pairs:
             model.pair_friction[pid][0] = bf; model.pair_friction[pid][1] = bf
+            model.pair_friction[pid][3] = rf; model.pair_friction[pid][4] = rf
+        for pid in self.floor_ball_pairs + self.foot_ball_pairs:
+            model.pair_solref[pid][1] = zeta
+        # Elastic ground: soften the foot-floor contact spring. Feet only — the
+        # ball-floor pair stays rigid because grass acts on the BALL through roll
+        # resistance (the ball_damping + ball_roll_fric axes), not through
+        # contact compliance.
+        tc = (GROUND_SOLREF_TC if self.ground_solref_tc is None
+              else float(self.ground_solref_tc))
+        for pid in self.foot_pairs:
+            model.pair_solref[pid][0] = tc
         return r
 
     def apply_robot_dr(self, model, condition):
@@ -1170,6 +1442,7 @@ class Robot:
         # cancelling route-difficulty variance (which otherwise dwarfs the effects).
         if route_seed is not None:
             self.route.rng = CppMt19937Uniform(int(route_seed))
+            self.route.rng2 = CppMt19937Uniform(int(route_seed) + 7919)
         condition = condition if condition is not None else self.default_condition
         # route-shape overrides (capability conditions); None -> global defaults.
         # route_vmax: scalar pins the pace; [min,max] samples it per episode from
@@ -1188,6 +1461,16 @@ class Robot:
                                   ("route_accel_limit", "routeAccelLimit")):
             route_cfg[cfg_key] = (None if condition[cond_key] is None
                                   else float(condition[cond_key]))
+        route_cfg["routeV2Vel"] = bool(condition["route_v2_vel"])
+        cruise = condition["route_cruise"]
+        if cruise is None:
+            self.route.cruise_override = None; self.route.cruise_pinned = False
+        elif isinstance(cruise, (list, tuple)):
+            self.route.cruise_override = tuple(float(x) for x in cruise)
+            self.route.cruise_pinned = False
+        else:
+            self.route.cruise_override = (float(cruise), float(cruise))
+            self.route.cruise_pinned = True
         route_cfg["routeLength"] = (ROUTE_CFG["routeLength"] if condition["route_len_m"] is None
                                     else float(condition["route_len_m"]))
         self.route.const_kappa = condition["arc_kappa"]
@@ -1208,12 +1491,36 @@ class Robot:
         cmd_mode = route_cmd_mode(condition)
         # roll brake: read BEFORE the DR branch, apply_dr scales it by the ball inertia
         self.ball_damping = condition["ball_damping"]
+        self.ground_solref_tc = condition["ground_solref_tc"]
+        self.ball_roll_fric = condition["ball_roll_fric"]
+        self.ball_bounce_dampratio = condition["ball_bounce_dampratio"]
+        bias = condition["ball_obs_bias"]
+        self.ball_obs_bias = (None if bias is None
+                              else np.asarray(bias, dtype=float))
+        deg = condition["chest_yaw_bias_deg"]
+        if deg:
+            half = 0.5 * np.deg2rad(float(deg))
+            self.chest_bias_quat = np.array([np.cos(half), 0.0, 0.0, np.sin(half)])
+        else:
+            self.chest_bias_quat = None
+        self.motor_curve = bool(condition["motor_curve"])
+        vs = condition["motor_vel_scale"]
+        self.motor_vel_scale = 1.0 if vs is None else float(vs)
+        scale = condition["motor_peak_scale"]
+        self.effort_limit = (EFFORT_LIMIT if scale is None
+                             else EFFORT_LIMIT * float(scale))
         self.ball_radius_obs_m = condition["ball_radius_obs_m"]
         self.apply_robot_dr(model, condition)
         # DR: explicit dict > dr_scale (centered training ranges x alpha) > training DR
         if dr is None:
             dr = condition["dr"]
         if dr is not None:
+            # a (lo, hi) value samples that channel per episode (partial pin:
+            # e.g. foot fixed at the measured turf value, ball mass/radius/
+            # friction still following the training DR)
+            dr = {k: (float(self.rng.uniform(float(v[0]), float(v[1])))
+                      if isinstance(v, (list, tuple)) else v)
+                  for k, v in dr.items()}
             r = self.apply_dr(model, dr)
         elif condition["dr_scale"] is not None:
             r = self.sample_dr_scaled(model, float(condition["dr_scale"]))
@@ -1289,8 +1596,16 @@ class Robot:
         pin_ball = condition["ball_obs_delay_steps"] is not None
         pin_act = condition["action_delay_ms"] is not None
         self.lat_active = self.latency or pin_ball or pin_act
+        self.ball_delay_step_range = None
         if pin_ball:
-            self.ball_delay = int(condition["ball_obs_delay_steps"])
+            v = condition["ball_obs_delay_steps"]
+            if isinstance(v, (list, tuple)):
+                # (lo, hi): a FRESH draw every policy step (per-step jitter, not
+                # a per-episode constant); ring depth sized to the max
+                self.ball_delay_step_range = (int(v[0]), int(v[1]))
+                self.ball_delay = int(v[1])
+            else:
+                self.ball_delay = int(v)
         elif self.latency:
             self.ball_delay = int(self.rng.integers(BALL_DELAY_RANGE[0], BALL_DELAY_RANGE[1] + 1))
         if pin_act:
@@ -1312,8 +1627,13 @@ class Robot:
         # wins, so settle only samples when hold is 0. warm_s = the total start
         # phase, i.e. the offset for move_start / push onset. Settle sampling is
         # gated so rng is unchanged when --settle-s is off.
-        self.hold_s = (float(condition["standby_hold_s"])
-                       if condition["standby_hold_s"] is not None else self.hold_s_default)
+        hold = condition["standby_hold_s"]
+        if hold is None:
+            self.hold_s = self.hold_s_default
+        elif isinstance(hold, (list, tuple)):   # (lo, hi): per-episode draw
+            self.hold_s = float(self.rng.uniform(float(hold[0]), float(hold[1])))
+        else:
+            self.hold_s = float(hold)
         self.settle_s = (float(self.rng.uniform(*self.settle_range))
                          if (self.settle_range is not None and self.hold_s <= 0.0) else 0.0)
         self.warm_s = max(self.hold_s, self.settle_s)
@@ -1384,12 +1704,24 @@ class Robot:
         First tick after a reset sees the reset state itself, matching the C++
         bridge's publish-on-reset."""
         if self.bridge_delay <= 0:
-            return self._bridge_state(data)
-        if self.bridge_hist is None:
-            self.bridge_hist = np.tile(self._bridge_state(data), (self.bridge_delay + 1, 1))
-        back = int(self.bridge_rng.choice(
-            (0, max(1, self.bridge_delay // 2), self.bridge_delay), p=(0.2, 0.6, 0.2)))
-        return self.bridge_hist[back]
+            snap = self._bridge_state(data)
+        else:
+            if self.bridge_hist is None:
+                self.bridge_hist = np.tile(self._bridge_state(data), (self.bridge_delay + 1, 1))
+            back = int(self.bridge_rng.choice(
+                (0, max(1, self.bridge_delay // 2), self.bridge_delay), p=(0.2, 0.6, 0.2)))
+            snap = self.bridge_hist[back]
+        if self.ball_obs_bias is None and self.chest_bias_quat is None:
+            return snap
+        # mocap-imperfection probes: copy first (ring rows must stay pristine)
+        snap = snap.copy()
+        if self.ball_obs_bias is not None:
+            snap[10:13] += self.ball_obs_bias
+        if self.chest_bias_quat is not None:
+            fq = np.zeros(4)
+            mujoco.mju_mulQuat(fq, snap[16:20], self.chest_bias_quat)
+            snap[16:20] = fq
+        return snap
 
     def _obs(self, data):
         snap = self._snap if self._snap is not None else self._bridge_snapshot(data)
@@ -1417,8 +1749,11 @@ class Robot:
             else:
                 self.ball_pos_hist = np.roll(self.ball_pos_hist, 1, axis=0); self.ball_pos_hist[0] = ball_b_cur
                 self.ball_vel_hist = np.roll(self.ball_vel_hist, 1, axis=0); self.ball_vel_hist[0] = ball_vb_cur
-            ball_b = self.ball_pos_hist[self.ball_delay]      # value from ball_delay steps ago
-            ball_vb = self.ball_vel_hist[self.ball_delay]     # same per-env lag for pos & vel
+            d = (self.ball_delay if self.ball_delay_step_range is None
+                 else int(self.obs_rng.integers(self.ball_delay_step_range[0],
+                                                self.ball_delay_step_range[1] + 1)))
+            ball_b = self.ball_pos_hist[d]        # value from d steps ago
+            ball_vb = self.ball_vel_hist[d]       # same per-env lag for pos & vel
         else:
             ball_b, ball_vb = ball_b_cur, ball_vb_cur
         # match the C++ deployment obs terms exactly (SoftTouchDribbleObservation.cpp)
@@ -1574,7 +1909,12 @@ class Robot:
     def torque(self, data, target):
         q = data.qpos[self.qadr]; qd = data.qvel[self.vadr]
         kp, kd = (self.skp, self.skd) if self._holding else (self.kp, self.kd)
-        return np.clip(kp * (target - q) - kd * qd, -EFFORT_LIMIT, EFFORT_LIMIT)
+        lim = self.effort_limit
+        if self.motor_curve:
+            # linear PMSM line: full peak at stall, zero at the URDF no-load speed
+            lim = lim * np.clip(1.0 - np.abs(qd) / (VEL_LIMIT * self.motor_vel_scale),
+                                0.0, 1.0)
+        return np.clip(kp * (target - q) - kd * qd, -lim, lim)
 
     def apply(self, data):
         if self.lat_active and not self._holding:

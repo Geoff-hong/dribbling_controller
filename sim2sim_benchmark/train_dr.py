@@ -282,6 +282,7 @@ def read_train_dr(path):
         # to gate the u_turn capability group (0 in the base cmd-mode mix).
         u_turn_share=_uturn_share, human_uturn_share=_human_uturn_share,
         route_v2_geom=cfg.get("route_v2_geom"),
+        route_v2_vel=cfg.get("route_v2_vel"),
         # Task-start ball placement. THREE cases, and conflating the last two is
         # how an old checkpoint silently inherits a DR that did not exist when it
         # trained:

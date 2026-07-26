@@ -1,0 +1,69 @@
+[
+  {
+    "name": "plastic_turf_nominal_negative_control",
+    "group": "20260724_real_repro",
+    "axis": 0,
+    "route_mode": 4,
+    "episode_s": 8.0,
+    "bridge_delay_ms": 10.0,
+    "dr": {"mass": 0.391, "radius": 0.10, "foot": 1.0, "ball": 0.5},
+    "ball_damping": 4.0,
+    "ball_obs_delay_steps": 2,
+    "action_delay_ms": 0.0,
+    "reset_ball_random": true
+  },
+  {
+    "name": "ball_obs_delay_only_extreme_negative_control",
+    "group": "20260724_real_repro",
+    "axis": 1,
+    "route_mode": 4,
+    "episode_s": 8.0,
+    "bridge_delay_ms": 10.0,
+    "dr": {"mass": 0.391, "radius": 0.10, "foot": 1.0, "ball": 0.5},
+    "ball_damping": 4.0,
+    "ball_obs_delay_steps": 8,
+    "action_delay_ms": 0.0,
+    "reset_ball_random": true
+  },
+  {
+    "name": "action_delay_30ms_ball_delay_2_repro",
+    "group": "20260724_real_repro",
+    "axis": 2,
+    "route_mode": 4,
+    "episode_s": 8.0,
+    "bridge_delay_ms": 10.0,
+    "dr": {"mass": 0.391, "radius": 0.10, "foot": 1.0, "ball": 0.5},
+    "ball_damping": 4.0,
+    "ball_obs_delay_steps": 2,
+    "action_delay_ms": 30.0,
+    "reset_ball_random": true
+  },
+  {
+    "name": "action_delay_30ms_gain_0p90_probe",
+    "group": "20260724_real_repro",
+    "axis": 3,
+    "route_mode": 4,
+    "episode_s": 8.0,
+    "bridge_delay_ms": 10.0,
+    "dr": {"mass": 0.391, "radius": 0.10, "foot": 1.0, "ball": 0.5},
+    "ball_damping": 4.0,
+    "ball_obs_delay_steps": 0,
+    "action_delay_ms": 30.0,
+    "actuator_gain_scale": 0.9,
+    "reset_ball_random": true
+  },
+  {
+    "name": "realistic_turf_compliance_act30_probe",
+    "group": "20260724_real_repro",
+    "axis": 4,
+    "route_mode": 4,
+    "episode_s": 8.0,
+    "bridge_delay_ms": 10.0,
+    "dr": {"mass": 0.391, "radius": 0.10, "foot": 1.0, "ball": 0.5},
+    "ball_damping": 4.0,
+    "ball_obs_delay_steps": 2,
+    "action_delay_ms": 30.0,
+    "ground_solref_tc": 0.05,
+    "reset_ball_random": true
+  }
+]
