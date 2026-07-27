@@ -361,6 +361,15 @@ def main():
                          "visible-surface centroid effect (e.g. 0 0.03 0.03)")
     ap.add_argument("--chest-yaw-bias", type=float, default=None,
                     help="constant obs-frame (chest rigid body) yaw miscalibration (deg)")
+    ap.add_argument("--chest-rpy-bias", type=float, nargs=3, default=None,
+                    metavar=("R", "P", "Y"),
+                    help="three-axis obs-frame miscalibration (roll pitch yaw, deg), "
+                         "right-multiplied; pitch/roll shift ball_pos_b first-order via "
+                         "the ~0.84 m height lever (7.3 cm at 5 deg). Overrides --chest-yaw-bias")
+    ap.add_argument("--bias-gravity", action="store_true",
+                    help="apply the --chest-rpy-bias frame error to the BASE quat too "
+                         "(tilts projected_gravity — hallucinated lean). Only deploy-"
+                         "faithful if the C++ gravity source is the same mocap frame")
     ap.add_argument("--ball-mass", type=float, nargs="+", default=None, metavar="KG",
                     help="ball mass (kg): one value pins it, two = per-episode U(LO,HI); "
                          "default = the training DR range when --foot-fric is set")
@@ -441,6 +450,8 @@ def main():
         ball_roll_fric=args.ball_roll_fric, ball_bounce_dampratio=args.ball_bounce,
         joint_friction=args.joint_friction, obs_noise_scale=args.obs_noise_scale,
         ball_obs_bias=args.ball_obs_bias, chest_yaw_bias_deg=args.chest_yaw_bias,
+        obs_frame_rpy_bias_deg=args.chest_rpy_bias,
+        obs_frame_bias_gravity=args.bias_gravity,
         motor_curve=args.motor_curve, motor_peak_scale=args.motor_peak_scale,
         motor_vel_scale=args.motor_vel_scale,
         **({} if args.ball_start_dist is None

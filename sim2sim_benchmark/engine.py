@@ -494,6 +494,15 @@ DEFAULT_CONDITION = dict(
     # BODY-frame yaw miscalibration of the obs-frame rigid body (5 deg harmless,
     # >=10 deg doubles ball_lost, 20 deg accelerates falls).
     ball_obs_bias=None, chest_yaw_bias_deg=None,
+    # Three-axis obs-frame calibration error (roll, pitch, yaw deg), right-
+    # multiplied onto the obs-frame quat: pitch/roll displace ball_pos_b FIRST
+    # order via the ~0.84 m height lever (7.3 cm at 5 deg), yaw via the ~0.6 m
+    # horizontal arm (5.2 cm at 5 deg). Supersedes chest_yaw_bias_deg when set.
+    # obs_frame_bias_gravity: also right-multiply the BASE quat, tilting
+    # projected_gravity (hallucinated lean) — ONLY deploy-faithful if the C++
+    # gravity source shares the miscalibrated mocap frame (IMU-derived gravity
+    # would NOT tilt); default off until the real wiring is confirmed.
+    obs_frame_rpy_bias_deg=None, obs_frame_bias_gravity=False,
     # Motor realism. motor_curve: enable the linear torque-speed ceiling
     # tau_max(w) = peak * (1 - |w|/VEL_LIMIT) (the flat URDF-peak clip is
     # optimistic at swing speeds). motor_peak_scale: scale EFFORT_LIMIT for the
@@ -1228,7 +1237,8 @@ class Robot:
         self.ball_roll_fric = None             # per-condition override; None -> BALL_ROLL_FRIC
         self.ball_bounce_dampratio = None      # per-condition override; None -> MJCF 1.0
         self.ball_obs_bias = None              # world-frame ball-center estimate bias
-        self.chest_bias_quat = None            # obs-frame calibration error (body yaw)
+        self.chest_bias_quat = None            # obs-frame calibration error quat
+        self.bias_gravity = False              # bias also tilts the base quat
         self.motor_curve = False               # torque-speed ceiling on
         self.motor_vel_scale = 1.0             # curve steepness (zero-torque speed scale)
         self.effort_limit = EFFORT_LIMIT       # per-episode peak (variant scale)
@@ -1497,12 +1507,25 @@ class Robot:
         bias = condition["ball_obs_bias"]
         self.ball_obs_bias = (None if bias is None
                               else np.asarray(bias, dtype=float))
+        rpy = condition["obs_frame_rpy_bias_deg"]
         deg = condition["chest_yaw_bias_deg"]
-        if deg:
+        if rpy is not None and any(float(v) for v in rpy):
+            def _axq(angle_deg, ax):
+                q = np.zeros(4); half = 0.5 * np.deg2rad(float(angle_deg))
+                q[0] = np.cos(half); q[1 + ax] = np.sin(half)
+                return q
+            r, p, y = rpy
+            q = _axq(y, 2)                       # intrinsic z-y-x composition
+            for ang, ax in ((p, 1), (r, 0)):
+                out = np.zeros(4); mujoco.mju_mulQuat(out, q, _axq(ang, ax)); q = out
+            self.chest_bias_quat = q
+        elif deg:
             half = 0.5 * np.deg2rad(float(deg))
             self.chest_bias_quat = np.array([np.cos(half), 0.0, 0.0, np.sin(half)])
         else:
             self.chest_bias_quat = None
+        self.bias_gravity = (bool(condition["obs_frame_bias_gravity"])
+                             and self.chest_bias_quat is not None)
         self.motor_curve = bool(condition["motor_curve"])
         vs = condition["motor_vel_scale"]
         self.motor_vel_scale = 1.0 if vs is None else float(vs)
@@ -1721,6 +1744,12 @@ class Robot:
             fq = np.zeros(4)
             mujoco.mju_mulQuat(fq, snap[16:20], self.chest_bias_quat)
             snap[16:20] = fq
+            if self.bias_gravity:
+                # miscalibrated BASE rigid body: projected_gravity (and the
+                # yaw-derived obs) see the same frame error
+                bq2 = np.zeros(4)
+                mujoco.mju_mulQuat(bq2, snap[0:4], self.chest_bias_quat)
+                snap[0:4] = bq2
         return snap
 
     def _obs(self, data):
