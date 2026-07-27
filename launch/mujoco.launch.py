@@ -83,12 +83,22 @@ def setup_controllers(context):
     softtouch_mujoco_apply_ball_damping = LaunchConfiguration('softtouch_mujoco_apply_ball_damping').perform(context)
     ext_pos_corr = LaunchConfiguration('ext_pos_corr').perform(context)
     softtouch_base_state_source = LaunchConfiguration('softtouch_base_state_source').perform(context)
+    softtouch_obs_frame_source = LaunchConfiguration('softtouch_obs_frame_source').perform(context)
+    softtouch_obs_frame_pose_topic = LaunchConfiguration('softtouch_obs_frame_pose_topic').perform(context)
+    softtouch_ball_radius_m = LaunchConfiguration('softtouch_ball_radius_m').perform(context)
     softtouch_route_cmd_mode = LaunchConfiguration('softtouch_route_cmd_mode').perform(context)
     softtouch_seed = LaunchConfiguration('softtouch_seed').perform(context)
     softtouch_route_length_m = LaunchConfiguration('softtouch_route_length_m').perform(context)
+    softtouch_route_vmax = LaunchConfiguration('softtouch_route_vmax').perform(context)
     softtouch_ball_angular_damping = LaunchConfiguration('softtouch_ball_angular_damping').perform(context)
     softtouch_action_command_mode = LaunchConfiguration('softtouch_action_command_mode').perform(context)
     softtouch_mujoco_reset_hold_s = LaunchConfiguration('softtouch_mujoco_reset_hold_s').perform(context)
+    softtouch_obs_dump_path = LaunchConfiguration('softtouch_obs_dump_path').perform(context)
+    activate_standby_controller = LaunchConfiguration('activate_standby_controller').perform(context).lower() in [
+        'true',
+        '1',
+        'yes',
+    ]
     activate_walking_controller = LaunchConfiguration('activate_walking_controller').perform(context).lower() in [
         'true',
         '1',
@@ -167,12 +177,20 @@ def setup_controllers(context):
         kv_pairs.append(('state_estimator.estimation.position.topic', "/mid360"))
     if softtouch_base_state_source:
         kv_pairs.append(('walking_controller.softtouch.base_state.source', softtouch_base_state_source))
+    if softtouch_obs_frame_source:
+        kv_pairs.append(('walking_controller.softtouch.obs_frame.source', softtouch_obs_frame_source))
+    if softtouch_obs_frame_pose_topic:
+        kv_pairs.append(('walking_controller.softtouch.obs_frame.pose_topic', softtouch_obs_frame_pose_topic))
+    if softtouch_ball_radius_m:
+        kv_pairs.append(('walking_controller.softtouch.ball_state.radius_m', softtouch_ball_radius_m))
     if softtouch_route_cmd_mode:
         kv_pairs.append(('walking_controller.softtouch.route.cmd_mode', softtouch_route_cmd_mode))
     if softtouch_seed:
         kv_pairs.append(('walking_controller.softtouch.seed', softtouch_seed))
     if softtouch_route_length_m:
         kv_pairs.append(('walking_controller.softtouch.route.route_length_m', softtouch_route_length_m))
+    if softtouch_route_vmax:
+        kv_pairs.append(('walking_controller.softtouch.route.route_vmax', softtouch_route_vmax))
     if softtouch_ball_angular_damping:
         kv_pairs.append(('mujoco_sim_ros2_node.ros__parameters.softtouch_mujoco_ball_bridge.ball_angular_damping',
                          softtouch_ball_angular_damping))
@@ -180,6 +198,9 @@ def setup_controllers(context):
         kv_pairs.append(('walking_controller.softtouch.action.command_mode', softtouch_action_command_mode))
     if softtouch_mujoco_reset_hold_s:
         kv_pairs.append(('walking_controller.softtouch.reset.mujoco_reset_hold_s', softtouch_mujoco_reset_hold_s))
+    if softtouch_obs_dump_path:
+        dump_path = os.path.abspath(os.path.expanduser(os.path.expandvars(softtouch_obs_dump_path)))
+        kv_pairs.append(('walking_controller.softtouch.debug.obs_dump_path', dump_path))
 
     temp_controllers_config_path = generate_temp_config(
         controllers_config_path,
@@ -195,6 +216,8 @@ def setup_controllers(context):
 
     all_controllers = get_controller_names(controllers_config_path, 'motion_tracking_controller')
     active_list = ["state_estimator"]
+    if activate_standby_controller:
+        active_list.append("standby_controller")
     if activate_walking_controller:
         active_list.append("walking_controller")
     inactive_list = [c for c in all_controllers if c not in active_list]
@@ -394,6 +417,21 @@ def generate_launch_description():
             description='Optional SoftTouch base_state.source override: model or topic'
         ),
         DeclareLaunchArgument(
+            'softtouch_obs_frame_source',
+            default_value='',
+            description='Optional SoftTouch obs_frame.source override: model or topic'
+        ),
+        DeclareLaunchArgument(
+            'softtouch_obs_frame_pose_topic',
+            default_value='',
+            description='Optional SoftTouch obs_frame PoseStamped topic override'
+        ),
+        DeclareLaunchArgument(
+            'softtouch_ball_radius_m',
+            default_value='',
+            description='Optional SoftTouch ball radius in metres; feeds ball_radius obs as radius_m - 0.10'
+        ),
+        DeclareLaunchArgument(
             'softtouch_route_cmd_mode',
             default_value='',
             description='Optional SoftTouch route cmd_mode override, e.g. 0 for a straight-line route'
@@ -410,6 +448,11 @@ def generate_launch_description():
             description='Optional SoftTouch route length (m) override. The robot dribbles to '
                         'the route end and then stops, so a shorter route = a shorter episode '
                         '(e.g. ~18 m ~= 10 s at vmax 2 m/s). Used by the DR sweep.'
+        ),
+        DeclareLaunchArgument(
+            'softtouch_route_vmax',
+            default_value='',
+            description='Optional SoftTouch route.route_vmax override in m/s'
         ),
         DeclareLaunchArgument(
             'softtouch_ball_angular_damping',
@@ -429,9 +472,19 @@ def generate_launch_description():
             description='Optional SoftTouch controller reset hold duration after publishing /softtouch/mujoco_reset'
         ),
         DeclareLaunchArgument(
+            'softtouch_obs_dump_path',
+            default_value='',
+            description='Optional per-policy-tick SoftTouch obs/action dump path for sim2sim debugging'
+        ),
+        DeclareLaunchArgument(
             'spawn_inactive_controllers',
             default_value='true',
             description='Load controllers from the YAML that are not in the active controller list'
+        ),
+        DeclareLaunchArgument(
+            'activate_standby_controller',
+            default_value='false',
+            description='Activate standby_controller during launch'
         ),
         DeclareLaunchArgument(
             'activate_walking_controller',

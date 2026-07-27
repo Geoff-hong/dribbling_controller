@@ -30,6 +30,15 @@ def setup_controllers(context):
     controller_type_value = LaunchConfiguration('controller_type').perform(context)
     controllers_config_value = LaunchConfiguration('controllers_config').perform(context)
     ext_pos_corr = LaunchConfiguration('ext_pos_corr').perform(context)
+    softtouch_ball_pose_topic = LaunchConfiguration('softtouch_ball_pose_topic').perform(context)
+    softtouch_ball_twist_topic = LaunchConfiguration('softtouch_ball_twist_topic').perform(context)
+    softtouch_ball_radius_m = LaunchConfiguration('softtouch_ball_radius_m').perform(context)
+    softtouch_obs_frame_source = LaunchConfiguration('softtouch_obs_frame_source').perform(context)
+    softtouch_obs_frame_pose_topic = LaunchConfiguration('softtouch_obs_frame_pose_topic').perform(context)
+    softtouch_base_state_source = LaunchConfiguration('softtouch_base_state_source').perform(context)
+    softtouch_route_cmd_mode = LaunchConfiguration('softtouch_route_cmd_mode').perform(context)
+    softtouch_route_vmax = LaunchConfiguration('softtouch_route_vmax').perform(context)
+    softtouch_obs_dump_path = LaunchConfiguration('softtouch_obs_dump_path').perform(context)
 
     if not policy_path_value and wandb_path_value:
         policy_path_value = download_wandb_onnx(wandb_path_value)
@@ -55,6 +64,28 @@ def setup_controllers(context):
     if ext_pos_corr.lower() in ["true", "1", "yes"]:
         kv_pairs.append(('state_estimator.estimation.contact.height_sensor_noise', 1e10))
         kv_pairs.append(('state_estimator.estimation.position.topic', "/glim/odom"))
+    if softtouch_ball_pose_topic:
+        kv_pairs.append(('walking_controller.softtouch.ball_state.pose_topic', softtouch_ball_pose_topic))
+    if softtouch_ball_twist_topic:
+        kv_pairs.append(('walking_controller.softtouch.ball_state.twist_topic', softtouch_ball_twist_topic))
+    if softtouch_ball_radius_m:
+        kv_pairs.append(('walking_controller.softtouch.ball_state.radius_m', softtouch_ball_radius_m))
+    if softtouch_obs_frame_source:
+        kv_pairs.append(('walking_controller.softtouch.obs_frame.source', softtouch_obs_frame_source))
+    if softtouch_obs_frame_pose_topic:
+        kv_pairs.append(('walking_controller.softtouch.obs_frame.pose_topic', softtouch_obs_frame_pose_topic))
+    if softtouch_base_state_source:
+        kv_pairs.append(('walking_controller.softtouch.base_state.source', softtouch_base_state_source))
+    if softtouch_route_cmd_mode:
+        kv_pairs.append(('walking_controller.softtouch.route.cmd_mode', softtouch_route_cmd_mode))
+    if softtouch_route_vmax:
+        kv_pairs.append(('walking_controller.softtouch.route.route_vmax', softtouch_route_vmax))
+    if softtouch_obs_dump_path:
+        kv_pairs.append(('walking_controller.softtouch.debug.obs_dump_path', softtouch_obs_dump_path))
+    # Real robot startup should enter standby only; MuJoCo reset requests are
+    # sim-only and are intentionally disabled here even if the shared YAML
+    # enables them for sim2sim.
+    kv_pairs.append(('standby_controller.reset.mujoco_reset_on_activate', 'false'))
 
     temp_controllers_config_path = generate_temp_config(
         controllers_config_path,
@@ -202,6 +233,51 @@ def generate_launch_description():
             'ext_pos_corr',
             default_value='false',
             description='Enable external position correction'
+        ),
+        DeclareLaunchArgument(
+            'softtouch_ball_pose_topic',
+            default_value='',
+            description='Optional SoftTouch ball PoseStamped topic override'
+        ),
+        DeclareLaunchArgument(
+            'softtouch_ball_twist_topic',
+            default_value='',
+            description='Optional SoftTouch ball TwistStamped topic override'
+        ),
+        DeclareLaunchArgument(
+            'softtouch_ball_radius_m',
+            default_value='',
+            description='Optional SoftTouch ball radius in metres; feeds ball_radius obs as radius_m - 0.10'
+        ),
+        DeclareLaunchArgument(
+            'softtouch_obs_frame_source',
+            default_value='',
+            description='Optional SoftTouch obs_frame.source override: model or topic'
+        ),
+        DeclareLaunchArgument(
+            'softtouch_obs_frame_pose_topic',
+            default_value='',
+            description='Optional SoftTouch obs_frame PoseStamped topic override'
+        ),
+        DeclareLaunchArgument(
+            'softtouch_base_state_source',
+            default_value='',
+            description='Optional SoftTouch base_state.source override: model or topic'
+        ),
+        DeclareLaunchArgument(
+            'softtouch_route_cmd_mode',
+            default_value='',
+            description='Optional SoftTouch route cmd_mode override. Use 0 for straight route.'
+        ),
+        DeclareLaunchArgument(
+            'softtouch_route_vmax',
+            default_value='',
+            description='Optional SoftTouch route.route_vmax override in m/s'
+        ),
+        DeclareLaunchArgument(
+            'softtouch_obs_dump_path',
+            default_value='',
+            description='Optional per-policy-tick SoftTouch obs/action dump path'
         ),
         DeclareLaunchArgument(
             'wandb_path',

@@ -32,6 +32,12 @@ install(
     tools/ros_utils/bridge_softtouch_mocap_ball.py
     tools/onnx_export/export_softtouch_dribble_policy.py
     tools/reset_export/export_softtouch_mujoco_reset_state.py
+    tools/ros1_mocap_udp_sender.py
+    tools/ros1_unlabeled_ball_udp_sender.py
+    tools/ros2_mocap_pose_viz.py
+    tools/ros2_mocap_udp_receiver.py
+    tools/softtouch_ball_relative_window.py
+    tools/softtouch_real_run.sh
     DESTINATION lib/${PROJECT_NAME}
 )
 

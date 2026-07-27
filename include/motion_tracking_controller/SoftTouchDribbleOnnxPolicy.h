@@ -27,6 +27,15 @@ class SoftTouchDribbleOnnxPolicy : public OnnxPolicy {
   const vector_t& getJointTarget() const { return jointTarget_; }
   const vector_t& getCurrentRawAction() const { return rawAction_; }
   const vector_t& getCurrentLatentAction() const { return latentAction_; }
+  const std::vector<std::string>& getObservationNames() const { return observationNames_; }
+  const std::vector<size_t>& getObservationDims() const { return observationDims_; }
+  const std::vector<size_t>& getStoredObservationHistoryLengths() const { return observationHistoryLengths_; }
+  size_t getLatentDim() const { return latentDim_; }
+  size_t getActorObservationDim() const { return actorObservationDim_; }
+  size_t getActorHistoryLength() const { return actorHistoryLength_; }
+  size_t getDecoderStateDim() const { return decoderStateDim_; }
+  const std::string& getObsFrameBodyName() const { return obsFrameBodyName_; }
+  const vector3_t& getObsFrameOffset() const { return obsFrameOffset_; }
   // Per-observation-term history lengths from ONNX metadata (v2 history policy).
   // Empty if the model predates the field (caller then keeps default history=1).
   std::vector<size_t> getObservationHistoryLengths() const;
@@ -46,6 +55,15 @@ class SoftTouchDribbleOnnxPolicy : public OnnxPolicy {
   vector_t jointTarget_;
   vector_t jointTargetLower_;
   vector_t jointTargetUpper_;
+  std::vector<std::string> observationNames_;
+  std::vector<size_t> observationDims_;
+  std::vector<size_t> observationHistoryLengths_;
+  size_t latentDim_ = kSoftTouchDribbleLatentDim;
+  size_t actorObservationDim_ = 0;
+  size_t actorHistoryLength_ = 1;
+  size_t decoderStateDim_ = 0;
+  std::string obsFrameBodyName_ = "pelvis";
+  vector3_t obsFrameOffset_ = vector3_t::Zero();
   scalar_t jointTargetLimitFactor_ = 0.9;
   bool clipJointTarget_ = false;
 };

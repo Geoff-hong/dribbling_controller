@@ -58,19 +58,21 @@ vector_t SoftTouchLastLatentAction::evaluate() {
 }
 
 vector_t SoftTouchBallPositionBody::evaluate() {
-  const quaternion_t pelvisOrientation = commandTerm_->getPelvisOrientationWorld();
-  const vector3_t rel = commandTerm_->getBallPositionWorld() - commandTerm_->getPelvisPositionWorld();
-  return toVector(rotateWorldToBody(pelvisOrientation, rel));
+  const quaternion_t observationFrameOrientation = commandTerm_->getObservationFrameOrientationWorld();
+  const vector3_t rel = commandTerm_->getBallPositionWorld() - commandTerm_->getObservationFramePositionWorld();
+  return toVector(rotateWorldToBody(observationFrameOrientation, rel));
 }
 
 vector_t SoftTouchBallLinearVelocityBody::evaluate() {
-  return toVector(rotateWorldToBody(commandTerm_->getPelvisOrientationWorld(), commandTerm_->getBallLinearVelocityWorld()));
+  return toVector(rotateWorldToBody(commandTerm_->getObservationFrameOrientationWorld(),
+                                    commandTerm_->getBallLinearVelocityWorld()));
 }
 
 vector_t SoftTouchTargetDirectionBody::evaluate() {
   const auto command = commandTerm_->getRouteCommand();
   const vector3_t dirBody =
-      rotateWorldToBody(commandTerm_->getPelvisOrientationWorld(), vector3_t(command.targetDirWorld.x(), command.targetDirWorld.y(), 0.0));
+      rotateWorldToBody(commandTerm_->getObservationFrameOrientationWorld(),
+                        vector3_t(command.targetDirWorld.x(), command.targetDirWorld.y(), 0.0));
   return toVector(vector2_t(dirBody.x(), dirBody.y()));
 }
 

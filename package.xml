@@ -18,6 +18,7 @@
     <depend>mujoco_ament</depend>
     <depend>mujoco_sim_ros2</depend>
     <depend>legged_model</depend>
+    <depend>legged_controllers</depend>
     <depend>legged_rl_controllers</depend>
     <depend>legged_bringup</depend>
     <depend>geometry_msgs</depend>
@@ -33,6 +34,8 @@
     <exec_depend>unitree_bringup</exec_depend>
     <exec_depend>rosbag2_storage_mcap</exec_depend>
     <exec_depend>rviz2</exec_depend>
+    <exec_depend>nav_msgs</exec_depend>
+    <exec_depend>tf2_ros</exec_depend>
 
     <export>
         <build_type>ament_cmake</build_type>

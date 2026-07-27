@@ -9,6 +9,8 @@
 #include <rclcpp/qos.hpp>
 #include <std_msgs/msg/color_rgba.hpp>
 #include <stdexcept>
+#include <sstream>
+#include <numeric>
 #include <unordered_map>
 #include <vector>
 
@@ -55,6 +57,41 @@ vector_t defaultSoftTouchEffortLimit() {
   return out;
 }
 
+std_msgs::msg::Float64MultiArray vectorMessage(const vector_t& value, const std::string& label) {
+  std_msgs::msg::Float64MultiArray msg;
+  msg.layout.dim.resize(1);
+  msg.layout.dim[0].label = label;
+  msg.layout.dim[0].size = static_cast<uint32_t>(value.size());
+  msg.layout.dim[0].stride = static_cast<uint32_t>(value.size());
+  msg.data.resize(static_cast<size_t>(value.size()));
+  for (Eigen::Index i = 0; i < value.size(); ++i) {
+    msg.data[static_cast<size_t>(i)] = static_cast<double>(value(i));
+  }
+  return msg;
+}
+
+void appendStringArray(std::ostringstream& out, const std::vector<std::string>& values) {
+  out << '[';
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (i > 0) {
+      out << ',';
+    }
+    out << '"' << values[i] << '"';
+  }
+  out << ']';
+}
+
+void appendSizeArray(std::ostringstream& out, const std::vector<size_t>& values) {
+  out << '[';
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (i > 0) {
+      out << ',';
+    }
+    out << values[i];
+  }
+  out << ']';
+}
+
 }  // namespace
 
 controller_interface::CallbackReturn SoftTouchDribbleController::on_init() {
@@ -68,9 +105,13 @@ controller_interface::CallbackReturn SoftTouchDribbleController::on_init() {
     auto_declare<double>("softtouch.base_state.timeout_s", 0.10);
     auto_declare<std::string>("softtouch.base_state.pose_topic", "/softtouch/base/pose");
     auto_declare<std::string>("softtouch.base_state.twist_topic", "/softtouch/base/twist");
+    auto_declare<std::string>("softtouch.obs_frame.source", "model");
+    auto_declare<double>("softtouch.obs_frame.timeout_s", 0.10);
+    auto_declare<std::string>("softtouch.obs_frame.pose_topic", "/softtouch/obs_frame/pose");
     auto_declare<int>("softtouch.seed", 42);
     auto_declare<int>("softtouch.route.cmd_mode", 4);
     auto_declare<double>("softtouch.ball_state.timeout_s", 0.10);
+    auto_declare<double>("softtouch.ball_state.radius_m", 0.10);
     auto_declare<std::string>("softtouch.ball_state.pose_topic", "/softtouch/ball/pose");
     auto_declare<std::string>("softtouch.ball_state.twist_topic", "/softtouch/ball/twist");
     auto_declare<double>("softtouch.reset.ball_forward_m", 0.65);
@@ -110,6 +151,12 @@ controller_interface::CallbackReturn SoftTouchDribbleController::on_init() {
     auto_declare<double>("softtouch.visualization.target_arrow_length", 0.45);
     auto_declare<double>("softtouch.visualization.ball_marker_radius", 0.09);
     auto_declare<int>("softtouch.visualization.route_max_points", 160);
+    auto_declare<bool>("softtouch.debug.publish_policy_io", true);
+    auto_declare<std::string>("softtouch.debug.observation_topic", "/softtouch/policy/observation");
+    auto_declare<std::string>("softtouch.debug.observation_schema_topic", "/softtouch/policy/observation_schema");
+    auto_declare<std::string>("softtouch.debug.raw_action_topic", "/softtouch/policy/raw_action");
+    auto_declare<std::string>("softtouch.debug.latent_action_topic", "/softtouch/policy/latent_action");
+    auto_declare<std::string>("softtouch.debug.joint_target_topic", "/softtouch/policy/joint_target");
   } catch (const std::exception& e) {
     RCLCPP_ERROR(get_node()->get_logger(), "SoftTouchDribbleController init failed: %s", e.what());
     return controller_interface::CallbackReturn::ERROR;
@@ -124,8 +171,14 @@ controller_interface::CallbackReturn SoftTouchDribbleController::on_configure(
   ballTwistSub_.reset();
   basePoseSub_.reset();
   baseTwistSub_.reset();
+  observationFramePoseSub_.reset();
   mujocoResetPub_.reset();
   visualizationPub_.reset();
+  debugObservationPub_.reset();
+  debugObservationSchemaPub_.reset();
+  debugRawActionPub_.reset();
+  debugLatentActionPub_.reset();
+  debugJointTargetPub_.reset();
   commandTerm_.reset();
   commandTermRegistered_ = false;
   lastVisualizationTime_ = rclcpp::Time(0);
@@ -149,25 +202,19 @@ controller_interface::CallbackReturn SoftTouchDribbleController::on_configure(
   if (result != controller_interface::CallbackReturn::SUCCESS) {
     return result;
   }
-  // v2 history policies: stack per-term observation history (e.g. 10-frame actor
-  // history) from ONNX metadata. Empty for v1 -> terms keep their default length 1.
-  const auto historyLengths = softtouchPolicy_->getObservationHistoryLengths();
-  if (!historyLengths.empty() && observationManager_) {
-    observationManager_->setHistoryLengths(historyLengths);
-  }
-  // Fail fast at configure time if the assembled observation width does not match
-  // the ONNX obs input (wrong term set / history layout) instead of throwing later.
-  if (observationManager_ &&
-      observationManager_->getSize() != softtouchPolicy_->getObservationSize()) {
-    RCLCPP_ERROR_STREAM(get_node()->get_logger(),
-                        "SoftTouch observation width " << observationManager_->getSize()
-                        << " != ONNX obs input " << softtouchPolicy_->getObservationSize()
-                        << ". Check observation_names / history metadata vs the policy.");
-    return controller_interface::CallbackReturn::ERROR;
-  }
   configureJointTargetClip();
+  if (debugPublishPolicyIo_) {
+    debugObservationPub_ = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(debugObservationTopic_, 10);
+    debugRawActionPub_ = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(debugRawActionTopic_, 10);
+    debugLatentActionPub_ = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(debugLatentActionTopic_, 10);
+    debugJointTargetPub_ = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(debugJointTargetTopic_, 10);
+    debugObservationSchemaPub_ = get_node()->create_publisher<std_msgs::msg::String>(
+        debugObservationSchemaTopic_, rclcpp::QoS(1).transient_local().reliable());
+    publishPolicyDebugSchema();
+  }
   subscribeBallState();
   subscribeBaseState();
+  subscribeObservationFrameState();
   return result;
 }
 
@@ -177,15 +224,24 @@ controller_interface::CallbackReturn SoftTouchDribbleController::on_activate(
     return controller_interface::CallbackReturn::ERROR;
   }
   try {
+    configureObservationLayout();
     configureJointMappings();
     if (resetPolicyMemoryOnActivate_ && softtouchPolicy_) {
       softtouchPolicy_->reset();
       hasEffortTarget_ = false;
+      resetObservationHistory();
     }
     if (resetRouteOnActivate_) {
       ensureCommandTerm();
       commandTerm_->setNow(static_cast<scalar_t>(get_node()->get_clock()->now().seconds()));
-      commandTerm_->reset();
+      if (hasFreshPolicyInputs()) {
+        commandTerm_->reset();
+        pendingFreshInputRouteReset_ = false;
+      } else {
+        pendingFreshInputRouteReset_ = true;
+        RCLCPP_WARN(get_node()->get_logger(),
+                    "SoftTouch delaying route reset until fresh ball/base/observation-frame inputs are available.");
+      }
     }
     if (mujocoResetOnActivate_ && mujocoResetPub_) {
       std_msgs::msg::Float64 msg;
@@ -221,20 +277,38 @@ controller_interface::return_type SoftTouchDribbleController::update(const rclcp
         softtouchPolicy_->reset();
       }
       hasEffortTarget_ = false;
+      resetObservationHistory();
       if (resetRouteOnActivate_) {
         commandTerm_->reset();
       }
       pendingStartupPolicyReset_ = false;
     }
+    const bool freshPolicyInputs = hasFreshPolicyInputs();
+    if (pendingFreshInputRouteReset_ && freshPolicyInputs) {
+      if (softtouchPolicy_) {
+        softtouchPolicy_->reset();
+      }
+      hasEffortTarget_ = false;
+      resetObservationHistory();
+      commandTerm_->reset();
+      pendingFreshInputRouteReset_ = false;
+      RCLCPP_INFO(get_node()->get_logger(), "SoftTouch route reset completed after fresh policy inputs arrived.");
+    }
     if (!commandTerm_->hasFreshBallState()) {
       RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 2000,
-                           "SoftTouch ball state is missing or stale; using fallback position and/or zero velocity.");
+                           "SoftTouch ball state is missing or stale; holding current target and waiting for mocap.");
     }
     if (!commandTerm_->hasFreshBaseState()) {
       RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 2000,
                            "SoftTouch base state topic is missing or stale; using StateEstimator model base state.");
     }
-    commandTerm_->refreshRouteCommand();
+    if (!commandTerm_->hasFreshObservationFrameState()) {
+      RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 2000,
+                           "SoftTouch observation-frame pose is missing or stale; holding current target and waiting for mocap.");
+    }
+    if (!pendingFreshInputRouteReset_) {
+      commandTerm_->refreshRouteCommand();
+    }
   }
   vector_t policyObs;
   controller_interface::return_type result = controller_interface::return_type::ERROR;
@@ -282,8 +356,7 @@ bool SoftTouchDribbleController::parserObservation(const std::string& name) {
   } else if (name == "ball_lin_vel_b") {
     observationManager_->addTerm(std::make_shared<SoftTouchBallLinearVelocityBody>(commandTerm_));
   } else if (name == "ball_radius") {
-    // Deployed ball rests at z = radius, so cfg_.resetBallZ is the ball radius.
-    observationManager_->addTerm(std::make_shared<SoftTouchBallRadius>(cfg_.resetBallZ));
+    observationManager_->addTerm(std::make_shared<SoftTouchBallRadius>(ballRadiusM_));
   } else if (name == "target_dir_b") {
     observationManager_->addTerm(std::make_shared<SoftTouchTargetDirectionBody>(commandTerm_));
   } else if (name == "target_speed") {
@@ -311,13 +384,20 @@ void SoftTouchDribbleController::loadSoftTouchConfig() {
   cfg_.baseName = node->get_parameter("softtouch.base_name").as_string();
   cfg_.baseStateSource = node->get_parameter("softtouch.base_state.source").as_string();
   cfg_.baseTimeout = node->get_parameter("softtouch.base_state.timeout_s").as_double();
+  cfg_.observationFrameSource = node->get_parameter("softtouch.obs_frame.source").as_string();
+  cfg_.observationFrameTimeout = node->get_parameter("softtouch.obs_frame.timeout_s").as_double();
   cfg_.seed = static_cast<uint32_t>(std::max<int64_t>(0, node->get_parameter("softtouch.seed").as_int()));
   cfg_.cmdMode = static_cast<int>(node->get_parameter("softtouch.route.cmd_mode").as_int());
   cfg_.ballTimeout = node->get_parameter("softtouch.ball_state.timeout_s").as_double();
+  ballRadiusM_ = node->get_parameter("softtouch.ball_state.radius_m").as_double();
+  if (!(ballRadiusM_ > scalar_t(0.0))) {
+    throw std::runtime_error("softtouch.ball_state.radius_m must be positive.");
+  }
   cfg_.resetBallForward = node->get_parameter("softtouch.reset.ball_forward_m").as_double();
   cfg_.resetBallZ = node->get_parameter("softtouch.reset.ball_z_m").as_double();
   basePoseTopic_ = node->get_parameter("softtouch.base_state.pose_topic").as_string();
   baseTwistTopic_ = node->get_parameter("softtouch.base_state.twist_topic").as_string();
+  observationFramePoseTopic_ = node->get_parameter("softtouch.obs_frame.pose_topic").as_string();
   resetRouteOnActivate_ = node->get_parameter("softtouch.reset.reset_route_on_activate").as_bool();
   resetPolicyMemoryOnActivate_ = node->get_parameter("softtouch.reset.reset_policy_memory_on_activate").as_bool();
   mujocoResetOnActivate_ = node->get_parameter("softtouch.reset.mujoco_reset_on_activate").as_bool();
@@ -334,6 +414,12 @@ void SoftTouchDribbleController::loadSoftTouchConfig() {
   }
   actionPolicyPeriod_ = node->get_parameter("softtouch.action.policy_update_period_s").as_double();
   obsDumpPath_ = node->get_parameter("softtouch.debug.obs_dump_path").as_string();
+  debugPublishPolicyIo_ = node->get_parameter("softtouch.debug.publish_policy_io").as_bool();
+  debugObservationTopic_ = node->get_parameter("softtouch.debug.observation_topic").as_string();
+  debugObservationSchemaTopic_ = node->get_parameter("softtouch.debug.observation_schema_topic").as_string();
+  debugRawActionTopic_ = node->get_parameter("softtouch.debug.raw_action_topic").as_string();
+  debugLatentActionTopic_ = node->get_parameter("softtouch.debug.latent_action_topic").as_string();
+  debugJointTargetTopic_ = node->get_parameter("softtouch.debug.joint_target_topic").as_string();
   obsDump_.reset();
   obsDumpSeq_ = 0;
   if (actionPolicyPeriod_ < scalar_t(0.0)) {
@@ -455,6 +541,165 @@ vector_t SoftTouchDribbleController::readPolicyJointVelocity() const {
   return out;
 }
 
+bool SoftTouchDribbleController::hasFreshPolicyInputs() const {
+  if (!commandTerm_) {
+    return false;
+  }
+  return commandTerm_->hasFreshBallState() && commandTerm_->hasFreshBaseState() &&
+         commandTerm_->hasFreshObservationFrameState();
+}
+
+void SoftTouchDribbleController::configureObservationLayout() {
+  if (!observationManager_ || !softtouchPolicy_) {
+    throw std::runtime_error("SoftTouch observation manager or policy is not configured.");
+  }
+
+  const auto& names = softtouchPolicy_->getObservationNames();
+  const auto& dims = softtouchPolicy_->getObservationDims();
+  if (names.empty() || dims.empty() || names.size() != dims.size()) {
+    throw std::runtime_error("SoftTouch ONNX observation_names / observation_dims metadata is missing or invalid.");
+  }
+
+  std::vector<size_t> singleFrameHistory(names.size(), 1);
+  observationManager_->setHistoryLengths(singleFrameHistory);
+
+  actorHistoryLength_ = std::max<size_t>(1, softtouchPolicy_->getActorHistoryLength());
+  actorObservationDim_ = softtouchPolicy_->getActorObservationDim();
+  decoderStateDim_ = softtouchPolicy_->getDecoderStateDim();
+
+  size_t actorSingleFrameFromTerms = 0;
+  size_t decoderFromTerms = 0;
+  for (size_t i = 0; i < names.size(); ++i) {
+    if (names[i].rfind("decoder_", 0) == 0 || names[i] == "last_decoded_action") {
+      decoderFromTerms += dims[i];
+    } else {
+      actorSingleFrameFromTerms += dims[i];
+    }
+  }
+
+  if (decoderStateDim_ == 0) {
+    decoderStateDim_ = decoderFromTerms;
+  }
+  if (actorObservationDim_ == 0) {
+    actorObservationDim_ = actorSingleFrameFromTerms * actorHistoryLength_;
+  }
+  if (actorObservationDim_ % actorHistoryLength_ != 0) {
+    throw std::runtime_error("SoftTouch actor_observation_dim is not divisible by actor_history_length.");
+  }
+  actorSingleFrameDim_ = actorObservationDim_ / actorHistoryLength_;
+
+  const size_t singleFrameWidth = actorSingleFrameDim_ + decoderStateDim_;
+  if (actorSingleFrameDim_ != actorSingleFrameFromTerms) {
+    throw std::runtime_error("SoftTouch actor single-frame width from metadata terms (" +
+                             std::to_string(actorSingleFrameFromTerms) + ") != actor_observation_dim/history (" +
+                             std::to_string(actorSingleFrameDim_) + ").");
+  }
+  if (decoderStateDim_ != decoderFromTerms) {
+    throw std::runtime_error("SoftTouch decoder state width from metadata terms (" +
+                             std::to_string(decoderFromTerms) + ") != decoder_state_dim (" +
+                             std::to_string(decoderStateDim_) + ").");
+  }
+  if (observationManager_->getSize() != singleFrameWidth) {
+    throw std::runtime_error("SoftTouch single-frame observation width " +
+                             std::to_string(observationManager_->getSize()) + " != metadata single-frame width " +
+                             std::to_string(singleFrameWidth) + ".");
+  }
+  if (actorObservationDim_ + decoderStateDim_ != softtouchPolicy_->getObservationSize()) {
+    throw std::runtime_error("SoftTouch assembled observation width " +
+                             std::to_string(actorObservationDim_ + decoderStateDim_) + " != ONNX obs input " +
+                             std::to_string(softtouchPolicy_->getObservationSize()) + ".");
+  }
+
+  resetObservationHistory();
+  RCLCPP_INFO_STREAM(get_node()->get_logger(),
+                     "SoftTouch observation layout: actor frame " << actorSingleFrameDim_ << " x history "
+                                                                  << actorHistoryLength_ << " + decoder "
+                                                                  << decoderStateDim_ << " = "
+                                                                  << softtouchPolicy_->getObservationSize());
+}
+
+void SoftTouchDribbleController::resetObservationHistory() {
+  actorFrameHistory_.clear();
+}
+
+vector_t SoftTouchDribbleController::buildPolicyObservation() {
+  if (!observationManager_ || !softtouchPolicy_) {
+    throw std::runtime_error("SoftTouch observation manager or policy is not configured.");
+  }
+  if (actorHistoryLength_ == 0 || actorSingleFrameDim_ == 0) {
+    throw std::runtime_error("SoftTouch observation layout has not been configured.");
+  }
+
+  const vector_t singleFrame = observationManager_->getValue();
+  const Eigen::Index actorSingle = static_cast<Eigen::Index>(actorSingleFrameDim_);
+  const Eigen::Index decoderDim = static_cast<Eigen::Index>(decoderStateDim_);
+  const Eigen::Index expectedSingle = actorSingle + decoderDim;
+  if (singleFrame.size() != expectedSingle) {
+    throw std::runtime_error("SoftTouch single-frame observation has size " + std::to_string(singleFrame.size()) +
+                             ", expected " + std::to_string(expectedSingle) + ".");
+  }
+
+  const vector_t actorFrame = singleFrame.head(actorSingle);
+  vector_t decoderState;
+  if (decoderDim > 0) {
+    decoderState = singleFrame.tail(decoderDim);
+  } else {
+    decoderState.resize(0);
+  }
+  if (actorFrameHistory_.empty()) {
+    actorFrameHistory_.assign(actorHistoryLength_, actorFrame);
+  } else {
+    actorFrameHistory_.pop_front();
+    actorFrameHistory_.push_back(actorFrame);
+  }
+
+  vector_t obs(static_cast<Eigen::Index>(softtouchPolicy_->getObservationSize()));
+  const auto& names = softtouchPolicy_->getObservationNames();
+  const auto& dims = softtouchPolicy_->getObservationDims();
+  Eigen::Index obsCursor = 0;
+  Eigen::Index actorTermCursor = 0;
+  for (size_t termIndex = 0; termIndex < names.size(); ++termIndex) {
+    const bool isDecoderTerm = names[termIndex].rfind("decoder_", 0) == 0 || names[termIndex] == "last_decoded_action";
+    if (isDecoderTerm) {
+      break;
+    }
+    const Eigen::Index termDim = static_cast<Eigen::Index>(dims[termIndex]);
+    if (actorTermCursor + termDim > actorSingle) {
+      throw std::runtime_error("SoftTouch actor history term cursor exceeded single-frame width.");
+    }
+    for (const auto& historyFrame : actorFrameHistory_) {
+      obs.segment(obsCursor, termDim) = historyFrame.segment(actorTermCursor, termDim);
+      obsCursor += termDim;
+    }
+    actorTermCursor += termDim;
+  }
+  if (actorTermCursor != actorSingle || obsCursor != static_cast<Eigen::Index>(actorObservationDim_)) {
+    throw std::runtime_error("SoftTouch actor history assembly cursor mismatch.");
+  }
+  if (decoderDim > 0) {
+    obs.segment(static_cast<Eigen::Index>(actorObservationDim_), decoderDim) = decoderState;
+  }
+  return obs;
+}
+
+controller_interface::return_type SoftTouchDribbleController::holdCurrentPositionTarget() {
+  if (!softtouchPolicy_) {
+    return controller_interface::return_type::ERROR;
+  }
+  const vector_t currentPolicyOrder = readPolicyJointPosition();
+  const vector_t targetControlOrder = policyVectorToControlOrder(currentPolicyOrder);
+  const vector_t kpControlOrder = policyVectorToControlOrder(softtouchPolicy_->getJointStiffness());
+  const vector_t kdControlOrder = policyVectorToControlOrder(softtouchPolicy_->getJointDamping());
+  const vector_t zeros = vector_t::Zero(static_cast<Eigen::Index>(kSoftTouchDribbleNumJoints));
+  setPositions(targetControlOrder);
+  setVelocities(zeros);
+  setStiffnesses(kpControlOrder);
+  setDampings(kdControlOrder);
+  setEfforts(zeros);
+  desiredPosition_ = targetControlOrder;
+  return controller_interface::return_type::OK;
+}
+
 controller_interface::return_type SoftTouchDribbleController::updatePositionTarget(const rclcpp::Time& time,
                                                                                    const rclcpp::Duration& period,
                                                                                    vector_t& policyObs) {
@@ -467,13 +712,20 @@ controller_interface::return_type SoftTouchDribbleController::updatePositionTarg
     return baseResult;
   }
 
+  if (!hasFreshPolicyInputs()) {
+    RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1000,
+                         "SoftTouch policy forward skipped until fresh ball, base, and observation-frame inputs arrive.");
+    return holdCurrentPositionTarget();
+  }
+
   const scalar_t now = static_cast<scalar_t>(time.seconds());
   const bool shouldUpdatePolicy =
       !hasEffortTarget_ || actionPolicyPeriod_ <= scalar_t(0.0) ||
       (now - lastEffortPolicyUpdateTime_) >= (actionPolicyPeriod_ - scalar_t(1.0e-9));
   if (shouldUpdatePolicy) {
-    policyObs = observationManager_->getValue();
+    policyObs = buildPolicyObservation();
     effortTargetPolicyOrder_ = softtouchPolicy_->forward(policyObs);
+    publishPolicyDebug(policyObs);
     lastEffortPolicyUpdateTime_ = now;
     hasEffortTarget_ = true;
     if (!obsDumpPath_.empty()) {
@@ -496,7 +748,7 @@ controller_interface::return_type SoftTouchDribbleController::updatePositionTarg
       obsDump_->flush();
     }
   } else if (policyObs.size() != static_cast<Eigen::Index>(softtouchPolicy_->getObservationSize())) {
-    policyObs = observationManager_->getValue();
+    policyObs = buildPolicyObservation();
   }
 
   const vector_t targetControlOrder = policyVectorToControlOrder(effortTargetPolicyOrder_);
@@ -524,17 +776,24 @@ controller_interface::return_type SoftTouchDribbleController::updateEffortPd(con
     return baseResult;
   }
 
+  if (!hasFreshPolicyInputs()) {
+    RCLCPP_WARN_THROTTLE(get_node()->get_logger(), *get_node()->get_clock(), 1000,
+                         "SoftTouch policy forward skipped until fresh ball, base, and observation-frame inputs arrive.");
+    return holdCurrentPositionTarget();
+  }
+
   const scalar_t now = static_cast<scalar_t>(time.seconds());
   const bool shouldUpdatePolicy =
       !hasEffortTarget_ || actionPolicyPeriod_ <= scalar_t(0.0) ||
       (now - lastEffortPolicyUpdateTime_) >= (actionPolicyPeriod_ - scalar_t(1.0e-9));
   if (shouldUpdatePolicy) {
-    policyObs = observationManager_->getValue();
+    policyObs = buildPolicyObservation();
     effortTargetPolicyOrder_ = softtouchPolicy_->forward(policyObs);
+    publishPolicyDebug(policyObs);
     lastEffortPolicyUpdateTime_ = now;
     hasEffortTarget_ = true;
   } else if (policyObs.size() != static_cast<Eigen::Index>(softtouchPolicy_->getObservationSize())) {
-    policyObs = observationManager_->getValue();
+    policyObs = buildPolicyObservation();
   }
   const vector_t& targetPolicyOrder = effortTargetPolicyOrder_;
   const vector_t q = readPolicyJointPosition();
@@ -670,6 +929,17 @@ void SoftTouchDribbleController::subscribeBaseState() {
                                                                                         << " twist=" << baseTwistTopic_);
 }
 
+void SoftTouchDribbleController::subscribeObservationFrameState() {
+  if (cfg_.observationFrameSource != "topic") {
+    return;
+  }
+  const auto qos = rclcpp::SensorDataQoS();
+  observationFramePoseSub_ = get_node()->create_subscription<geometry_msgs::msg::PoseStamped>(
+      observationFramePoseTopic_, qos,
+      [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) { handleObservationFramePose(msg); });
+  RCLCPP_INFO_STREAM(get_node()->get_logger(), "SoftTouch observation frame uses topic pose=" << observationFramePoseTopic_);
+}
+
 void SoftTouchDribbleController::handleBallPose(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
   if (!commandTerm_) {
     return;
@@ -704,11 +974,69 @@ void SoftTouchDribbleController::handleBaseTwist(const geometry_msgs::msg::Twist
   commandTerm_->setBaseAngularVelocity(angularVelocityBody, stampToSeconds(msg->header.stamp));
 }
 
+void SoftTouchDribbleController::handleObservationFramePose(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+  if (!commandTerm_) {
+    return;
+  }
+  const vector3_t position(msg->pose.position.x, msg->pose.position.y, msg->pose.position.z);
+  const quaternion_t orientation(msg->pose.orientation.w, msg->pose.orientation.x, msg->pose.orientation.y,
+                                 msg->pose.orientation.z);
+  commandTerm_->setObservationFramePose(position, orientation, stampToSeconds(msg->header.stamp));
+}
+
 scalar_t SoftTouchDribbleController::stampToSeconds(const builtin_interfaces::msg::Time& stamp) const {
   if (stamp.sec == 0 && stamp.nanosec == 0) {
     return static_cast<scalar_t>(get_node()->get_clock()->now().seconds());
   }
   return static_cast<scalar_t>(stamp.sec) + static_cast<scalar_t>(stamp.nanosec) * scalar_t(1.0e-9);
+}
+
+void SoftTouchDribbleController::publishPolicyDebug(const vector_t& policyObs) {
+  if (!debugPublishPolicyIo_ || !softtouchPolicy_) {
+    return;
+  }
+  if (debugObservationPub_) {
+    debugObservationPub_->publish(vectorMessage(policyObs, "observation"));
+  }
+  if (debugRawActionPub_) {
+    debugRawActionPub_->publish(vectorMessage(softtouchPolicy_->getCurrentRawAction(), "raw_action"));
+  }
+  if (debugLatentActionPub_) {
+    debugLatentActionPub_->publish(vectorMessage(softtouchPolicy_->getCurrentLatentAction(), "latent_action"));
+  }
+  if (debugJointTargetPub_) {
+    debugJointTargetPub_->publish(vectorMessage(softtouchPolicy_->getJointTarget(), "joint_target"));
+  }
+}
+
+void SoftTouchDribbleController::publishPolicyDebugSchema() {
+  if (!debugObservationSchemaPub_ || !softtouchPolicy_) {
+    return;
+  }
+  std::vector<size_t> history = softtouchPolicy_->getStoredObservationHistoryLengths();
+  const auto& names = softtouchPolicy_->getObservationNames();
+  const auto& dims = softtouchPolicy_->getObservationDims();
+  if (!names.empty() && history.size() != names.size()) {
+    history.assign(names.size(), 1);
+  }
+
+  std::ostringstream out;
+  out << "{";
+  out << "\"observation_names\":";
+  appendStringArray(out, names);
+  out << ",\"observation_dims\":";
+  appendSizeArray(out, dims);
+  out << ",\"history_lengths\":";
+  appendSizeArray(out, history);
+  out << ",\"obs_frame_body\":\"" << softtouchPolicy_->getObsFrameBodyName() << "\"";
+  const auto& offset = softtouchPolicy_->getObsFrameOffset();
+  out << ",\"obs_frame_offset\":[" << offset.x() << "," << offset.y() << "," << offset.z() << "]";
+  out << ",\"input_width\":" << softtouchPolicy_->getObservationSize();
+  out << "}";
+
+  std_msgs::msg::String msg;
+  msg.data = out.str();
+  debugObservationSchemaPub_->publish(msg);
 }
 
 void SoftTouchDribbleController::publishVisualization(const rclcpp::Time& time) {
