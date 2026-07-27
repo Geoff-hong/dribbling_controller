@@ -59,7 +59,7 @@ class SoftTouchJointVelocity final : public JointObservationTerm {
 class SoftTouchLastLatentAction final : public SoftTouchDribbleObservation {
  public:
   using SoftTouchDribbleObservation::SoftTouchDribbleObservation;
-  size_t getSize() const override { return kSoftTouchDribbleLatentDim; }
+  size_t getSize() const override { return commandTerm_->getPolicy()->getLatentDim(); }
 
  protected:
   vector_t evaluate() override;

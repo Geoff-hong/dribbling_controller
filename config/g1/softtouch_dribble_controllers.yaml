@@ -5,7 +5,7 @@ controller_manager:
     state_estimator:
       type: legged_controllers/StateEstimator
     standby_controller:
-      type: legged_controllers/StandbyController
+      type: motion_tracking_controller/SoftTouchStandbyController
     walking_controller:
       type: motion_tracking_controller/SoftTouchDribbleController
 
@@ -63,11 +63,15 @@ standby_controller:
         left_elbow_joint, left_wrist_roll_joint, left_wrist_pitch_joint, left_wrist_yaw_joint,
         right_shoulder_pitch_joint, right_shoulder_roll_joint, right_shoulder_yaw_joint,
         right_elbow_joint, right_wrist_roll_joint, right_wrist_pitch_joint, right_wrist_yaw_joint ]
-    default_position: [ -0.312, 0.0, 0.0, 0.669, -0.33, 0.0,
-                        -0.312, 0.0, 0.0, 0.669, -0.33, 0.0,
+    default_position: [ -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,
+                        -0.312, 0.0, 0.0, 0.669, -0.363, 0.0,
                         0.0, 0.0, 0.0,
                         0.2, 0.2, 0.0, 0.6, 0.0, 0.0, 0.0,
                         0.2, -0.2, 0.0, 0.6, 0.0, 0.0, 0.0 ]
+    reset:
+      mujoco_reset_on_activate: true
+      mujoco_reset_topic: "/softtouch/mujoco_reset"
+      mujoco_reset_hold_s: 0.2
     kp: [ 350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
           350.0, 200.0, 200.0, 300.0, 300.0, 150.0,
           200.0, 200.0, 200.0,
@@ -100,6 +104,7 @@ walking_controller:
         - last_latent_action
         - ball_pos_b
         - ball_lin_vel_b
+        - ball_radius
         - target_dir_b
         - target_speed
         - next_target_speed
@@ -112,7 +117,7 @@ walking_controller:
       base_name: "pelvis"
       seed: 42
       joint_order_source: "onnx_metadata"
-      observation_dim: 180
+      observation_dim: 920
       action_dim: 29
       latent_dim: 8
       use_previous_applied_raw_action: true
@@ -124,6 +129,7 @@ walking_controller:
         source: "topic"
         pose_topic: "/softtouch/ball/pose"
         twist_topic: "/softtouch/ball/twist"
+        radius_m: 0.10
         frame_id: "world"
         timeout_s: 0.10
 
@@ -140,18 +146,28 @@ walking_controller:
         frame_id: "world"
         timeout_s: 0.10
 
+      obs_frame:
+        # Policy frame for ball_pos_b / ball_lin_vel_b / target_dir_b.
+        # sim2sim uses FK from ONNX metadata: torso_link + obs_frame_offset.
+        # real launch overrides this to topic and expects the mocap helper to
+        # publish that same policy frame as a PoseStamped.
+        source: "model"
+        pose_topic: "/softtouch/mocap/chest/pose"
+        frame_id: "world"
+        timeout_s: 0.10
+
       reset:
         ball_forward_m: 0.65
         ball_z_m: 0.10
         reset_route_on_activate: true
         reset_policy_memory_on_activate: true
-        mujoco_reset_on_activate: true
+        mujoco_reset_on_activate: false
         mujoco_reset_topic: "/softtouch/mujoco_reset"
         mujoco_reset_hold_s: 0.06
 
       action:
         command_mode: "position_target"
-        policy_update_period_s: 0.02
+        policy_update_period_s: 0.0
         effort_limit: [ 88.0, 88.0, 88.0, 139.0, 139.0, 50.0,
                         88.0, 88.0, 50.0, 139.0, 139.0,
                         25.0, 25.0, 50.0, 50.0, 25.0,
@@ -194,6 +210,14 @@ walking_controller:
         target_arrow_length: 0.45
         ball_marker_radius: 0.09
         route_max_points: 160
+
+      debug:
+        publish_policy_io: true
+        observation_topic: "/softtouch/policy/observation"
+        observation_schema_topic: "/softtouch/policy/observation_schema"
+        raw_action_topic: "/softtouch/policy/raw_action"
+        latent_action_topic: "/softtouch/policy/latent_action"
+        joint_target_topic: "/softtouch/policy/joint_target"
 
       route:
         cmd_mode: 4

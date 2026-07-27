@@ -17,14 +17,21 @@ def generate_launch_description():
     mujoco_reset_zero_velocity = LaunchConfiguration('mujoco_reset_zero_velocity')
     enable_teleop = LaunchConfiguration('enable_teleop')
     spawn_inactive_controllers = LaunchConfiguration('spawn_inactive_controllers')
+    activate_standby_controller = LaunchConfiguration('activate_standby_controller')
+    activate_walking_controller = LaunchConfiguration('activate_walking_controller')
     ext_pos_corr = LaunchConfiguration('ext_pos_corr')
     softtouch_base_state_source = LaunchConfiguration('softtouch_base_state_source')
+    softtouch_obs_frame_source = LaunchConfiguration('softtouch_obs_frame_source')
+    softtouch_obs_frame_pose_topic = LaunchConfiguration('softtouch_obs_frame_pose_topic')
+    softtouch_ball_radius_m = LaunchConfiguration('softtouch_ball_radius_m')
     softtouch_route_cmd_mode = LaunchConfiguration('softtouch_route_cmd_mode')
     softtouch_seed = LaunchConfiguration('softtouch_seed')
     softtouch_route_length_m = LaunchConfiguration('softtouch_route_length_m')
+    softtouch_route_vmax = LaunchConfiguration('softtouch_route_vmax')
     softtouch_ball_angular_damping = LaunchConfiguration('softtouch_ball_angular_damping')
     softtouch_action_command_mode = LaunchConfiguration('softtouch_action_command_mode')
     softtouch_mujoco_reset_hold_s = LaunchConfiguration('softtouch_mujoco_reset_hold_s')
+    softtouch_obs_dump_path = LaunchConfiguration('softtouch_obs_dump_path')
     launch_rviz = LaunchConfiguration('launch_rviz')
     rviz_config = LaunchConfiguration('rviz_config')
 
@@ -41,8 +48,8 @@ def generate_launch_description():
                 EnvironmentVariable('HOME'),
                 'SoftTouch',
                 'checkpoints',
-                'g1_dribble_s3_human_iter35000',
-                'softtouch_dribble_deploy.onnx',
+                'g1_dribble_s3_net512_iter20000',
+                'softtouch_dribble_deploy_m19999.onnx',
             ]),
             description='SoftTouch dribble deployment ONNX path',
         ),
@@ -72,7 +79,7 @@ def generate_launch_description():
                 FindPackageShare('motion_tracking_controller'),
                 'config',
                 'g1',
-                'softtouch_mujoco_reset_walkf_rf_frame0.txt',
+                'softtouch_mujoco_reset_standby.txt',
             ]),
             description='SoftTouch MuJoCo reset-state txt path.',
         ),
@@ -93,8 +100,18 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'spawn_inactive_controllers',
+            default_value='true',
+            description='Load inactive controllers from the YAML so walking_controller can be activated later.',
+        ),
+        DeclareLaunchArgument(
+            'activate_standby_controller',
+            default_value='true',
+            description='Activate standby_controller during launch, matching real robot startup.',
+        ),
+        DeclareLaunchArgument(
+            'activate_walking_controller',
             default_value='false',
-            description='Load inactive controllers from the YAML. Off by default to avoid unused StandbyController plugin requirements.',
+            description='Activate walking_controller during launch; false gives standby-first sim2sim.',
         ),
         DeclareLaunchArgument(
             'ext_pos_corr',
@@ -105,6 +122,21 @@ def generate_launch_description():
             'softtouch_base_state_source',
             default_value='',
             description='Optional SoftTouch base_state.source override: model or topic.',
+        ),
+        DeclareLaunchArgument(
+            'softtouch_obs_frame_source',
+            default_value='',
+            description='Optional SoftTouch obs_frame.source override: model or topic.',
+        ),
+        DeclareLaunchArgument(
+            'softtouch_obs_frame_pose_topic',
+            default_value='',
+            description='Optional SoftTouch obs_frame PoseStamped topic override.',
+        ),
+        DeclareLaunchArgument(
+            'softtouch_ball_radius_m',
+            default_value='0.10',
+            description='SoftTouch ball radius in metres; feeds ball_radius obs as radius_m - 0.10.',
         ),
         DeclareLaunchArgument(
             'softtouch_route_cmd_mode',
@@ -124,6 +156,11 @@ def generate_launch_description():
                         'episode (robot stops at the route end). ~18 m ~= 10 s.',
         ),
         DeclareLaunchArgument(
+            'softtouch_route_vmax',
+            default_value='',
+            description='Optional SoftTouch route.route_vmax override in m/s.',
+        ),
+        DeclareLaunchArgument(
             'softtouch_ball_angular_damping',
             default_value='',
             description='Optional ball bridge ball_angular_damping (= 4*I) override, used by '
@@ -138,6 +175,11 @@ def generate_launch_description():
             'softtouch_mujoco_reset_hold_s',
             default_value='',
             description='Optional SoftTouch controller reset hold duration after publishing the MuJoCo reset request.',
+        ),
+        DeclareLaunchArgument(
+            'softtouch_obs_dump_path',
+            default_value='',
+            description='Optional per-policy-tick SoftTouch obs/action dump path for sim2sim debugging.',
         ),
         DeclareLaunchArgument(
             'launch_rviz',
@@ -165,14 +207,21 @@ def generate_launch_description():
                 'policy_path': policy_path,
                 'enable_teleop': enable_teleop,
                 'spawn_inactive_controllers': spawn_inactive_controllers,
+                'activate_standby_controller': activate_standby_controller,
+                'activate_walking_controller': activate_walking_controller,
                 'ext_pos_corr': ext_pos_corr,
                 'softtouch_base_state_source': softtouch_base_state_source,
+                'softtouch_obs_frame_source': softtouch_obs_frame_source,
+                'softtouch_obs_frame_pose_topic': softtouch_obs_frame_pose_topic,
+                'softtouch_ball_radius_m': softtouch_ball_radius_m,
                 'softtouch_route_cmd_mode': softtouch_route_cmd_mode,
                 'softtouch_seed': softtouch_seed,
                 'softtouch_route_length_m': softtouch_route_length_m,
+                'softtouch_route_vmax': softtouch_route_vmax,
                 'softtouch_ball_angular_damping': softtouch_ball_angular_damping,
                 'softtouch_action_command_mode': softtouch_action_command_mode,
                 'softtouch_mujoco_reset_hold_s': softtouch_mujoco_reset_hold_s,
+                'softtouch_obs_dump_path': softtouch_obs_dump_path,
             }.items(),
         ),
         Node(

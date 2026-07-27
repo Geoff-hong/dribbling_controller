@@ -14,6 +14,7 @@ namespace legged {
 struct SoftTouchDribbleCommandCfg {
   std::string baseName = "pelvis";
   std::string baseStateSource = "model";
+  std::string observationFrameSource = "model";
   SoftTouchDribbleRouteConfig route;
   int cmdMode = 4;
   uint32_t seed = 42;
@@ -21,6 +22,7 @@ struct SoftTouchDribbleCommandCfg {
   scalar_t resetBallZ = 0.09;
   scalar_t ballTimeout = 0.10;
   scalar_t baseTimeout = 0.10;
+  scalar_t observationFrameTimeout = 0.10;
 };
 
 struct SoftTouchDribbleBallState {
@@ -59,9 +61,11 @@ class SoftTouchDribbleCommandTerm : public CommandTerm {
   void setBallVelocity(const vector3_t& linearVelocityWorld, scalar_t stamp);
   void setBasePose(const vector3_t& positionWorld, const quaternion_t& orientationWorld, scalar_t stamp);
   void setBaseAngularVelocity(const vector3_t& angularVelocityBody, scalar_t stamp);
+  void setObservationFramePose(const vector3_t& positionWorld, const quaternion_t& orientationWorld, scalar_t stamp);
   void setNow(scalar_t now) { now_ = now; }
   bool hasFreshBallState() const;
   bool hasFreshBaseState() const;
+  bool hasFreshObservationFrameState() const;
 
   void refreshRouteCommand();
   SoftTouchDribbleCommand getRouteCommand();
@@ -71,6 +75,8 @@ class SoftTouchDribbleCommandTerm : public CommandTerm {
   vector3_t getBallLinearVelocityWorld() const;
   vector3_t getPelvisPositionWorld() const;
   quaternion_t getPelvisOrientationWorld() const;
+  vector3_t getObservationFramePositionWorld() const;
+  quaternion_t getObservationFrameOrientationWorld() const;
   vector3_t getBaseAngularVelocityBody() const;
   // sim2sim parity debug: sample stamps for measuring the topic-hop staleness
   scalar_t getBallPositionStamp() const { return getBallState().positionStamp; }
@@ -82,6 +88,7 @@ class SoftTouchDribbleCommandTerm : public CommandTerm {
  private:
   SoftTouchDribbleBallState getBallState() const;
   SoftTouchDribbleBaseState getBaseState() const;
+  SoftTouchDribbleBaseState getObservationFrameState() const;
   bool isFresh(scalar_t stamp) const;
   bool isFresh(scalar_t stamp, scalar_t timeout) const;
   bool hasFreshPosition(const SoftTouchDribbleBallState& ball) const;
@@ -89,7 +96,10 @@ class SoftTouchDribbleCommandTerm : public CommandTerm {
   bool hasFreshPose(const SoftTouchDribbleBaseState& base) const;
   bool hasFreshTwist(const SoftTouchDribbleBaseState& base) const;
   bool useBaseTopic() const;
+  bool useObservationFrameTopic() const;
   vector3_t fallbackBallPositionWorld() const;
+  vector3_t modelObservationFramePositionWorld() const;
+  quaternion_t modelObservationFrameOrientationWorld() const;
 
   SoftTouchDribbleCommandCfg cfg_;
   SoftTouchDribbleOnnxPolicy::SharedPtr policy_;
@@ -97,12 +107,15 @@ class SoftTouchDribbleCommandTerm : public CommandTerm {
   SoftTouchDribbleCommand cachedCommand_;
   bool cachedCommandValid_ = false;
   size_t baseFrameIndex_ = 0;
+  size_t observationFrameIndex_ = 0;
   scalar_t now_ = 0.0;
 
   mutable std::mutex ballMutex_;
   SoftTouchDribbleBallState ball_;
   mutable std::mutex baseMutex_;
   SoftTouchDribbleBaseState base_;
+  mutable std::mutex observationFrameMutex_;
+  SoftTouchDribbleBaseState observationFrame_;
 };
 
 }  // namespace legged

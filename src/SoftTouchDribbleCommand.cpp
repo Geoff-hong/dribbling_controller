@@ -28,14 +28,19 @@ vector_t SoftTouchDribbleCommandTerm::getValue() {
 void SoftTouchDribbleCommandTerm::reset() {
   const auto& pinModel = model_->getPinModel();
   baseFrameIndex_ = pinModel.getFrameId(cfg_.baseName);
-  if (baseFrameIndex_ >= pinModel.nframes) {
+  if (baseFrameIndex_ >= static_cast<size_t>(pinModel.nframes)) {
     throw std::runtime_error("SoftTouch base frame " + cfg_.baseName + " not found.");
+  }
+  const auto observationFrameName = policy_ ? policy_->getObsFrameBodyName() : cfg_.baseName;
+  observationFrameIndex_ = pinModel.getFrameId(observationFrameName);
+  if (observationFrameIndex_ >= static_cast<size_t>(pinModel.nframes)) {
+    throw std::runtime_error("SoftTouch observation frame " + observationFrameName + " not found.");
   }
 
   const vector3_t ball = getBallPositionWorld();
-  const auto pelvisOrientation = getPelvisOrientationWorld();
+  const auto observationFrameOrientation = getObservationFrameOrientationWorld();
   route_.seed(cfg_.seed);
-  cachedCommand_ = route_.reset(ball.head<2>(), forwardXyFromOrientation(pelvisOrientation), cfg_.cmdMode);
+  cachedCommand_ = route_.reset(ball.head<2>(), forwardXyFromOrientation(observationFrameOrientation), cfg_.cmdMode);
   cachedCommandValid_ = true;
 }
 
@@ -81,6 +86,18 @@ void SoftTouchDribbleCommandTerm::setBaseAngularVelocity(const vector3_t& angula
   base_.hasTwist = true;
 }
 
+void SoftTouchDribbleCommandTerm::setObservationFramePose(const vector3_t& positionWorld,
+                                                          const quaternion_t& orientationWorld, scalar_t stamp) {
+  std::lock_guard<std::mutex> lock(observationFrameMutex_);
+  if (observationFrame_.hasPose && stamp < observationFrame_.poseStamp) {
+    return;
+  }
+  observationFrame_.positionWorld = positionWorld;
+  observationFrame_.orientationWorld = orientationWorld.normalized();
+  observationFrame_.poseStamp = stamp;
+  observationFrame_.hasPose = true;
+}
+
 bool SoftTouchDribbleCommandTerm::hasFreshBallState() const {
   const auto ball = getBallState();
   return hasFreshPosition(ball) && hasFreshVelocity(ball);
@@ -92,6 +109,14 @@ bool SoftTouchDribbleCommandTerm::hasFreshBaseState() const {
   }
   const auto base = getBaseState();
   return hasFreshPose(base) && hasFreshTwist(base);
+}
+
+bool SoftTouchDribbleCommandTerm::hasFreshObservationFrameState() const {
+  if (!useObservationFrameTopic()) {
+    return true;
+  }
+  const auto observationFrame = getObservationFrameState();
+  return observationFrame.hasPose && isFresh(observationFrame.poseStamp, cfg_.observationFrameTimeout);
 }
 
 void SoftTouchDribbleCommandTerm::refreshRouteCommand() {
@@ -145,6 +170,26 @@ quaternion_t SoftTouchDribbleCommandTerm::getPelvisOrientationWorld() const {
   return quaternion_t(pinData.oMf[baseFrameIndex_].rotation()).normalized();
 }
 
+vector3_t SoftTouchDribbleCommandTerm::getObservationFramePositionWorld() const {
+  if (useObservationFrameTopic()) {
+    const auto observationFrame = getObservationFrameState();
+    if (observationFrame.hasPose && isFresh(observationFrame.poseStamp, cfg_.observationFrameTimeout)) {
+      return observationFrame.positionWorld;
+    }
+  }
+  return modelObservationFramePositionWorld();
+}
+
+quaternion_t SoftTouchDribbleCommandTerm::getObservationFrameOrientationWorld() const {
+  if (useObservationFrameTopic()) {
+    const auto observationFrame = getObservationFrameState();
+    if (observationFrame.hasPose && isFresh(observationFrame.poseStamp, cfg_.observationFrameTimeout)) {
+      return observationFrame.orientationWorld.normalized();
+    }
+  }
+  return modelObservationFrameOrientationWorld();
+}
+
 vector3_t SoftTouchDribbleCommandTerm::getBaseAngularVelocityBody() const {
   if (useBaseTopic()) {
     const auto base = getBaseState();
@@ -163,6 +208,11 @@ SoftTouchDribbleBallState SoftTouchDribbleCommandTerm::getBallState() const {
 SoftTouchDribbleBaseState SoftTouchDribbleCommandTerm::getBaseState() const {
   std::lock_guard<std::mutex> lock(baseMutex_);
   return base_;
+}
+
+SoftTouchDribbleBaseState SoftTouchDribbleCommandTerm::getObservationFrameState() const {
+  std::lock_guard<std::mutex> lock(observationFrameMutex_);
+  return observationFrame_;
 }
 
 bool SoftTouchDribbleCommandTerm::isFresh(scalar_t stamp) const {
@@ -196,11 +246,28 @@ bool SoftTouchDribbleCommandTerm::useBaseTopic() const {
   return cfg_.baseStateSource == "topic";
 }
 
+bool SoftTouchDribbleCommandTerm::useObservationFrameTopic() const {
+  return cfg_.observationFrameSource == "topic";
+}
+
 vector3_t SoftTouchDribbleCommandTerm::fallbackBallPositionWorld() const {
-  const vector3_t pelvis = getPelvisPositionWorld();
-  const vector2_t forward = forwardXyFromOrientation(getPelvisOrientationWorld());
-  return vector3_t(pelvis.x() + cfg_.resetBallForward * forward.x(), pelvis.y() + cfg_.resetBallForward * forward.y(),
+  const vector3_t framePosition = getObservationFramePositionWorld();
+  const vector2_t forward = forwardXyFromOrientation(getObservationFrameOrientationWorld());
+  return vector3_t(framePosition.x() + cfg_.resetBallForward * forward.x(),
+                   framePosition.y() + cfg_.resetBallForward * forward.y(),
                    cfg_.resetBallZ);
+}
+
+vector3_t SoftTouchDribbleCommandTerm::modelObservationFramePositionWorld() const {
+  const auto& pinData = model_->getPinData();
+  const auto& frame = pinData.oMf[observationFrameIndex_];
+  const vector3_t offset = policy_ ? policy_->getObsFrameOffset() : vector3_t::Zero();
+  return frame.translation() + frame.rotation() * offset;
+}
+
+quaternion_t SoftTouchDribbleCommandTerm::modelObservationFrameOrientationWorld() const {
+  const auto& pinData = model_->getPinData();
+  return quaternion_t(pinData.oMf[observationFrameIndex_].rotation()).normalized();
 }
 
 }  // namespace legged

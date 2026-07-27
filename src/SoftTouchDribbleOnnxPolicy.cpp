@@ -21,9 +21,9 @@ vector_t vectorFromStdVector(const std::vector<scalar_t>& values) {
 void SoftTouchDribbleOnnxPolicy::reset() {
   OnnxPolicy::reset();
   rawAction_ = vector_t::Zero(kSoftTouchDribbleNumJoints);
-  latentAction_ = vector_t::Zero(kSoftTouchDribbleLatentDim);
+  latentAction_ = vector_t::Zero(static_cast<Eigen::Index>(latentDim_));
   previousRawAction_ = vector_t::Zero(kSoftTouchDribbleNumJoints);
-  previousLatentAction_ = vector_t::Zero(kSoftTouchDribbleLatentDim);
+  previousLatentAction_ = vector_t::Zero(static_cast<Eigen::Index>(latentDim_));
   jointTarget_ = defaultJointPosition_.size() == static_cast<Eigen::Index>(kSoftTouchDribbleNumJoints)
                      ? defaultJointPosition_
                      : vector_t::Zero(kSoftTouchDribbleNumJoints);
@@ -41,6 +41,10 @@ vector_t SoftTouchDribbleOnnxPolicy::forward(const vector_t& observations) {
 
   rawAction_ = outputTensors_[name2Index_.at("actions")].row(0).cast<scalar_t>();
   latentAction_ = outputTensors_[name2Index_.at("latent_action")].row(0).cast<scalar_t>();
+  if (latentAction_.size() != static_cast<Eigen::Index>(latentDim_)) {
+    throw std::runtime_error("SoftTouch latent_action output has size " + std::to_string(latentAction_.size()) +
+                             ", expected metadata latent_dim " + std::to_string(latentDim_));
+  }
   jointTarget_ = makeSoftTouchJointTarget(rawAction_, defaultJointPosition_, actionScale_);
   if (clipJointTarget_) {
     for (Eigen::Index i = 0; i < jointTarget_.size(); ++i) {
@@ -65,20 +69,82 @@ void SoftTouchDribbleOnnxPolicy::parseMetadata() {
   jointNames_ = parseCsv<std::string>(getMetadataStr("joint_names"));
   defaultJointPosition_ = parseVectorMetadata("default_joint_pos", kSoftTouchDribbleNumJoints);
   actionScale_ = parseVectorMetadata("action_scale", kSoftTouchDribbleNumJoints);
+  try {
+    latentDim_ = std::stoul(getMetadataStr("latent_dim"));
+  } catch (const std::exception&) {
+    latentDim_ = kSoftTouchDribbleLatentDim;
+  }
+  if (latentDim_ == 0) {
+    throw std::runtime_error("SoftTouch ONNX metadata latent_dim must be positive.");
+  }
   rawAction_ = vector_t::Zero(kSoftTouchDribbleNumJoints);
-  latentAction_ = vector_t::Zero(kSoftTouchDribbleLatentDim);
+  latentAction_ = vector_t::Zero(static_cast<Eigen::Index>(latentDim_));
   previousRawAction_ = vector_t::Zero(kSoftTouchDribbleNumJoints);
-  previousLatentAction_ = vector_t::Zero(kSoftTouchDribbleLatentDim);
+  previousLatentAction_ = vector_t::Zero(static_cast<Eigen::Index>(latentDim_));
   jointTarget_ = defaultJointPosition_;
   jointTargetLower_ = vector_t::Zero(kSoftTouchDribbleNumJoints);
   jointTargetUpper_ = vector_t::Zero(kSoftTouchDribbleNumJoints);
+  observationNames_.clear();
+  observationDims_.clear();
+  observationHistoryLengths_.clear();
+  try {
+    actorObservationDim_ = std::stoul(getMetadataStr("actor_observation_dim"));
+  } catch (const std::exception&) {
+    actorObservationDim_ = 0;
+  }
+  try {
+    actorHistoryLength_ = std::stoul(getMetadataStr("actor_history_length"));
+  } catch (const std::exception&) {
+    actorHistoryLength_ = 1;
+  }
+  try {
+    decoderStateDim_ = std::stoul(getMetadataStr("decoder_state_dim"));
+  } catch (const std::exception&) {
+    decoderStateDim_ = 0;
+  }
+  try {
+    observationNames_ = parseCsv<std::string>(getMetadataStr("observation_names"));
+  } catch (const std::exception&) {
+    observationNames_.clear();
+  }
+  try {
+    observationDims_ = parseCsv<size_t>(getMetadataStr("observation_dims"));
+  } catch (const std::exception&) {
+    observationDims_.clear();
+  }
+  observationHistoryLengths_ = getObservationHistoryLengths();
+
+  obsFrameBodyName_ = "pelvis";
+  obsFrameOffset_ = vector3_t::Zero();
+  try {
+    const auto bodyName = getMetadataStr("obs_frame_body");
+    if (!bodyName.empty()) {
+      obsFrameBodyName_ = bodyName;
+    }
+  } catch (const std::exception&) {
+    obsFrameBodyName_ = "pelvis";
+  }
+  try {
+    const auto offset = parseCsv<scalar_t>(getMetadataStr("obs_frame_offset"));
+    if (offset.size() == 3) {
+      obsFrameOffset_ = vector3_t(offset[0], offset[1], offset[2]);
+    }
+  } catch (const std::exception&) {
+    obsFrameOffset_ = vector3_t::Zero();
+  }
 
   if (jointNames_.size() != kSoftTouchDribbleNumJoints) {
     throw std::runtime_error("SoftTouch ONNX joint_names metadata has " + std::to_string(jointNames_.size()) +
                              " joints, expected 29.");
   }
+  if (!observationNames_.empty() && observationNames_.size() != observationDims_.size()) {
+    throw std::runtime_error("SoftTouch ONNX observation_names and observation_dims metadata sizes do not match.");
+  }
 
   std::cout << '\t' << "softtouch_policy_kind: " << getMetadataStr("policy_kind") << '\n';
+  std::cout << '\t' << "softtouch_latent_dim: " << latentDim_ << '\n';
+  std::cout << '\t' << "softtouch_obs_frame_body: " << obsFrameBodyName_ << '\n';
+  std::cout << '\t' << "softtouch_obs_frame_offset: " << obsFrameOffset_.transpose() << '\n';
   std::cout << '\t' << "softtouch_joint_names: " << jointNames_ << '\n';
 }
 
