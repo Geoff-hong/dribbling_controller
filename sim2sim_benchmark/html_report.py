@@ -6,7 +6,8 @@
       --out sim2sim_eval_results/compare/report.html
 
   python -m sim2sim_benchmark.html_report --serve      # live mode: refresh (F5)
-      # re-discovers runs and re-reads the CSVs on every page load
+      # re-discovers runs and rebuilds whatever changed since the last load
+      # (unchanged -> served from memory; see the "aggregation cache" section)
 
 One HTML file, no external assets: experiment checkboxes in the sidebar select
 which runs are drawn. A topline summary table leads, then a DIFFERENCE MAP that
@@ -31,6 +32,7 @@ reference lines).
 import argparse
 import csv
 import datetime
+import hashlib
 import html as html_lib
 import json
 import os
@@ -150,17 +152,122 @@ DIFF_METRICS = [
     ("ball_dist", "robot-ball distance (m)", lambda r: r["ball_dist"],
      stats.mean_stat, False, "down"),
     ("progress", "progress (m)", lambda r: r["progress"], stats.mean_stat, False, "up"),
+    # plastic_turf's headline: every episode is MEANT to end in a failure, so the
+    # question is how long the policy lasted, not whether it survived a fixed
+    # budget. Meaningful on the other tables too, just less interesting there --
+    # their budgets are short enough that most episodes hit the cap.
+    ("duration", "task survival (s)", lambda r: r["duration"],
+     stats.mean_stat, False, "up"),
 ]
-# Up to this many runs we compute EVERY pair, so any run can serve as the
-# subject; beyond it only pairs against the first run are computed and the page
-# says so instead of silently offering a dead control.
+# Any run can be the significance subject, at any run count. The report used to
+# precompute {every pair} x {every metric} x {every condition} and cap the run
+# list at 8 to keep that affordable -- 55 pairs at 11 runs is already ~2.5 min,
+# and it grows as n^2 (1225 pairs at 50 checkpoints, ~53 min and ~200 MB).
 #
-# 8 = what the sidebar's "1-8 toggle" already lets you select, so the picker no
-# longer dies before the run list does. Measured 2026-07-21 on 199 conditions x
-# 6 metrics: 1.4 s per pair, i.e. 14 s at 5 runs and 39 s at 8 (28 pairs) --
-# once, at generation time. The old cap of 4 was set against an estimate of
-# ~1.5 s/pair over ~130 conditions, so it was never the cost that justified it.
-MAX_DIFF_RUNS = 8
+# Nothing needs that cross product. You look at ONE (subject, metric) at a time,
+# which is n-1 blocks, and the two views want very different slices:
+#   FULL_SCOPE     every condition of one metric   ~200 bootstraps  (~0.26 s)
+#   NOMINAL_SCOPE  one condition of every metric   ~1 bootstrap     (~1.4 ms)
+# So blocks are computed per (pair, metric, scope) on demand and cached forever
+# (see AggCache). Cost tracks what you actually open, not n^2. What ships inline
+# is the bounded O(n) slice that makes the page useful on arrival -- and is the
+# only thing an offline snapshot can show, since file:// cannot fetch.
+# Metrics whose FULL condition sweep ships inline. Two, not one: `survival` is the
+# arrival metric for the perturbation axes and `duration` is the field trial's
+# headline, and an offline snapshot that cannot fetch has to answer both. Each
+# costs (n-1) blocks of ~16 kB, so this stays O(n).
+INLINE_DIFF_METRICS = ("survival", "duration")
+NOMINAL_COND = "nominal"
+FULL_SCOPE, NOMINAL_SCOPE = "full", "nom"
+DIFF_ENDPOINT = "/_s2s/diff"        # --serve only; None on a static snapshot
+
+# Every per-episode table a run dir can hold, in the order collect_run and
+# pair_diffs walk them. plastic_turf joined 2026-07-29; a run predating it just
+# yields [] for that slot, which every consumer already handles.
+EPISODE_TABLES = ("robustness.csv", "capability.csv", "plastic_turf.csv")
+TURF_GROUP = "plastic_turf"
+# (condition name, what it is). No comparability flag: there is one point, and the
+# thresholds are stated authoritatively by the parameter panel, not by a chip that
+# has to be kept in sync by hand.
+TURF_POINTS = [
+    ("turf_harsh", "the field recipe — EDU torque ceiling, ±7° frame error, "
+                   "heavy pile, trained-envelope pushes"),
+]
+# Dropped 2026-07-29 along with their episodes (turf_mild = probe round g,
+# turf_max = round d). Named here only so a stale CSV cannot quietly resurrect
+# them through turf_series' unknown-condition fallback.
+TURF_RETIRED = ("turf_mild", "turf_max")
+
+# What the field-trial parameter panel shows, grouped the way you reason about the
+# deployment: (category, [(condition key, label, unit)]). Read from the run's own
+# <title>.conditions.json, never re-derived from today's code -- a run's record of
+# what it tested has to survive the code moving on. `dr.*` and `run.*` reach into
+# the nested dr dict and the run-level block.
+TURF_PARAM_GROUPS = [
+    ("route & task", [
+        ("route_mode", "route generator", ""),
+        ("route_vmax", "commanded speed cap", "m/s"),
+        ("route_v2_vel", "v2 training speed chain", ""),
+        ("route_len_m", "route length", "m"),
+        ("episode_s", "episode budget", "s"),
+    ]),
+    ("termination", [
+        ("ball_far_fail_m", "ball lost beyond", "m"),
+        ("offroute_fail_m", "off route beyond", "m"),
+    ]),
+    ("ball", [
+        ("dr.mass", "mass", "kg"),
+        ("dr.radius", "radius", "m"),
+        ("dr.ball", "surface friction", ""),
+        ("ball_damping", "roll brake c", ""),
+        ("ball_roll_fric", "roll friction", ""),
+        ("ball_bounce_dampratio", "bounce damp ratio", ""),
+    ]),
+    ("ground & turf", [
+        ("dr.foot", "foot friction", ""),
+        ("ground_solref_tc", "contact time constant", "s"),
+        ("pile_drag", "pile drag", "N·s/m"),
+        ("pile_height", "pile height", "m"),
+    ]),
+    ("actuation", [
+        ("motor_curve", "torque-speed ceiling", ""),
+        ("motor_peak_scale", "peak torque scale (EDU)", "×URDF"),
+        ("motor_vel_scale", "zero-torque speed scale", "×URDF"),
+        ("joint_friction", "joint friction", "N·m"),
+    ]),
+    ("observation", [
+        ("obs_noise_scale", "noise", "×trained"),
+        ("ball_obs_bias", "ball position bias", "m"),
+        ("obs_frame_rpy_bias_deg", "frame bias roll/pitch/yaw", "deg"),
+        ("ball_obs_delay_steps", "ball obs lag", "steps @50 Hz"),
+        ("action_delay_ms", "action lag", "ms"),
+    ]),
+    ("disturbance", [
+        ("push_dv", "base push", "×trained envelope"),
+        ("ball_push_dv", "ball push", "m/s"),
+        ("push_interval_s", "push interval", "s"),
+        ("tether_back_n", "tether backward", "N"),
+        ("tether_down_n", "tether downward", "N"),
+    ]),
+    ("episode start", [
+        ("reset_ball_dist", "ball distance", "m"),
+        ("reset_ball_bearing", "ball bearing", "deg"),
+        ("reset_jitter", "pose jitter", ""),
+        ("standby_hold_s", "standby hold before hand-off", "s"),
+        ("run.settle_range", "policy takeover window", "s"),
+    ]),
+    ("run level (not condition keys)", [
+        ("run.hybridfoot", "hybrid foot collision", ""),
+        ("run.robots", "parallel robots", ""),
+        ("run.route_bank", "distinct routes", ""),
+        ("run.reps", "reps per route", ""),
+    ]),
+]
+# The conditions the SUMMARY table quotes a CI for, i.e. what NOMINAL_SCOPE
+# computes. One bootstrap each, ~1.4 ms -- cheap enough to cover the field-trial
+# rows too, and without them those rows could only show a bare delta.
+HEADLINE_CONDS = (NOMINAL_COND,) + tuple(p[0] for p in TURF_POINTS)
+assert not set(TURF_RETIRED) & set(HEADLINE_CONDS)
 
 
 def _diff_rows(rows, extract):
@@ -173,58 +280,95 @@ def _diff_rows(rows, extract):
     return out
 
 
-def condition_diffs(parsed, labels):
-    """Bootstrap CIs on every condition, for every comparable pair of runs.
+def _by_condition(rows):
+    out = {}
+    for r in rows:
+        out.setdefault(r["condition"], []).append(r)
+    return out
 
-    Returns {"i>j": {metric: [{cond, group, x, delta, lo, hi, sig, paired, n}]}}
-    where i is the baseline and j the comparison. Only i<j is stored; the JS
-    negates for the reverse direction.
+
+def pair_diffs(rows_a, rows_b, metrics=None, conditions=None):
+    """Bootstrap CIs on the shared conditions of ONE pair of runs.
+
+    Returns {metric: [{cond, group, x, delta, lo, hi, sig, paired, n}]}, with
+    delta oriented as b - a. The (rob, cap) rows are grouped by condition ONCE
+    and reused across metrics -- regrouping per metric re-walked ~10k rows ten
+    times per pair for nothing.
+
+    `metrics` and `conditions` restrict the work, and the difference between the
+    two views is 200x: the summary table wants ONE condition across every metric
+    (~10 bootstraps), the difference map wants every condition of ONE metric
+    (~200). Computing the whole cross product for every pair up front is what
+    forced the old run-count cap."""
+    wanted = None if metrics is None else set(metrics)
+    per_metric = {}
+    tables = [(_by_condition(a), _by_condition(b))
+              for a, b in zip(rows_a, rows_b)]      # robustness, capability
+    for key, _label, extract, stat_fn, is_rate, _dir in DIFF_METRICS:
+        if wanted is not None and key not in wanted:
+            continue
+        entries = []
+        for by_cond_a, by_cond_b in tables:
+            shared = set(by_cond_a) & set(by_cond_b)
+            if conditions is not None:
+                shared &= set(conditions)
+            for cond in sorted(shared):
+                a = _diff_rows(by_cond_a[cond], extract)
+                b = _diff_rows(by_cond_b[cond], extract)
+                if not any(np.isfinite(r["v"]) for r in a):
+                    continue              # metric undefined for this condition
+                ci = stats.bootstrap_diff_ci(a, b, "v", stat_fn,
+                                             pair_key="pair", rate=is_rate)
+                if not np.isfinite(ci["delta"]):
+                    continue
+                entries.append(dict(
+                    cond=cond, group=by_cond_a[cond][0]["group"],
+                    x=by_cond_a[cond][0]["axis"],
+                    delta=round(ci["delta"], 4),
+                    lo=round(ci["lo"], 4) if np.isfinite(ci["lo"]) else None,
+                    hi=round(ci["hi"], 4) if np.isfinite(ci["hi"]) else None,
+                    sig=ci["significant"], paired=ci["paired"],
+                    n=ci["n_pairs"] or min(ci["n_a"], ci["n_b"])))
+        if entries:
+            per_metric[key] = entries
+    return per_metric
+
+
+def diff_block(get_rows, cache, i, j, metric, scope):
+    """One (pair, metric, scope) block of CIs, oriented delta = hi - lo.
+
+    Always keyed on the ordered pair, so both reading directions share one
+    computation and the JS negates for the reverse -- see getDiffs().
 
     This is THE view the report was missing: the summary table used to colour
     any non-zero delta green/red, while a single condition (n~48) needs a
     ~20-point gap to clear 95% (per-condition SE ~7 pts). Here a delta is only
     marked significant when the 95% bootstrap CI on the difference excludes zero.
     """
-    n = len(parsed)
-    pairs = [(i, j) for i in range(n) for j in range(i + 1, n)
-             if n <= MAX_DIFF_RUNS or i == 0]
-    if n > MAX_DIFF_RUNS:
-        print(f"[html_report] {n} runs: computing significance only against "
-              f"{labels[0]} (pairwise would be {n * (n - 1) // 2} comparisons)")
-    out = {}
-    for i, j in pairs:
-        per_metric = {}
-        for key, _label, extract, stat_fn, is_rate, _dir in DIFF_METRICS:
-            entries = []
-            for table in (0, 1):          # robustness, capability
-                rows_a, rows_b = parsed[i][table], parsed[j][table]
-                by_cond_a, by_cond_b = {}, {}
-                for r in rows_a:
-                    by_cond_a.setdefault(r["condition"], []).append(r)
-                for r in rows_b:
-                    by_cond_b.setdefault(r["condition"], []).append(r)
-                for cond in sorted(set(by_cond_a) & set(by_cond_b)):
-                    a = _diff_rows(by_cond_a[cond], extract)
-                    b = _diff_rows(by_cond_b[cond], extract)
-                    if not any(np.isfinite(r["v"]) for r in a):
-                        continue          # metric undefined for this condition
-                    ci = stats.bootstrap_diff_ci(a, b, "v", stat_fn,
-                                                 pair_key="pair", rate=is_rate)
-                    if not np.isfinite(ci["delta"]):
-                        continue
-                    entries.append(dict(
-                        cond=cond, group=by_cond_a[cond][0]["group"],
-                        x=by_cond_a[cond][0]["axis"],
-                        delta=round(ci["delta"], 4),
-                        lo=round(ci["lo"], 4) if np.isfinite(ci["lo"]) else None,
-                        hi=round(ci["hi"], 4) if np.isfinite(ci["hi"]) else None,
-                        sig=ci["significant"], paired=ci["paired"],
-                        n=ci["n_pairs"] or min(ci["n_a"], ci["n_b"])))
-            if entries:
-                per_metric[key] = entries
-        if per_metric:
-            out[f"{i}>{j}"] = per_metric
-    return out
+    lo, hi = (i, j) if i < j else (j, i)
+    entries = cache.get_block(lo, hi, metric, scope) if cache else None
+    if entries is None and scope == NOMINAL_SCOPE and cache:
+        # the full sweep already contains the headline rows; never re-bootstrap them
+        full = cache.get_block(lo, hi, metric, FULL_SCOPE)
+        if full is not None:
+            entries = [e for e in full if e["cond"] in HEADLINE_CONDS]
+    if entries is not None:
+        if cache:
+            cache.hits += 1
+        return entries
+    entries = pair_diffs(
+        get_rows(lo), get_rows(hi), [metric],
+        set(HEADLINE_CONDS) if scope == NOMINAL_SCOPE else None).get(metric, [])
+    if cache:
+        cache.misses += 1
+        cache.put_block(lo, hi, metric, scope, entries)
+    return entries
+
+
+def diff_rows_for(get_rows, cache, pairs, metrics, scope):
+    """[{metric: entries}] for a batch of index pairs -- one request's worth."""
+    return [{m: diff_block(get_rows, cache, i, j, m, scope) for m in metrics}
+            for i, j in pairs]
 
 
 def reason_legend(runs):
@@ -250,17 +394,22 @@ def reason_legend(runs):
     return out
 
 
-def robustness_groups(*row_lists):
-    """Ordered (group, label) pairs actually present in the data.
+def order_rob_groups(present):
+    """Group names -> ordered (group, label) pairs.
 
     Known groups keep their curated order and label; anything else is appended
     alphabetically under its raw name. Groups with no episodes are dropped, so
     the report no longer renders empty panels for channels this checkpoint never
     swept (ball_damping / dr_scale on the current runs)."""
-    present = {r["group"] for rows in row_lists for r in rows} - CAP_GROUPS - {""}
+    present = set(present) - CAP_GROUPS - {""}
     known = [g for g in ROB_GROUP_LABEL if g in present]
     unknown = sorted(present - set(known))
     return [(g, ROB_GROUP_LABEL.get(g, g)) for g in known + unknown]
+
+
+def robustness_groups(*row_lists):
+    """Ordered (group, label) pairs actually present in `row_lists`."""
+    return order_rob_groups(r["group"] for rows in row_lists for r in rows)
 
 
 def _f(value):
@@ -510,6 +659,10 @@ def condition_stats(rows, fail_fast=None):
         progress_n=len(prog_vals),
         mean_duration=round(float(np.mean(dur_vals)), 2) if dur_vals else None,
         mean_duration_se=mean_se(dur_vals, 2),
+        # time-to-failure is right-skewed (one lucky episode drags the mean), so
+        # the field-trial view reads the median beside it
+        duration_p50=round(float(np.median(dur_vals)), 2) if dur_vals else None,
+        duration_n=len(dur_vals),
         reasons=reasons)
 
 
@@ -710,13 +863,61 @@ def run_provenance(run_dir):
     return out
 
 
+def turf_series(turf_rows):
+    """plastic_turf rows -> one entry per severity, in severity order.
+
+    Not group_series: the points are NAMED (their axis index is just an ordering)
+    and the page has to show which of them share a measurement scale, so the name
+    rides along with the stats."""
+    by_name = _by_condition(turf_rows)
+    out = []
+    for name, label in TURF_POINTS:
+        rows = by_name.get(name)
+        if not rows:
+            continue
+        out.append(dict(name=name, label=label,
+                        x=float(rows[0]["axis"]), **condition_stats(rows)))
+    known = {p[0] for p in TURF_POINTS} | set(TURF_RETIRED)
+    for name in sorted(set(by_name) - known):
+        rows = by_name[name]
+        out.append(dict(name=name, label=name,
+                        x=float(rows[0]["axis"]), **condition_stats(rows)))
+    return out
+
+
+def turf_params(run_dir):
+    """The plastic_turf condition values THIS run recorded, or None.
+
+    Reads the run's own dump rather than re-deriving from conditions.py: the point
+    of the panel is what was tested, and code moves on."""
+    path = os.path.join(run_dir, "plastic_turf.conditions.json")
+    try:
+        with open(path) as f:
+            blob = json.load(f)
+    except (OSError, ValueError):
+        return None
+    live = {p[0] for p in TURF_POINTS}
+    cond = next((c for c in blob.get("conditions") or [] if c.get("name") in live), None)
+    if cond is None:
+        return None
+    out = {}
+    for _group, items in TURF_PARAM_GROUPS:
+        for key, _label, _unit in items:
+            if key.startswith("run."):
+                out[key] = (blob.get("run_level") or {}).get(key[4:])
+            elif key.startswith("dr."):
+                out[key] = (cond.get("dr") or {}).get(key[3:])
+            else:
+                out[key] = cond.get(key)
+    return out
+
+
 def collect_run(run_dir, label, index, report_dir, rob_groups=None, rows=None):
     """One run -> the JSON blob the page draws. `rob_groups` is the union of
     robustness groups across ALL selected runs (so a group only one run has still
-    gets a panel); `rows` reuses an already-parsed (rob, cap) pair."""
-    rob, cap = rows if rows is not None else (
-        read_rows(os.path.join(run_dir, "robustness.csv")),
-        read_rows(os.path.join(run_dir, "capability.csv")))
+    gets a panel); `rows` reuses an already-parsed (rob, cap, turf) triple."""
+    rob, cap, turf = rows if rows is not None else tuple(
+        read_rows(os.path.join(run_dir, f)) for f in EPISODE_TABLES)
     if rob_groups is None:
         rob_groups = robustness_groups(rob, cap)
     nominal = [r for r in rob if r["group"] == "baseline"]
@@ -725,17 +926,19 @@ def collect_run(run_dir, label, index, report_dir, rob_groups=None, rows=None):
     uturn = group_series(cap, "u_turn", split_sign=True)
     straight = group_series(cap, "straight_speed")
     csv_paths = [os.path.join(run_dir, f) for f in
-                 ("robustness.csv", "capability.csv",
-                  "capability_speed_pairs.csv", "capability_speed_traces.csv")]
+                 EPISODE_TABLES + ("capability_speed_pairs.csv",
+                                   "capability_speed_traces.csv")]
     mtimes = [os.path.getmtime(p) for p in csv_paths if os.path.exists(p)]
     pairs = binned_pairs(os.path.join(run_dir, "capability_speed_pairs.csv"))
     return dict(
         label=label, color=index % 8,
         prov=run_provenance(run_dir),
         info=dict(dir=os.path.relpath(run_dir), n_rob=len(rob), n_cap=len(cap),
+                  n_turf=len(turf),
                   data_time=datetime.datetime.fromtimestamp(max(mtimes)).strftime("%Y-%m-%d %H:%M")
                   if mtimes else None),
         nominal=condition_stats(nominal) if nominal else None,
+        turf=turf_series(turf), turf_params=turf_params(run_dir),
         robustness={g: group_series(rob, g) for g, _ in rob_groups},
         straight=straight, corner=corner, human=human, uturn=uturn,
         tracking=group_series(cap, "speed_tracking"),
@@ -970,6 +1173,61 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                background:color-mix(in srgb, var(--muted) 17%, transparent); }
   .keyswatch.cgood { background:var(--dgood); }
   .keyswatch.cbad { background:var(--dbad); }
+  /* field trial: a ranked bar per run. A table beats a grouped bar chart here --
+     the interesting read is the ORDER over checkpoints, and it stays legible at
+     any run count instead of squeezing n bars into one axis. */
+  .turfcard { margin:10px 0 16px; }
+  .turfhead { display:flex; gap:8px; align-items:baseline; margin:0 0 3px;
+              font-size:13.5px; font-weight:600; flex-wrap:wrap; }
+  .turfhead .turfscale { font-weight:400; font-size:11.5px; color:var(--muted); }
+  .turfrow { display:grid; grid-template-columns:250px 1fr 132px 116px 42px;
+             gap:10px; align-items:center; padding:2px 4px; border-radius:5px;
+             font-size:12px; }
+  .turfrow:hover { background:var(--wash); }
+  .turfname { display:flex; gap:6px; align-items:center; white-space:nowrap;
+              overflow:hidden; text-overflow:ellipsis; }
+  .turfbarwrap { position:relative; height:16px; border-radius:3px;
+                 background:color-mix(in srgb, var(--muted) 12%, transparent); }
+  .turfbar { position:absolute; left:0; top:0; bottom:0; border-radius:3px; }
+  /* the whisker has to read ON TOP of a saturated bar, which a thin dark line
+     does not -- the SE is the whole point here (whether the field recipe can
+     separate checkpoints at all), so it gets a light rule with end caps */
+  .turferr { position:absolute; top:50%; height:2px; transform:translateY(-50%);
+             background:var(--panel); box-shadow:0 0 0 .5px rgba(0,0,0,.35); }
+  .turferr::before, .turferr::after { content:""; position:absolute; top:-3px;
+             width:2px; height:8px; background:var(--panel);
+             box-shadow:0 0 0 .5px rgba(0,0,0,.35); }
+  .turferr::before { left:0; }
+  .turferr::after { right:0; }
+  .turfval { text-align:right; font-variant-numeric:tabular-nums; }
+  .turfval .turfsd { color:var(--muted); }
+  /* how the episodes ENDED, inline on the row. reasonChart is for a swept axis;
+     with one axis value per card it drew a full-size plot per severity and
+     buried the ranking it was meant to annotate. */
+  .turfmix { display:flex; height:11px; border-radius:2px; overflow:hidden;
+             background:color-mix(in srgb, var(--muted) 12%, transparent); }
+  .turfmix > span { display:block; }
+  .turfn { text-align:right; color:var(--muted); font-size:11px; }
+  .turfempty { color:var(--muted); font-size:12px; padding:4px; }
+  /* the parameter panel sits BELOW the ranking: you come here for the numbers,
+     then ask what produced them */
+  .turfparams { margin-top:14px; }
+  .turfparams > summary { cursor:pointer; font-size:12.5px; color:var(--text2);
+                          padding:4px 2px; }
+  .turfparams > summary:hover { color:var(--fg); }
+  .turfpgrid { display:grid; grid-template-columns:repeat(auto-fit, minmax(310px, 1fr));
+               gap:4px 26px; margin-top:6px; }
+  .turfpgroup { break-inside:avoid; }
+  .turfpgroup h5 { margin:8px 0 3px; font-size:11px; letter-spacing:.06em;
+                   text-transform:uppercase; color:var(--accent); font-weight:650; }
+  .turfprow { display:grid; grid-template-columns:1fr auto; gap:12px;
+              font-size:12px; padding:1.5px 0; align-items:baseline; }
+  .turfprow .turfpk { color:var(--text2); }
+  .turfprow .turfpv { font-variant-numeric:tabular-nums; text-align:right;
+                      white-space:nowrap; }
+  .turfprow .turfpu { color:var(--muted); font-size:11px; }
+  .turfprow.differ .turfpv { color:var(--dbad); font-weight:650; }
+  .turfprow.unset { opacity:.45; }
   .verdict { margin:2px 0 4px; font-size:13px; }
   .verdict .vgood { color:var(--dgood); font-weight:650; }
   .verdict .vbad { color:var(--dbad); font-weight:650; }
@@ -1084,6 +1342,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="note">1-8 toggle &middot; shift+digit solo &middot; 0 all &middot; click a name to solo</div>
     <h2>Sections</h2>
     <a class="navlink" href="#sec-summary">Summary</a>
+    <a class="navlink" href="#sec-turf">Field trial</a>
     <a class="navlink" href="#sec-signif">Significance</a>
     <a class="navlink" href="#sec-robustness">Robustness</a>
     <a class="navlink" href="#sec-corner">Corner turn</a>
@@ -1128,6 +1387,41 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         not yet "lost".
         See <a href="#sec-signif">Significance</a> for every condition.</div>
       <div id="summary-host" style="overflow-x:auto"></div></section>
+
+    <section id="sec-turf"><h2><span class="eyebrow">deployment</span>Field trial &mdash; the joint real-world distribution</h2>
+      <div class="note">The one table where every channel is off-nominal AT ONCE,
+        because that is what the field is: turf underfoot, an imperfect ball, a
+        mocap frame a few degrees out, firmware torque limits, a safety rope and a
+        hand-off from standby. Every other section sweeps ONE channel off a clean
+        base and answers "what breaks it"; this one answers <b>"how long does it
+        last out there"</b>.
+        Termination is TASK-level &mdash; fall, ball lost, or off route &mdash; so a
+        policy cannot score by abandoning the ball and staying upright. The
+        headline is therefore <b>mean task-survival seconds</b>, not a survival
+        rate at a fixed budget: every episode is meant to end in a failure, and
+        the question is how long it took.
+        <b>Push magnitude is pinned to the trained envelope</b>
+        (<code>push_dv</code>&nbsp;0.5, i.e. &plusmn;0.5&nbsp;m/s and
+        &plusmn;0.78&nbsp;rad/s of yaw, exactly the <code>env.yaml</code> range).
+        The recipe first shoved at 4&times; that; a one-channel-at-a-time ablation
+        (<code>turf_harsh_ablation_20260729</code>) showed it alone drove upright
+        survival from 94&nbsp;% to 25&nbsp;%, made 75&nbsp;% of episodes end in a
+        fall, held strict success at 0&nbsp;% everywhere, and squeezed the spread
+        over ten checkpoints to 0.65&nbsp;s. Neither the &plusmn;7&deg; frame error
+        nor the EDU torque ceiling moved falls at all.
+        Episodes end at a 1.5&nbsp;m lost-ball distance or a 600&nbsp;s budget the
+        ceiling never reaches, and the measured ball is pinned
+        (0.39&ndash;0.40&nbsp;kg, 0.095&ndash;0.105&nbsp;m) so every checkpoint
+        meets the same one &mdash; only its friction follows each checkpoint's own
+        training DR.
+        <b>Foot geometry differs from the rest of the report</b>: this table runs
+        on the <code>--hybridfoot</code> deploy geometry (capsules carry the floor
+        contact, the ankle_roll STL carries the ball), because that is what the
+        hardware has, while the robustness and capability sections above were
+        recorded on the 7-capsule feet. A capsule-trained policy meeting mesh feet
+        here is a sim2real finding, not a misconfiguration.</div>
+      <div class="legend" id="turf-legend"></div>
+      <div id="turf-host"></div></section>
 
     <section id="sec-signif"><h2><span class="eyebrow">statistics</span>Significant differences</h2>
       <div class="note">Where the selected runs actually differ. Each cell is one
@@ -1221,20 +1515,30 @@ const DASH = {r: "6,3", ref: "2,3", cmd: "7,4", base: "1,3"};
 // Discovered from the data (see reason_legend) so a new fail_reason string
 // cannot silently vanish and leave the stacked bars not summing to 100%.
 const REASONS = __REASONS__;
-// {"i>j": {metric: [{cond, group, x, delta, lo, hi, sig, paired, n}]}} -- only
-// i<j is stored; getDiffs negates for the other direction.
+// {"i>j|scope": {metric: [{cond, group, x, delta, lo, hi, sig, paired, n}]}}.
+// Only i<j is stored; getDiffs negates for the other direction. What ships here
+// is the bounded arrival slice (pairs against run 0) -- everything else is
+// fetched from DIFF_ENDPOINT, see DiffStore.
 const DIFFS = __DIFFS__;
 const DIFF_METRICS = __DIFF_METRICS__;
+// null when the report was built as a static file. The protocol check matters
+// too: --serve also writes the snapshot to --out, so that file carries an
+// endpoint it cannot reach once you open it from disk.
+// which run the inline slice is anchored on: the most complete one, so the
+// arrival view is not blank for a table the alphabetically-first run happens to
+// be missing. Also the default significance subject, for the same reason.
+const INLINE_ANCHOR = __INLINE_ANCHOR__;
+const DIFF_ENDPOINT = __DIFF_ENDPOINT__;
+const CAN_FETCH = !!DIFF_ENDPOINT
+  && !(typeof location !== "undefined" && location.protocol === "file:");
+const NOMINAL_COND = __NOMINAL_COND__;
+const [FULL_SCOPE, NOM_SCOPE] = __SCOPES__;
+const TURF_PARAM_GROUPS = __TURF_PARAM_GROUPS__;
 // axis labels for the difference map: robustness groups come from the data-driven
 // ROB_GROUPS, capability groups are named here (they have their own sections)
-const DIFF_FULL = __DIFF_FULL__;
-// Embedded, not spelled out in the string below: an undefined identifier here
-// only blows up on the >MAX_DIFF_RUNS branch, i.e. exactly the case nobody
-// renders while developing, and the throw takes every section after
-// Significance down with it.
-const MAX_DIFF_RUNS = __MAX_DIFF_RUNS__;
 const ROB_LABEL = Object.assign(Object.fromEntries(ROB_GROUPS), {
   baseline: "nominal (unperturbed)",
+  plastic_turf: "field trial — deployment hypothesis",
   straight_speed: "straight, commanded speed (m/s)",
   corner_turn: "corner turn |\u03ba| (1/m)",
   u_turn: "u-turn |\u03ba| (1/m)",
@@ -1242,22 +1546,103 @@ const ROB_LABEL = Object.assign(Object.fromEntries(ROB_GROUPS), {
   speed_tracking: "speed tracking",
 });
 
-function getDiffs(baseIdx, cmpIdx, metric) {
-  if (baseIdx === cmpIdx) return null;
-  const lo = Math.min(baseIdx, cmpIdx), hi = Math.max(baseIdx, cmpIdx);
-  const block = DIFFS[`${lo}>${hi}`];
-  if (!block || !block[metric]) return null;
-  const flip = baseIdx > cmpIdx;
-  return block[metric].map(e => flip
-    ? {...e, delta: -e.delta, lo: e.hi == null ? null : -e.hi,
-       hi: e.lo == null ? null : -e.lo}
-    : e);
+// ---- difference blocks ------------------------------------------------------
+// Every block is one (ordered pair, metric, scope) and is fetched at most once.
+// LOADED holds what we have, PENDING de-dupes concurrent asks, and a block that
+// comes back unavailable is stored as null so a re-render cannot loop on it.
+const LOADED = new Map(), PENDING = new Map();
+function blockKey(lo, hi, metric, scope) { return `${lo}>${hi}|${scope}|${metric}`; }
+for (const [pk, byMetric] of Object.entries(DIFFS)) {
+  const [pair, scope] = pk.split("|");
+  const [lo, hi] = pair.split(">");
+  for (const [metric, entries] of Object.entries(byMetric))
+    LOADED.set(blockKey(+lo, +hi, metric, scope), entries);
 }
 
-function nominalDiff(baseIdx, cmpIdx, metric) {
-  const all = getDiffs(baseIdx, cmpIdx, metric);
-  if (!all) return null;
-  return all.find(e => e.cond === "nominal") || null;
+function negate(e) {
+  return {...e, delta: -e.delta, lo: e.hi == null ? null : -e.hi,
+          hi: e.lo == null ? null : -e.lo};
+}
+
+// entries oriented delta = cmp - base, or undefined when not loaded yet
+function peekDiffs(baseIdx, cmpIdx, metric, scope) {
+  if (baseIdx === cmpIdx) return null;
+  const lo = Math.min(baseIdx, cmpIdx), hi = Math.max(baseIdx, cmpIdx);
+  let entries = LOADED.get(blockKey(lo, hi, metric, scope));
+  if (entries === undefined && scope === NOM_SCOPE) {
+    const full = LOADED.get(blockKey(lo, hi, metric, FULL_SCOPE));
+    if (full) entries = full.filter(e => e.cond === NOMINAL_COND);
+  }
+  if (!entries) return entries === undefined ? undefined : null;
+  return baseIdx > cmpIdx ? entries.map(negate) : entries;
+}
+
+function getDiffs(baseIdx, cmpIdx, metric) {
+  return peekDiffs(baseIdx, cmpIdx, metric, FULL_SCOPE) || null;
+}
+
+// CI for ONE named condition. The summary table quotes the unperturbed `nominal`
+// row for most metrics and a turf severity for the field-trial rows, so the
+// condition has to be a parameter -- hardcoding NOMINAL_COND here quietly
+// attached the clean-route interval to the field-trial delta.
+function condDiff(baseIdx, cmpIdx, metric, cond) {
+  const all = peekDiffs(baseIdx, cmpIdx, metric, NOM_SCOPE);
+  return all ? all.find(e => e.cond === (cond || NOMINAL_COND)) || null : null;
+}
+
+function turfPoint(run, name) {
+  return (run.turf || []).find(p => p.name === name) || null;
+}
+
+// One round trip for a whole row: subject vs every other run currently on
+// screen. Returns a promise that settles once every requested block is either
+// loaded or marked unavailable; resolves to false when there was nothing to do.
+function loadDiffs(pairs, metrics, scope) {
+  const want = [], keys = [];
+  for (const [a, b] of pairs) {
+    const lo = Math.min(a, b), hi = Math.max(a, b);
+    for (const metric of metrics) {
+      const k = blockKey(lo, hi, metric, scope);
+      if (LOADED.has(k) || PENDING.has(k) || keys.includes(k)) continue;
+      if (scope === NOM_SCOPE && LOADED.has(blockKey(lo, hi, metric, FULL_SCOPE)))
+        continue;                       // derivable from the full sweep
+      keys.push(k);
+      if (!want.some(p => p[0] === lo && p[1] === hi)) want.push([lo, hi]);
+    }
+  }
+  if (!keys.length) return Promise.resolve(false);
+  if (!CAN_FETCH) {                     // offline snapshot: nothing to fetch from
+    keys.forEach(k => LOADED.set(k, null));
+    return Promise.resolve(true);
+  }
+  const req = fetch(DIFF_ENDPOINT, {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      pairs: want.map(([lo, hi]) => [DATA[lo].label, DATA[hi].label]),
+      metrics, scope}),
+  }).then(r => r.ok ? r.json() : Promise.reject(new Error(r.status)))
+    .then(({blocks}) => {
+      want.forEach(([lo, hi], k) => {
+        const byMetric = blocks[k] || {};
+        for (const metric of metrics)
+          LOADED.set(blockKey(lo, hi, metric, scope), byMetric[metric] || null);
+      });
+    })
+    .catch(() => { keys.forEach(k => { if (!LOADED.has(k)) LOADED.set(k, null); }); })
+    .then(() => { keys.forEach(k => PENDING.delete(k)); return true; });
+  keys.forEach(k => PENDING.set(k, req));
+  return req;
+}
+
+// Sections render from whatever is loaded and re-render once the rest lands.
+// Tokens are PER SECTION: a shared counter would let the summary's batch cancel
+// the significance redraw, which is the bug where half the page stays "loading".
+const diffTokens = {};
+function afterDiffs(who, pairs, metrics, scope, redraw) {
+  const mine = diffTokens[who] = (diffTokens[who] || 0) + 1;
+  loadDiffs(pairs, metrics, scope).then(changed => {
+    if (changed && mine === diffTokens[who]) redraw();
+  });
 }
 
 const state = {
@@ -1645,7 +2030,22 @@ function mergeLR(d) {
 // ---- summary table ---------------------------------------------------------
 const SGROUPS = [
   ["run data", [
-    ["episodes (rob + cap)", null, r => null, r => `${r.info.n_rob} + ${r.info.n_cap}`],
+    ["episodes (rob + cap + turf)", null, r => null,
+     r => `${r.info.n_rob} + ${r.info.n_cap}`
+          + (r.info.n_turf ? ` + ${r.info.n_turf}` : " + —")],
+  ]],
+  // The field trial LEADS the table on purpose: it is the one number that answers
+  // "how does this checkpoint do in the real environment". Under the clean-route
+  // rows it read as an afterthought.
+  ["field trial — joint real-world distribution", [
+    ["task survival (s)", "up",
+     r => { const p = turfPoint(r, "turf_harsh"); return p && p.mean_duration; },
+     r => { const p = turfPoint(r, "turf_harsh");
+            return p && p.mean_duration != null
+              ? `${fmtVal(p.mean_duration)} ±${fmtVal(p.mean_duration_se)}`
+                + (p.duration_p50 != null ? ` [${fmtVal(p.duration_p50)}]` : "")
+              : null; },
+     "duration", "turf_harsh"],
   ]],
   ["nominal — unperturbed human routes", [
     ["survival (%)", "up", r => r.nominal && r.nominal.survival,
@@ -1703,6 +2103,12 @@ function renderSummary() {
   host.textContent = "";
   const vis = visible();
   if (!vis.length) return;
+  // the Δ column needs one condition (nominal) of every metric against the
+  // first selected run -- n-1 blocks at ~1.4 ms each, so the whole row is one
+  // cheap batch. Cells render neutral until it lands.
+  if (vis.length > 1)
+    afterDiffs("summary", vis.slice(1).map(o => [vis[0].i, o.i]),
+               DIFF_METRICS.map(m => m[0]), NOM_SCOPE, renderSummary);
   const tb = h("table", "summary", null, host);
   const hr = h("tr", null, null, h("thead", null, null, tb));
   h("th", "mname", "metric", hr);
@@ -1718,7 +2124,7 @@ function renderSummary() {
     const gtr = h("tr", "sgroup", null, body);
     const gtd = h("td", null, gLabel, gtr);
     gtd.colSpan = vis.length + 1;
-    for (const [label, dir, get, fmt, dkey] of rows) {
+    for (const [label, dir, get, fmt, dkey, dcond] of rows) {
     const tr = h("tr", null, null, body);
     const nm = h("td", "mname", label, tr);
     if (dir) h("span", "dir", DIRTXT[dir], nm);
@@ -1746,7 +2152,7 @@ function renderSummary() {
         // zero. A single condition (n~48) needs a ~20-point gap to clear 95%,
         // so painting every non-zero delta red/green (what this did before)
         // reports noise as regression. Metrics with no CI available stay neutral.
-        const ci = dkey ? nominalDiff(vis[0].i, vis[k].i, dkey) : null;
+        const ci = dkey ? condDiff(vis[0].i, vis[k].i, dkey, dcond) : null;
         if (Math.abs(dv) < 1e-9 && !ci) h("span", "delta", "±0", td);
         else {
           const sig = ci ? ci.sig : null;
@@ -1776,8 +2182,8 @@ function renderSummary() {
 // per-condition intervals underneath.
 // baseline = null -> the first selected run. Made explicit (and pickable)
 // because with 3+ checkpoints "whatever happens to be first" is not an answer.
-const signifState = {metric: "survival", baseline: null, expanded: new Set(),
-                     fold: new Map()};
+const signifState = {metric: "survival", baseline: INLINE_ANCHOR,
+                     expanded: new Set(), fold: new Map()};
 
 function betterDir(delta, dir) { return dir === "down" ? delta < 0 : delta > 0; }
 
@@ -1790,12 +2196,16 @@ function renderSignificance() {
     h("div", "note", "Select at least two experiments to compare.", host);
     return;
   }
-  // eligible baselines: every visible run when all pairs were computed,
-  // otherwise only run 0 (the only one with precomputed comparisons)
-  const eligible = vis.filter(o => DIFF_FULL || o.i === 0);
-  let base = eligible.find(o => o.i === signifState.baseline) || eligible[0] || vis[0];
+  // ANY visible run can be the subject at any run count: the blocks this view
+  // needs are the n-1 pairs against `base` for ONE metric, fetched on demand and
+  // cached server-side forever. The old build precomputed every pair x every
+  // metric up front, which is n^2 and is why the picker used to be pinned to the
+  // first run past 8 checkpoints.
+  let base = vis.find(o => o.i === signifState.baseline) || vis[0];
   const others = vis.filter(o => o.i !== base.i);
   const dir = (DIFF_METRICS.find(m => m[0] === signifState.metric) || [])[2] || "up";
+  afterDiffs("signif", others.map(o => [base.i, o.i]), [signifState.metric],
+             FULL_SCOPE, renderSignificance);
 
   const mrow = h("div", "ctlrow", null, controls);
   h("span", "ctllabel", "metric", mrow);
@@ -1809,12 +2219,12 @@ function renderSignificance() {
     });
     h("span", null, label, lab);
   }
-  if (vis.length > 2 || eligible.length > 1) {
+  if (vis.length > 1) {       // at two runs it still says WHICH ONE green means
     const brow = h("div", "ctlrow", null, controls);
     // "compare against" read as "this one is the yardstick, colour the others"
     // -- the exact inverse of what the picker does now.
     h("span", "ctllabel", "subject — green = this run is better", brow);
-    for (const o of eligible) {
+    for (const o of vis) {
       const lab = h("label", "chip" + (o.i === base.i ? " on" : ""), null, brow);
       const rb = h("input", null, null, lab);
       rb.type = "radio"; rb.name = "signifbase";
@@ -1826,10 +2236,6 @@ function renderSignificance() {
       sw.style.background = sv(o.i);
       h("span", null, o.r.label, lab);
     }
-    if (!DIFF_FULL)
-      h("span", "ctlnote", `— only ${vis[0].r.label} can be the subject: with `
-        + `more than ${MAX_DIFF_RUNS} runs the report precomputes comparisons `
-        + `against the first run only`, brow);
   }
 
   // With many runs the stacked maps become the same wall this view replaced,
@@ -1843,7 +2249,11 @@ function renderSignificance() {
     // for us, so every downstream reader (counts, forest, tooltips) follows.
     // The other orientation is the trap this view kept walking into: you pick
     // a checkpoint to look at, and green then meant its RIVAL won.
-    const entries = getDiffs(other.i, base.i, signifState.metric);
+    // three states, and they must read differently: still computing, computed
+    // and empty, or unreachable. Collapsing "loading" into "no data" is how a
+    // 20 s cold bootstrap looks like a broken report.
+    const entries = peekDiffs(other.i, base.i, signifState.metric, FULL_SCOPE);
+    const loading = entries === undefined;
     const sig0 = (entries || []).filter(e => e.sig);
     const det = h("details", "foldcard", null, host);
     // Remember the user's fold state: every group expand re-renders this whole
@@ -1856,7 +2266,8 @@ function renderSignificance() {
     // repeat it on every open card.
     h("summary", null,
       `${base.r.label} vs ${other.r.label}`
-      + (entries && entries.length
+      + (loading ? " — computing…"
+         : entries && entries.length
          ? ` — ${sig0.length} of ${entries.length} conditions differ`
          : " — no comparable conditions"), det);
     const card = h("div", "card", null, det);
@@ -1864,7 +2275,20 @@ function renderSignificance() {
     // BETTER/WORSE, and a run swatch in the same block invites reading a green
     // cell as "this run's colour" instead of "this run is better" -- which is
     // exactly the collision the series palette makes easy (slot 1 IS green).
-    if (!entries || !entries.length) {
+    if (loading) {
+      h("div", "note", `bootstrapping ${signifState.metric} for this pair — `
+        + "about a second, then it is cached for good", card);
+      return;
+    }
+    if (entries === null) {
+      h("div", "note", CAN_FETCH
+        ? "this comparison could not be computed — see the server log"
+        : "this comparison is not in the offline snapshot: it ships only the "
+          + `${DATA[0].label} row. Run --serve to pick any subject or metric.`,
+        card);
+      return;
+    }
+    if (!entries.length) {
       h("div", "note", "no comparable conditions for this metric", card);
       return;
     }
@@ -2014,6 +2438,151 @@ function robDomains(vis) {
   dom.speed_ratio = [0, sr * 1.02];
   return dom;
 }
+// ---- field trial -------------------------------------------------------------
+// One card per condition, runs ranked by mean task-survival. Bars normalise
+// WITHIN a card so a second point could never be compared to this one by length.
+function renderTurf() {
+  const host = document.getElementById("turf-host");
+  host.textContent = "";
+  const vis = visible();
+  // the reason colours, NOT the run palette: the run colour is already on every
+  // row's swatch, and the only unexplained colours in this section are the
+  // outcome-mix segments
+  legendChips(document.getElementById("turf-legend"),
+              REASONS.map(([, label, cvar]) => ({cvar, label}))
+                     .concat([{cvar: "var(--fg)", label: "whisker = ±1 SE"}]));
+  const withTurf = vis.filter(({r}) => (r.turf || []).length);
+  if (!withTurf.length) {
+    h("div", "turfempty", vis.length
+      ? "none of the selected runs has plastic_turf.csv — run the benchmark with "
+        + "--plastic-turf to fill it in"
+      : "select at least one experiment", host);
+    return;
+  }
+  // order comes from turf_series, which emits TURF_POINTS order -- the live point
+  // first, retired ones after. NOT sorted by axis index: turf_harsh's index is 1
+  // for historical reasons and sorting on it would bury the only live point.
+  const points = [];
+  for (const {r, i} of withTurf)
+    for (const p of r.turf)
+      if (!points.some(q => q.name === p.name))
+        points.push({name: p.name, label: p.label, x: p.x});
+
+  for (const pt of points) {
+    const rows = withTurf
+      .map(({r, i}) => ({i, label: r.label, p: (r.turf || []).find(q => q.name === pt.name)}))
+      .filter(o => o.p && o.p.mean_duration != null)
+      .sort((a, b) => b.p.mean_duration - a.p.mean_duration);
+    const card = h("div", "turfcard", null, host);
+    const head = h("div", "turfhead", null, card);
+    h("span", null, pt.name, head);
+    // no threshold chip here: the parameter panel below is the authority, and a
+    // hand-written one went stale the moment the recipe changed
+    h("span", "turfscale", pt.label, head);
+    if (!rows.length) {
+      h("div", "turfempty", "no episodes for this severity in the selected runs", card);
+      continue;
+    }
+    // normalise WITHIN the card: a shared axis across incomparable points is
+    // exactly the misread the warning above is trying to prevent
+    const peak = Math.max(...rows.map(o => o.p.mean_duration + (o.p.mean_duration_se || 0)));
+    for (const {i, label, p} of rows) {
+      const row = h("div", "turfrow", null, card);
+      const nm = h("div", "turfname", null, row);
+      const sw = h("span", "swatch", null, nm);
+      sw.style.background = sv(i);
+      h("span", null, label, nm);
+      const wrap = h("div", "turfbarwrap", null, row);
+      const frac = peak > 0 ? p.mean_duration / peak : 0;
+      const bar = h("div", "turfbar", null, wrap);
+      bar.style.width = `${(100 * frac).toFixed(1)}%`;
+      bar.style.background = sv(i);
+      bar.dataset.run = i;
+      if (p.mean_duration_se) {
+        const lo = Math.max(0, p.mean_duration - p.mean_duration_se) / peak;
+        const hi = Math.min(1, (p.mean_duration + p.mean_duration_se) / peak);
+        const err = h("div", "turferr", null, wrap);
+        err.style.left = `${(100 * lo).toFixed(1)}%`;
+        err.style.width = `${(100 * (hi - lo)).toFixed(1)}%`;
+      }
+      const val = h("div", "turfval", null, row);
+      h("span", null, `${fmtVal(p.mean_duration)} s`, val);
+      h("span", "turfsd", ` ±${fmtVal(p.mean_duration_se)}`
+        + (p.duration_p50 != null ? ` [${fmtVal(p.duration_p50)}]` : ""), val);
+      // outcome mix, inline: WHY the episodes ended, right next to how long
+      // they lasted. That pairing is the whole read -- 4 s of fell is a
+      // different finding from 4 s of ball-lost.
+      const mix = h("div", "turfmix", null, row);
+      const tot = Object.values(p.reasons || {}).reduce((a, b) => a + b, 0);
+      const share = [];
+      for (const [key, lbl, cvar] of REASONS) {
+        const cnt = (p.reasons || {})[key] || 0;
+        if (!cnt) continue;
+        const seg = h("span", null, null, mix);
+        seg.style.cssText = `width:${(100 * cnt / tot).toFixed(2)}%;background:${cvar}`;
+        share.push(`${lbl} ${Math.round(100 * cnt / tot)}%`);
+      }
+      mix.title = share.join(" · ") || "no outcomes recorded";
+      h("div", "turfn", `n=${p.n}`, row);
+      row.title = `${label} — ${pt.name}\n`
+        + `ended: ${share.join(", ")}\n`
+        + `mean ${fmtVal(p.mean_duration)} ±${fmtVal(p.mean_duration_se)} s`
+        + (p.duration_p50 != null ? `, median ${fmtVal(p.duration_p50)} s` : "")
+        + `\nfell ${fmtVal(100 - p.survival)}% of ${p.n} episodes`
+        + (p.progress != null ? `\nprogress ${fmtVal(p.progress)} m` : "")
+        + (p.cross_track != null ? `\ncross-track ${fmtVal(p.cross_track)} m` : "");
+    }
+  }
+  renderTurfParams(host, withTurf);
+}
+
+// What produced the numbers above. One value per row when every selected run
+// tested the same thing (the normal case); flagged red and listed per run when
+// they disagree, because then the ranking above is comparing two experiments.
+function renderTurfParams(host, withTurf) {
+  const have = withTurf.filter(({r}) => r.turf_params);
+  if (!have.length) {
+    h("div", "turfempty", "no recorded parameters for the selected runs — the "
+      + "run dirs predate plastic_turf.conditions.json; re-run the benchmark to "
+      + "record what was tested", host);
+    return;
+  }
+  const det = h("details", "turfparams", null, host);
+  const missing = withTurf.length - have.length;
+  h("summary", null, `parameters actually tested (${have.length} run`
+    + `${have.length > 1 ? "s" : ""}${missing ? `, ${missing} without a record` : ""})`,
+    det);
+  const grid = h("div", "turfpgrid", null, det);
+  for (const [group, items] of TURF_PARAM_GROUPS) {
+    const box = h("div", "turfpgroup", null, grid);
+    h("h5", null, group, box);
+    for (const [key, label, unit] of items) {
+      const vals = have.map(({r}) => JSON.stringify(r.turf_params[key] ?? null));
+      const uniq = [...new Set(vals)];
+      const row = h("div", "turfprow", null, box);
+      if (uniq.length > 1) row.classList.add("differ");
+      if (uniq.length === 1 && JSON.parse(uniq[0]) === null) row.classList.add("unset");
+      h("span", "turfpk", label, row);
+      const vd = h("span", "turfpv", null, row);
+      h("span", null, uniq.length > 1 ? `${uniq.length} values` : fmtParam(JSON.parse(uniq[0])), vd);
+      if (unit) h("span", "turfpu", " " + unit, vd);
+      row.title = uniq.length > 1
+        ? have.map(({r}) => `${r.label}: ${fmtParam(r.turf_params[key] ?? null)}`).join("\n")
+        : `${key} = ${fmtParam(JSON.parse(uniq[0]))}${unit ? " " + unit : ""}`;
+    }
+  }
+}
+
+function fmtParam(v) {
+  if (v === null || v === undefined) return "—";
+  if (v === true) return "on";
+  if (v === false) return "off";
+  if (Array.isArray(v))
+    return Array.isArray(v[0]) ? v.map(fmtParam).join(" / ")
+                               : v.map(x => fmtVal(x)).join(" … ");
+  return typeof v === "number" ? fmtVal(v) : String(v);
+}
+
 function renderRobustness() {
   const host = document.getElementById("rob-host");
   const open = {};
@@ -2297,13 +2866,14 @@ function renderVideos() {
         if (!has.length) continue;
         const catDiv = h("div", "vcat", null, host);
         const head = h("h4", null, null, catDiv);
-        if (runsWith.length > 1) {
-          const sw = h("span", "swatch", null, head);
-          sw.style.cssText = `width:10px;height:10px;background:${sv(i)}`;
-          h("span", null, `${cat} — ${r.label}`, head);
-        } else {
-          h("span", null, cat, head);
-        }
+        // ALWAYS name the checkpoint. This used to be dropped when only one run
+        // had videos for the test, on the theory that there was nothing to
+        // disambiguate -- but that is exactly the case where you cannot tell:
+        // 11 checkpoints selected, one of them recorded this, and the heading
+        // said "straight".
+        const sw = h("span", "swatch", null, head);
+        sw.style.cssText = `width:10px;height:10px;background:${sv(i)}`;
+        h("span", null, `${cat} — ${r.label}`, head);
         const strip = h("div", "vstrip", null, catDiv);
         for (const it of has) {
           const tile = h("div", "vtile", null, strip);
@@ -2312,7 +2882,9 @@ function renderVideos() {
           vid.muted = true;
           vid.playsInline = true;
           vid.src = encodeURI(r.videos[test][it.cond]);
-          vid.title = `${it.cond} — click to play/pause`;
+          // the run name again on the tile itself: once you have scrolled the
+          // heading off the top, a hover is the only thing left to ask
+          vid.title = `${r.label}\n${test} / ${it.cond}\nclick to play/pause`;
           vid.addEventListener("click", () => {
             if (vid.paused) { vid.controls = true; vid.play(); }
             else vid.pause();
@@ -2615,6 +3187,7 @@ function renderAll() {
   const dom = capDomains(visible());
   renderComparability();
   renderSummary();
+  renderTurf();
   renderSignificance();
   renderRobustness();
   renderTurns("corner-grid", "corner", "|κ| (1/m)", dom, "corner-legend");
@@ -2645,6 +3218,186 @@ def js_embed(obj):
     return json.dumps(obj, separators=(",", ":"), allow_nan=False).replace("<", "\\u003c")
 
 
+# ---- aggregation cache -------------------------------------------------------
+# --serve used to rebuild the entire report on every F5. Measured 2026-07-27 on
+# 11 runs / 110 928 episodes: 3.3 s re-reading the CSVs, 2.9 s re-aggregating,
+# 28.6 s re-bootstrapping the pairwise CIs -- 35 s to reproduce numbers that had
+# not changed. Two on-disk caches under <report_dir>/.cache/<code>/ fix that:
+#   run/<h>.json    one run's aggregated blob, keyed on that run dir alone
+#   diff/<h>.json   one pair's bootstrap CIs, keyed on both runs' two CSVs
+# so adding a run only costs that run plus its own pairs, and a refresh that
+# changes nothing costs a stat() walk.
+#
+# STALENESS IS THE ONLY REAL RISK HERE -- a cached number that no longer matches
+# the code is worse than a slow report. So <code> is `code_fingerprint`: a hash
+# of stats.py plus everything in THIS file above HTML_TEMPLATE, i.e. all the
+# aggregation and bootstrap code. Touch any of it and the whole generation is
+# abandoned (and swept on the next run); the JS/CSS below the template can still
+# be edited for free. There is nothing to remember to bump.
+CACHE_DIRNAME = ".cache"
+
+_CODE_FP = None
+
+
+def _sha(*parts):
+    h = hashlib.sha1()
+    for p in parts:
+        h.update(p if isinstance(p, bytes) else str(p).encode())
+        h.update(b"\0")
+    return h.hexdigest()[:20]
+
+
+def code_fingerprint():
+    """Hash of the numeric code. None when the sources cannot be read, which
+    disables caching rather than risking a key that never invalidates."""
+    global _CODE_FP
+    if _CODE_FP is None:
+        try:
+            with open(__file__, "rb") as f:
+                src = f.read().split(b'HTML_TEMPLATE = r"""', 1)[0]
+            with open(stats.__file__, "rb") as f:
+                src += f.read()
+        except OSError:
+            return None
+        _CODE_FP = _sha(src)
+    return _CODE_FP
+
+
+def _stat_fp(paths):
+    """(size, mtime_ns) over `paths`; missing files still contribute a slot so
+    deleting one moves the fingerprint."""
+    parts = []
+    for p in paths:
+        try:
+            st = os.stat(p)
+            parts.append(f"{os.path.basename(p)}|{st.st_size}|{st.st_mtime_ns}")
+        except OSError:
+            parts.append(f"{os.path.basename(p)}|-")
+    return _sha(*parts)
+
+
+def csv_fingerprint(run_dir):
+    """Just the episode tables -- all `pair_diffs` reads. Keeping videos out
+    means recording a clip does not invalidate 3 s of bootstrap per pair."""
+    return _stat_fp([os.path.join(run_dir, f) for f in EPISODE_TABLES])
+
+
+def tree_fingerprint(run_dir):
+    """(relpath, size, mtime_ns) over every file in the run dir -- `collect_run`
+    also reads the speed CSVs, params/ provenance and videos/. stat-only, so it
+    stays cheap on run dirs carrying hundreds of MB of video."""
+    parts = []
+    for root, dirs, files in os.walk(run_dir):
+        dirs.sort()
+        for name in sorted(files):
+            p = os.path.join(root, name)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            parts.append(f"{os.path.relpath(p, run_dir)}|{st.st_size}|{st.st_mtime_ns}")
+    return _sha(*parts)
+
+
+class AggCache:
+    """Content-addressed JSON cache for run blobs and pairwise diffs."""
+
+    def __init__(self, report_dir, run_dirs, enabled=True):
+        self.root = os.path.join(report_dir, CACHE_DIRNAME)
+        self.code = code_fingerprint() if enabled else None
+        self.enabled = self.code is not None
+        self.report_dir = report_dir
+        self.run_dirs = run_dirs
+        self._tree, self._csv = {}, {}
+        self.hits = self.misses = 0
+        if self.enabled:
+            self._drop_old_generations()
+
+    # both fingerprints are lazy: the /_s2s/diff endpoint only ever needs the
+    # two CSVs, and walking every run's videos/ for it would be pure waste
+    def tree_fp(self, i):
+        if i not in self._tree:
+            self._tree[i] = tree_fingerprint(self.run_dirs[i])
+        return self._tree[i]
+
+    def tree_fps(self):
+        return [self.tree_fp(i) for i in range(len(self.run_dirs))]
+
+    def _drop_old_generations(self):
+        """Entries live under .cache/<code fingerprint>/, so an edit to the
+        aggregation code strands a whole generation at once. Delete the stale
+        ones here rather than let a month of iteration silently pile up."""
+        import shutil
+        try:
+            names = os.listdir(self.root)
+        except OSError:
+            return
+        for name in names:
+            if name == self.code or not re.fullmatch(r"[0-9a-f]{20}", name):
+                continue        # never touch anything we did not write
+            shutil.rmtree(os.path.join(self.root, name), ignore_errors=True)
+
+    def csv_fp(self, i):
+        if i not in self._csv:
+            self._csv[i] = csv_fingerprint(self.run_dirs[i])
+        return self._csv[i]
+
+    def _path(self, kind, key):
+        return os.path.join(self.root, self.code, kind, key + ".json")
+
+    # hits/misses are counted by the CALLER, not here: a nominal block derived
+    # from an already-cached full sweep does two reads and recomputes nothing,
+    # so counting raw reads reported a permanent miss on every warm run
+    def _read(self, kind, key):
+        if not self.enabled:
+            return None
+        try:
+            with open(self._path(kind, key)) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+
+    def _write(self, kind, key, obj):
+        if not self.enabled:
+            return
+        path = self._path(kind, key)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(tmp, "w") as f:
+                json.dump(obj, f, separators=(",", ":"), allow_nan=False)
+            os.replace(tmp, path)   # atomic: a killed writer leaves no half file
+        except (OSError, ValueError):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+    # run blobs are cached WITHOUT the cross-run context (label, colour slot and
+    # the union of robustness groups all depend on which runs are selected);
+    # `generate` re-applies those to the loaded blob, which is pure dict work.
+    def _run_key(self, i):
+        return _sha(self.tree_fp(i), self.report_dir)
+
+    def get_run(self, i):
+        return self._read("run", self._run_key(i))
+
+    def put_run(self, i, blob):
+        self._write("run", self._run_key(i), blob)
+
+    # one file per (ordered pair, metric, scope): the unit the page actually
+    # asks for, so nothing is computed to satisfy a request for something else
+    def _block_key(self, i, j, metric, scope):
+        return _sha(self.csv_fp(i), self.csv_fp(j), metric, scope,
+                    stats.DEFAULT_N_BOOT, stats.DEFAULT_ALPHA)
+
+    def get_block(self, i, j, metric, scope):
+        return self._read("diff", self._block_key(i, j, metric, scope))
+
+    def put_block(self, i, j, metric, scope, entries):
+        self._write("diff", self._block_key(i, j, metric, scope), entries)
+
+
 def resolve_runs(args, quiet=False):
     if args.run_dirs is not None:
         labels = args.labels or [os.path.basename(os.path.normpath(d))
@@ -2663,19 +3416,83 @@ def resolve_runs(args, quiet=False):
     return run_dirs, [os.path.basename(os.path.normpath(d)) for d in run_dirs]
 
 
-def generate(args, live=False, quiet=False):
-    """Aggregate the CSVs of every (re-)discovered run into the report HTML."""
+def generate(args, live=False, quiet=False, memo=None):
+    """Aggregate the CSVs of every (re-)discovered run into the report HTML.
+
+    `memo` is an optional dict the caller keeps across invocations (--serve):
+    when nothing under any run dir has moved, the previously built HTML is
+    returned verbatim and no CSV is opened at all."""
     run_dirs, labels = resolve_runs(args, quiet=quiet)
     report_dir = os.path.dirname(os.path.abspath(args.out)) or "."
     os.makedirs(report_dir, exist_ok=True)
-    # parse once, then take the UNION of robustness groups across runs so a group
-    # only one run swept still gets a panel (the old fixed ROB_GROUPS list both
-    # hid new groups and rendered empty ones for groups nobody swept)
-    parsed = [(read_rows(os.path.join(d, "robustness.csv")),
-               read_rows(os.path.join(d, "capability.csv"))) for d in run_dirs]
-    rob_groups = robustness_groups(*[r for pair in parsed for r in pair])
-    runs = [collect_run(d, lab, i, report_dir, rob_groups, rows)
-            for i, (d, lab, rows) in enumerate(zip(run_dirs, labels, parsed))]
+    cache = AggCache(report_dir, run_dirs, enabled=not getattr(args, "no_cache", False))
+
+    # the whole page is a pure function of (code, run set, run contents), so an
+    # untouched runs/ tree can be answered from the last build. --no-cache (and
+    # an unreadable source tree, which leaves us unable to detect a code edit)
+    # turns this off along with the disk cache.
+    key = None
+    if memo is not None and cache.enabled:
+        key = _sha(cache.code, *labels, *cache.tree_fps(), live)
+        if memo.get("key") == key:
+            return memo["html"]
+
+    # CSVs are read at most once per run, and only for a run whose blob or one
+    # of whose pairs missed the cache
+    parsed = {}
+
+    def get_rows(i):
+        if i not in parsed:
+            parsed[i] = tuple(read_rows(os.path.join(run_dirs[i], f))
+                              for f in EPISODE_TABLES)
+        return parsed[i]
+
+    # cached per run in ISOLATION (its own robustness groups only), then widened
+    # below to the UNION across runs so a group only one run swept still gets a
+    # panel (the old fixed ROB_GROUPS list both hid new groups and rendered empty
+    # ones for groups nobody swept)
+    runs = []
+    for i, d in enumerate(run_dirs):
+        blob = cache.get_run(i)
+        if blob is None:
+            blob = collect_run(d, labels[i], i, report_dir, None, get_rows(i))
+            cache.misses += 1
+            cache.put_run(i, blob)
+        else:
+            cache.hits += 1
+        runs.append(blob)
+    rob_groups = order_rob_groups(g for r in runs for g in r["robustness"])
+    for i, r in enumerate(runs):
+        r["label"] = labels[i]          # label/colour depend on the selection,
+        r["color"] = i % 8              # not on the run, so they stay outside the key
+        r["robustness"] = {g: r["robustness"].get(g, []) for g, _ in rob_groups}
+    # INLINE SLICE, O(n): every pair against ONE anchor run, one metric at full
+    # sweep plus the headline row of every metric (what the summary table reads).
+    # That is the arrival view and, on a file:// snapshot, the only view --
+    # everything else is fetched from /_s2s/diff. n-1 pairs, not n(n-1)/2.
+    #
+    # The anchor is the most COMPLETE run, not run 0. Anchoring on the first run
+    # alphabetically meant that if it happened to be missing a table, every inline
+    # pair was missing it too -- which is exactly what happened to the field trial
+    # the day it landed (the alphabetically-first checkpoint has no exported ONNX,
+    # so no plastic_turf.csv, so the arrival view showed zero field-trial rows).
+    anchor = max(range(len(runs)),
+                 key=lambda i: (len(runs[i]["turf"]),
+                                runs[i]["info"]["n_rob"] + runs[i]["info"]["n_cap"],
+                                -i)) if runs else 0
+    inline_pairs = [(anchor, j) for j in range(len(run_dirs)) if j != anchor]
+    inline = {}
+    for (i, j), blocks in zip(
+            inline_pairs,
+            diff_rows_for(get_rows, cache, inline_pairs,
+                          list(INLINE_DIFF_METRICS), FULL_SCOPE)):
+        inline[f"{min(i, j)}>{max(i, j)}|{FULL_SCOPE}"] = blocks
+    for (i, j), blocks in zip(
+            inline_pairs,
+            diff_rows_for(get_rows, cache, inline_pairs,
+                          [m[0] for m in DIFF_METRICS], NOMINAL_SCOPE)):
+        inline[f"{min(i, j)}>{max(i, j)}|{NOMINAL_SCOPE}"] = blocks
+
     title = "sim2sim benchmark — " + (
         ", ".join(labels) if len(labels) <= 5 else f"{len(labels)} runs")
     meta = dict(
@@ -2687,10 +3504,13 @@ def generate(args, live=False, quiet=False):
         "__TITLE__": html_lib.escape(title),
         "__ROB_GROUPS__": js_embed(rob_groups),
         "__REASONS__": js_embed(reason_legend(runs)),
-        "__DIFFS__": js_embed(condition_diffs(parsed, labels)),
+        "__DIFFS__": js_embed(inline),
         "__DIFF_METRICS__": js_embed([(k, lab, d) for k, lab, _, _, _, d in DIFF_METRICS]),
-        "__DIFF_FULL__": js_embed(len(run_dirs) <= MAX_DIFF_RUNS),
-        "__MAX_DIFF_RUNS__": js_embed(MAX_DIFF_RUNS),
+        "__INLINE_ANCHOR__": js_embed(anchor),
+        "__DIFF_ENDPOINT__": js_embed(DIFF_ENDPOINT if live else None),
+        "__NOMINAL_COND__": js_embed(NOMINAL_COND),
+        "__TURF_PARAM_GROUPS__": js_embed(TURF_PARAM_GROUPS),
+        "__SCOPES__": js_embed([FULL_SCOPE, NOMINAL_SCOPE]),
         "__REAL_WORLD__": js_embed(REAL_WORLD),
         "__ROB_METRICS__": js_embed(ROB_METRICS),
         "__CAP_METRICS__": js_embed(CAP_METRICS),
@@ -2698,23 +3518,106 @@ def generate(args, live=False, quiet=False):
         "__DATA__": js_embed(runs),
     }
     # single pass so payload content can never corrupt a later substitution
-    return re.sub("|".join(map(re.escape, payload)),
+    html = re.sub("|".join(map(re.escape, payload)),
                   lambda mo: payload[mo.group(0)], HTML_TEMPLATE)
+    # also reported under --serve's quiet: a miss is the only case worth a line,
+    # and it explains where the seconds went
+    if cache.enabled and (not quiet or cache.misses):
+        print(f"[html_report] cache {cache.hits} served / {cache.misses} computed "
+              f"({os.path.join(report_dir, CACHE_DIRNAME)})", file=sys.stderr)
+    if memo is not None and key is not None:
+        memo.update(key=key, html=html)
+    return html
 
 
 def serve(args):
-    """Live mode: every page refresh re-discovers runs and re-aggregates the
-    CSVs server-side. Static assets (videos, CSVs) come straight from disk,
-    so the report's relative video links keep working."""
+    """Live mode: every page refresh re-discovers runs and re-aggregates what
+    actually changed. Static assets (videos, CSVs) come straight from disk, so
+    the report's relative video links keep working.
+
+    `memo` makes an unchanged refresh cost one stat() walk instead of a full
+    rebuild; `AggCache` makes a changed one cost only the runs and pairs that
+    moved. Both are keyed on file fingerprints, so editing a CSV by hand or
+    dropping in a new run dir is picked up the same as a fresh eval."""
     import functools
     import http.server
+    import threading
+    import time
 
     root = os.getcwd()
     out_abs = os.path.abspath(args.out)
     rel = os.path.relpath(out_abs, root)
     report_url = None if rel.startswith("..") else "/" + rel.replace(os.sep, "/")
+    memo, lock = {}, threading.Lock()
+
+    def diff_api(req):
+        """{pairs:[[labelA,labelB],...], metrics:[...], scope} -> [{metric: [...]}].
+
+        Pairs the page cannot resolve (a run dir that vanished between load and
+        click) come back as null rather than shifting the rest of the batch."""
+        run_dirs, labels = resolve_runs(args, quiet=True)
+        report_dir = os.path.dirname(os.path.abspath(args.out)) or "."
+        cache = AggCache(report_dir, run_dirs,
+                         enabled=not getattr(args, "no_cache", False))
+        idx = {lab: i for i, lab in enumerate(labels)}
+        parsed = {}
+
+        def get_rows(i):
+            if i not in parsed:
+                parsed[i] = tuple(read_rows(os.path.join(run_dirs[i], f))
+                                  for f in EPISODE_TABLES)
+            return parsed[i]
+
+        known = {m[0] for m in DIFF_METRICS}
+        metrics = [m for m in req.get("metrics") or [] if m in known]
+        scope = req.get("scope")
+        if scope not in (FULL_SCOPE, NOMINAL_SCOPE) or not metrics:
+            raise ValueError("bad scope or metrics")
+        out = []
+        for pair in req.get("pairs") or []:
+            i, j = (idx.get(pair[0]), idx.get(pair[1])) if len(pair) == 2 else (None, None)
+            out.append(None if i is None or j is None or i == j else
+                       {m: diff_block(get_rows, cache, i, j, m, scope) for m in metrics})
+        return out
 
     class Handler(http.server.SimpleHTTPRequestHandler):
+        def do_POST(self):
+            if self.path.split("?", 1)[0] != DIFF_ENDPOINT:
+                self.send_error(404)
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                if length > 1 << 20:            # a batch is a few KB of labels
+                    self.send_error(413)
+                    return
+                req = json.loads(self.rfile.read(length) or b"{}")
+                t0 = time.perf_counter()
+                body = json.dumps({"blocks": diff_api(req)},
+                                  separators=(",", ":"), allow_nan=False).encode()
+            except (ValueError, KeyError, TypeError) as exc:
+                self.send_error(400, f"bad diff request: {exc}")
+                return
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            except Exception as exc:
+                self.send_error(500, f"diff computation failed: {exc}")
+                return
+            took = time.perf_counter() - t0
+            if took > 0.5:      # a cold batch; say so rather than look hung
+                sys.stderr.write(f"[html_report] diff batch "
+                                 f"{len(req.get('pairs') or [])} pairs x "
+                                 f"{len(req.get('metrics') or [])} metrics "
+                                 f"({req.get('scope')}) in {took:.1f}s\n")
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
         def do_GET(self):
             try:
                 self._get()
@@ -2729,16 +3632,25 @@ def serve(args):
                 self.end_headers()
                 return
             if path == report_url or (path == "/" and not report_url):
-                try:
-                    html = generate(args, live=True, quiet=True)
-                except Exception as exc:
-                    self.send_error(500, f"report generation failed: {exc}")
-                    return
-                try:
-                    with open(out_abs, "w") as f:   # keep the snapshot fresh too
-                        f.write(html)
-                except OSError:
-                    pass
+                # ThreadingHTTPServer: serialise so two tabs refreshing at once
+                # rebuild once, not twice
+                with lock:
+                    before = memo.get("key")
+                    t0 = time.perf_counter()
+                    try:
+                        html = generate(args, live=True, quiet=True, memo=memo)
+                    except Exception as exc:
+                        self.send_error(500, f"report generation failed: {exc}")
+                        return
+                    rebuilt = memo.get("key") != before
+                    if rebuilt:
+                        sys.stderr.write(
+                            f"[html_report] rebuilt in {time.perf_counter() - t0:.1f}s\n")
+                        try:
+                            with open(out_abs, "w") as f:   # keep the snapshot fresh
+                                f.write(html)
+                        except OSError:
+                            pass
                 body = html.encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -2793,15 +3705,15 @@ def serve(args):
                     remaining -= len(chunk)
 
         def log_message(self, fmt, *fargs):
-            if self.path.split("?", 1)[0] in ("/", report_url):
+            if self.path.split("?", 1)[0] in ("/", report_url, DIFF_ENDPOINT):
                 sys.stderr.write(f"[html_report] {fmt % fargs}\n")
 
     srv = http.server.ThreadingHTTPServer(
         ("127.0.0.1", args.port), functools.partial(Handler, directory=root))
     url = f"http://127.0.0.1:{args.port}" + (report_url or "/")
-    print(f"[html_report] live report at {url} — every refresh re-reads "
-          f"{args.runs_root if args.run_dirs is None else 'the given run dirs'}; "
-          f"Ctrl-C to stop")
+    print(f"[html_report] live report at {url} — every refresh re-checks "
+          f"{args.runs_root if args.run_dirs is None else 'the given run dirs'} and "
+          f"rebuilds only what moved; Ctrl-C to stop")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
@@ -2822,9 +3734,15 @@ def main():
     ap.add_argument("--out", default="sim2sim_eval_results/compare/report.html")
     ap.add_argument("--serve", action="store_true",
                     help="serve the report over localhost instead of only writing the "
-                         "file: every browser refresh re-discovers runs and re-reads "
-                         "the CSVs (still also refreshes the --out snapshot)")
+                         "file: every browser refresh re-discovers runs and rebuilds "
+                         "whatever changed (the --out snapshot is refreshed on each "
+                         "actual rebuild)")
     ap.add_argument("--port", type=int, default=8000, help="port for --serve")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="ignore <report_dir>/.cache/ and re-aggregate everything "
+                         "from the CSVs. The cache keys already carry a hash of the "
+                         "aggregation and bootstrap code, so this is a debugging "
+                         "escape hatch, not something a code change needs")
     args = ap.parse_args()
     if args.serve:
         serve(args)

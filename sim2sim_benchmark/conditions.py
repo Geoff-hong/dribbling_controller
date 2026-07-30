@@ -483,6 +483,97 @@ def capability_conditions(train=None):
     return table
 
 
+# ---------------------------------------------------------------- plastic turf
+# The 2026-07 outdoor-deployment environment, measured or estimated per channel.
+# Unlike robustness/capability -- which sweep ONE channel off a deploy-nominal
+# base -- every channel here is off-nominal at once, because that is what the
+# real field is: turf underfoot, an imperfect ball, a mocap frame that is a few
+# degrees out, firmware torque limits, a safety rope, and a hand-off from
+# standby. It is the only table whose point is the JOINT distribution.
+#
+# Sources: ball damping 1.63 + roll friction 0.0017 are the 2026-07-24 turf
+# free-roll decay fit (a = 0.120 + 0.465 v); bounce 0.6-0.65 the plastic-turf
+# restitution; ground tc 0.02 and pile drag the short-pile-on-hard-base
+# estimate (tc 0.04 measured indistinguishable, see round j); tether -1..2 N the
+# trailing safety rope; motor curve the G1 EDU firmware ceiling; the obs-frame
+# bias the mocap calibration residual (pitch dominates: the ~0.84 m height lever
+# displaces ball_pos_b ~10 cm at 7 deg, more than a ball radius).
+#
+# Termination is TASK-LEVEL (ball lost / off route / fall), so a policy cannot
+# score by abandoning the ball and staying upright -- the failure mode that made
+# fall-only survival rank wandering policies first.
+#
+# HISTORY. Until 2026-07-29 this table had three points (turf_mild / turf_harsh /
+# turf_max, probe rounds g / i / d). It is now the single field recipe. The
+# mild/max episodes already recorded on 2026-07-29 stay in plastic_turf.csv and
+# the report still renders them -- their parameters never changed, so they remain
+# a valid archived reference; they are simply no longer collected.
+#
+# PUSH MAGNITUDE, measured 2026-07-29 (turf_harsh_ablation_20260729, 48 episodes
+# per point, one channel reverted at a time). The recipe originally shoved at
+# push_dv 2.0 / ball_push_dv 1.0 and every checkpoint collapsed to ~4 s:
+#     base (2.0/1.0) ......  25% upright, 4.1 s, 75% of episodes ended in a FALL
+#     push -> 0.5/0.2 .....  94% upright, 7.0 s,  6% fell, 73% ended off-route
+#     ball push alone .....  no effect at all (+0)
+#     obs-frame +-7 deg ...  no effect on falls (-2)
+#     EDU ceiling 0.86 ....  no effect on falls (-6)
+# push_dv is calibrated so that 0.5 IS the trained envelope -- engine scales it by
+# [1, 1, 0.4] linear and [1.04, 1.04, 1.56] ANGULAR, which reproduces the env.yaml
+# push_robot ranges (+-0.5/+-0.5/+-0.2 m/s, +-0.52/+-0.52/+-0.78 rad/s) exactly.
+# So 2.0 was 4x the trained envelope on all six axes (+-3.12 rad/s of yaw, vs
+# +-0.78 trained) and past the top of the robustness base_push sweep (1.5). It
+# turned the field trial into a shove-resistance test no policy was trained for:
+# strict success was 0% everywhere and the spread over 10 checkpoints fell to
+# 0.65 s (2.6 sigma), against 19 s on the gentler point. Now pinned at the trained
+# 0.5/0.2 so the test measures dribbling and route control, which is what it is
+# for; raise it only with an ablation to say what the raise bought.
+PLASTIC_TURF_BALL = dict(ball_damping=1.63, ball_roll_fric=0.0017)
+
+
+def plastic_turf_conditions(train=None):
+    """Joint real-deployment distribution ("plastic turf"), the field recipe.
+
+    Episodes end on fall, ball >1.5 m from the robot, ball >1.5 m off the route,
+    or the 600 s budget; the headline metric is TASK survival time, read together
+    with cross-track and v/cmd (a policy that survives by slowing down shows up as
+    a low speed ratio). The measured ball is pinned so every checkpoint meets the
+    same one; only its friction follows the checkpoint's own training DR.
+    """
+    common = dict(route_mode="human", route_vmax=2.0, route_v2_vel=True,
+                  route_len_m=600.0, offroute_fail_m=1.5,
+                  reset_ball_random=True, reset_ball_bearing=0.0,
+                  motor_curve=True, motor_vel_scale=0.8,
+                  push_interval_s=4.0,
+                  **PLASTIC_TURF_BALL)
+    # The field recipe pins the MEASURED ball (mass/radius) but leaves friction on
+    # the checkpoint's own training DR -- byte-for-byte what the pysim command
+    # does, which fills only the channels its flags name.
+    field_dr = dict(mass=(0.39, 0.40), radius=(0.095, 0.105), foot=1.0,
+                    ball=tuple(engine.DR["ball_friction"]))
+    # THE FIELD RECIPE. The hand-tuned deployment command, except for the push
+    # magnitude -- see the header ablation for why that is the trained 0.5/0.2 and
+    # not the 2.0/1.0 it was first written with. --hybridfoot and --settle-s are
+    # run-level, not condition keys, so the runbook has to carry them.
+    # Kept as `turf_harsh` rather than renamed: the name is what plastic_turf.csv
+    # and the manifests already key on, and a rename would orphan both.
+    return [
+        condition_row("turf_harsh", "plastic_turf", 1,
+                      episode_s=600.0, ball_far_fail_m=1.5,
+                      ball_bounce_dampratio=0.6, ground_solref_tc=0.02,
+                      dr=field_dr,
+                      joint_friction=1.0, obs_noise_scale=1.0,
+                      pile_drag=25.0, pile_height=0.025,
+                      ball_obs_bias=(0.0, 0.0, -0.03),
+                      obs_frame_rpy_bias_deg=[[0, 0], [-7, 7], [-3, 3]],
+                      motor_peak_scale=0.86, reset_jitter=True,
+                      reset_ball_dist=[0.43, 0.61],
+                      tether_back_n=[0.0, 2.0], tether_down_n=[0.0, 2.0],
+                      ball_obs_delay_steps=[0, 3], standby_hold_s=[0.0, 1.0],
+                      push_dv=0.5, ball_push_dv=0.2,
+                      **common),
+    ]
+
+
 def load_conditions_json(path):
     """Custom table: a JSON list of {name, group, axis, <condition keys>} dicts.
     Names/groups default from the index; unknown keys and invalid values raise

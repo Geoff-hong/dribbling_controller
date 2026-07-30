@@ -310,6 +310,11 @@ def read_train_dr(path):
             _pair((events.get("joint_friction") or {}).get("params", {})
                   .get("friction_distribution_params"))
             if isinstance(events.get("joint_friction"), dict) else None),
+        # ball-free walk mode (--walk_debug, dribble_env_cfg:apply_walk_debug_preset).
+        # The obs LAYOUT is unchanged (ball slots become zero stubs), so nothing
+        # about the ONNX contract announces it — only this key does, and running a
+        # walk policy against a live ball feeds it obs it never trained on.
+        walk_debug=bool(cfg.get("walk_debug")),
     )
 
 
@@ -368,4 +373,7 @@ def describe(train):
     lines.append("  joint fric   " + (
         "frictionless (event removed / absent — nominal 0, MJCF 0.1 overridden)"
         if jf is None else f"trained range {rng(jf, '{:.2f}')} N*m"))
+    lines.append("  mode         " + (
+        "walk_debug (ball parked, ball obs are zero stubs, route anchors the body)"
+        if train.get("walk_debug") else "dribble (live ball)"))
     return lines

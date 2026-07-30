@@ -65,7 +65,9 @@ def draw_legend(frame, robots):
         draw.rectangle([8, y + 3, 26, y + 21], fill=color, outline=(0, 0, 0))
         cross_track = rb.ct_sum / max(1, rb.ct_count)
         dr = rb.dr
-        text = (f"r{k}  m={dr['mass']:.2f}kg  r={dr['radius']:.3f}m  "
+        text = (f"r{k}  uf={dr['foot']:.2f}  | body cross-track={cross_track:.3f}m"
+                if engine.WALK_DEBUG else
+                f"r{k}  m={dr['mass']:.2f}kg  r={dr['radius']:.3f}m  "
                 f"uf={dr['foot']:.2f} ub={dr['ball']:.2f}  | cross-track={cross_track:.3f}m")
         draw.text((32, y), text, fill=(255, 255, 255), font=font)
         y += 26
@@ -165,6 +167,10 @@ def plot_eval(records, path):
     # only plot params that were actually randomized (radius is fixed -> skip its dead column)
     params = [(lab, ci) for lab, ci in cand if float(np.ptp(arr[:, ci])) > 1e-6]
     ncol = len(params)
+    if ncol == 0:
+        # walk_debug (no ball) or a fully-pinned DR: nothing to plot a marginal against
+        print("  no DR parameter varied — skipping the eval plot")
+        return
     W = max(20, len(arr) // 8)
     fig, ax = plt.subplots(2, ncol, figsize=(4.7 * ncol, 7.4), squeeze=False)
     for c, (lab, ci) in enumerate(params):
@@ -231,7 +237,8 @@ def sweep_report(srec, axes, args, nominal):
 
 
 def print_eval(robots, resets):
-    print("==== eval (per robot) ====  (cross-track = mean ball deviation from route line)")
+    anchor = "body" if engine.WALK_DEBUG else "ball"
+    print(f"==== eval (per robot) ====  (cross-track = mean {anchor} deviation from route line)")
     for k, rb in enumerate(robots):
         ct = rb.ct_sum / max(1, rb.ct_count)
         dr = rb.dr
@@ -264,6 +271,12 @@ def main():
                     help="policy ONNX (default: checkpoints/g1_dribble_s3_human_dr_iter80000)")
     ap.add_argument("--reset", default=engine.DEFAULT_RESET,
                     help="reset-state file (default: the standby reset, matching the default policy)")
+    ap.add_argument("--walk-debug", dest="walk_debug", action="store_true", default=None,
+                    help="force the ball-free walk mode (ball parked, ball obs zero "
+                         "stubs, route anchored on the obs body frame). Default: read "
+                         "walk_debug from the checkpoint's env.yaml")
+    ap.add_argument("--no-walk-debug", dest="walk_debug", action="store_false",
+                    help="force the dribble path even for a walk_debug checkpoint")
     ap.add_argument("--latency", action="store_true",
                     help="replicate the checkpoint's training latency DR (per-episode ball-obs "
                          "lag + action lag, read from its env.yaml). Off = feed current values.")
@@ -366,6 +379,16 @@ def main():
                     help="three-axis obs-frame miscalibration (roll pitch yaw, deg), "
                          "right-multiplied; pitch/roll shift ball_pos_b first-order via "
                          "the ~0.84 m height lever (7.3 cm at 5 deg). Overrides --chest-yaw-bias")
+    ap.add_argument("--chest-rpy-bias-range", type=float, nargs=6, default=None,
+                    metavar=("RLO", "RHI", "PLO", "PHI", "YLO", "YHI"),
+                    help="per-episode obs-frame miscalibration drawn from three ranges "
+                         "(roll lo hi, pitch lo hi, yaw lo hi; deg). Overrides "
+                         "--chest-rpy-bias / --chest-yaw-bias")
+    ap.add_argument("--settle-s", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+                    help="training settle window: U(LO,HI) s of soft-gain takeover with the "
+                         "action overridden to the default pose. NOTE the engine gives "
+                         "--standby-hold-s priority — settle only fires on episodes whose "
+                         "hold draw is 0")
     ap.add_argument("--bias-gravity", action="store_true",
                     help="apply the --chest-rpy-bias frame error to the BASE quat too "
                          "(tilts projected_gravity — hallucinated lean). Only deploy-"
@@ -375,11 +398,13 @@ def main():
                          "default = the training DR range when --foot-fric is set")
     ap.add_argument("--ball-radius", type=float, nargs="+", default=None, metavar="M",
                     help="ball radius (m): same semantics as --ball-mass")
-    ap.add_argument("--ball-start-dist", type=float, default=None,
-                    help="task-start ball distance from pelvis (m). None = legacy fixed "
-                         "0.65 straight ahead. Real 07-24 placements: median 0.57, range 0.43-0.61")
-    ap.add_argument("--ball-start-bearing", type=float, default=0.0,
-                    help="task-start ball bearing off body-forward (deg), used with --ball-start-dist")
+    ap.add_argument("--ball-start-dist", type=float, nargs="+", default=None, metavar="M",
+                    help="task-start ball distance from pelvis (m): one value pins it, "
+                         "two = per-episode U(LO,HI). None = legacy fixed 0.65 straight "
+                         "ahead. Real 07-24 placements: median 0.57, range 0.43-0.61")
+    ap.add_argument("--ball-start-bearing", type=float, nargs="+", default=[0.0], metavar="DEG",
+                    help="task-start ball bearing off body-forward (deg): one value pins "
+                         "it, two = per-episode U(LO,HI). Used with --ball-start-dist")
     ap.add_argument("--sweep-scale", type=float, default=1.5,
                     help="--sweep envelope as a multiple of the checkpoint's training DR range")
     args = ap.parse_args()
@@ -410,16 +435,40 @@ def main():
     from .train_dr import read_train_dr
     train_cfg = read_train_dr(args.onnx)
     engine.configure_train_dr(train_cfg, sweep_scale=args.sweep_scale)
+    if args.walk_debug is not None and args.walk_debug != engine.WALK_DEBUG:
+        print(f"[multi] walk_debug OVERRIDE: {engine.WALK_DEBUG} (env.yaml) -> "
+              f"{args.walk_debug} (CLI)")
+        engine.set_walk_debug(args.walk_debug)
+    if engine.WALK_DEBUG:
+        inert = [n for n, v in (("--ball-damping", args.ball_damping),
+                                ("--ball-roll-fric", args.ball_roll_fric),
+                                ("--ball-bounce", args.ball_bounce),
+                                ("--ball-mass", args.ball_mass),
+                                ("--ball-radius", args.ball_radius),
+                                ("--ball-obs-bias", args.ball_obs_bias),
+                                ("--ball-start-dist", args.ball_start_dist),
+                                ("--ball-delay-steps", args.ball_delay_steps),
+                                ("--ball-push-dv", args.ball_push_dv or None),
+                                ("--ball-far-fail-m", args.ball_far_fail_m))
+                 if v is not None]
+        if inert:
+            print(f"[multi] walk_debug: ignoring ball-side knobs {' '.join(inert)} "
+                  f"(the ball is parked and its obs are zero stubs)")
     if args.route_cruise is not None and len(args.route_cruise) > 2:
         ap.error("--route-cruise takes 1 (pin) or 2 (min max) values")
     if len(args.standby_hold_s) > 2:
         ap.error("--standby-hold-s takes 1 (fixed) or 2 (min max) values")
+    if args.ball_start_dist is not None and len(args.ball_start_dist) > 2:
+        ap.error("--ball-start-dist takes 1 (pin) or 2 (min max) values")
+    if len(args.ball_start_bearing) > 2:
+        ap.error("--ball-start-bearing takes 1 (pin) or 2 (min max) values")
     ckpt_v2_vel = bool(train_cfg.get("route_v2_vel"))
     if ckpt_v2_vel != args.route_v2_vel:
         print(f"[multi] NOTE: checkpoint trained route_v2_vel={ckpt_v2_vel} but the "
               f"benchmark serves the {'v2' if args.route_v2_vel else 'legacy/C++'} speed "
               f"law ({'--route-v2-vel set' if args.route_v2_vel else 'add --route-v2-vel for the training-side model'})")
 
+    engine.TETHER_POINT = np.array(args.tether_point)
     if args.meshfoot and args.hybridfoot:
         ap.error("--meshfoot and --hybridfoot are mutually exclusive")
     if args.meshfoot:
@@ -450,13 +499,29 @@ def main():
         ball_roll_fric=args.ball_roll_fric, ball_bounce_dampratio=args.ball_bounce,
         joint_friction=args.joint_friction, obs_noise_scale=args.obs_noise_scale,
         ball_obs_bias=args.ball_obs_bias, chest_yaw_bias_deg=args.chest_yaw_bias,
-        obs_frame_rpy_bias_deg=args.chest_rpy_bias,
+        obs_frame_rpy_bias_deg=(
+            args.chest_rpy_bias if args.chest_rpy_bias_range is None
+            else [list(sorted(args.chest_rpy_bias_range[i:i + 2])) for i in (0, 2, 4)]),
         obs_frame_bias_gravity=args.bias_gravity,
         motor_curve=args.motor_curve, motor_peak_scale=args.motor_peak_scale,
         motor_vel_scale=args.motor_vel_scale,
+        pile_drag=args.pile_drag, pile_height=args.pile_height,
+        tether_back_n=(args.tether_back_n[0] if len(args.tether_back_n) == 1
+                       else [min(args.tether_back_n), max(args.tether_back_n)]),
+        tether_down_n=(args.tether_down_n[0] if len(args.tether_down_n) == 1
+                       else [min(args.tether_down_n), max(args.tether_down_n)]),
+        # engine._draw() reads a scalar as a pin and a 2-list as U(lo,hi), so a
+        # range only has to survive argparse intact
         **({} if args.ball_start_dist is None
-           else {"reset_ball_random": True, "reset_ball_dist": args.ball_start_dist,
-                 "reset_ball_bearing": args.ball_start_bearing}),
+           else {"reset_ball_random": True,
+                 "reset_ball_dist": (args.ball_start_dist[0]
+                                     if len(args.ball_start_dist) == 1
+                                     else [min(args.ball_start_dist),
+                                           max(args.ball_start_dist)]),
+                 "reset_ball_bearing": (args.ball_start_bearing[0]
+                                        if len(args.ball_start_bearing) == 1
+                                        else [min(args.ball_start_bearing),
+                                              max(args.ball_start_bearing)])}),
         **({} if (args.foot_fric is None and not args.ball_mass and not args.ball_radius)
            else {"dr": dict(
                mass=(tuple(engine.DR["ball_mass"]) if not args.ball_mass
@@ -475,6 +540,7 @@ def main():
     for rb in robots:
         rb.latency = args.latency
         rb.hold_s_default = 0.0   # the hold comes from the condition (range-capable)
+        rb.settle_range = (None if args.settle_s is None else tuple(sorted(args.settle_s)))
         rb.episode_len_default = args.episode_s
         rb.default_condition = cli_condition
     mujoco.mj_resetData(model, data)
@@ -487,68 +553,10 @@ def main():
     resets = [0] * args.robots
     records = []   # one row per COMPLETED episode (see aggregate_eval column comment)
 
-    _pile_prev = {}
-
-    def _apply_pile_drag():
-        # turf pile: horizontal -c*v on any foot whose sole (ankle z - 0.035)
-        # is inside the pile layer. Foot velocity by finite difference; a reset
-        # teleport shows up as an absurd velocity -> skip that tick.
-        for rb in robots:
-            for bid in rb.foot_bodies:
-                pos = data.xpos[bid].copy()
-                vel = (pos - _pile_prev.get(bid, pos)) / period_dt
-                _pile_prev[bid] = pos
-                sole = pos[2] - 0.035
-                if sole < args.pile_height and np.linalg.norm(vel) < 5.0:
-                    F = -args.pile_drag * vel
-                    F[2] = 0.0
-                    n = np.linalg.norm(F)
-                    if n > 60.0:
-                        F *= 60.0 / n
-                    data.xfrc_applied[bid, :3] = F
-                else:
-                    data.xfrc_applied[bid, :3] = 0.0
-
-    _tether_local = np.array(args.tether_point)
-    _tether_on = any(abs(v) > 0 for v in args.tether_back_n + args.tether_down_n)
-    _teth_rng = np.random.default_rng(args.seed + 0x7e7)
-    _teth_state = {}   # robot idx -> {back, down, next_t}
-
-    def _tether_forces(k, t):
-        # 1 value = constant; 2 values = piecewise-constant random level in
-        # U(LO,HI), redrawn every U(0.3,1.0) s (intermittent cable tugs)
-        vb, vd = args.tether_back_n, args.tether_down_n
-        if len(vb) == 1 and len(vd) == 1:
-            return vb[0], vd[0]
-        st = _teth_state.get(k)
-        if st is None or t >= st["next_t"]:
-            st = {"back": vb[0] if len(vb) == 1 else float(_teth_rng.uniform(min(vb), max(vb))),
-                  "down": vd[0] if len(vd) == 1 else float(_teth_rng.uniform(min(vd), max(vd))),
-                  "next_t": t + float(_teth_rng.uniform(0.3, 1.0))}
-            _teth_state[k] = st
-        return st["back"], st["down"]
-
-    def _apply_tether():
-        # trailing cable at the back-plate handle: pull opposite the robot's
-        # heading + downward load, applied at the actual attachment point via
-        # mj_applyFT so the induced pitch torque is included.
-        data.qfrc_applied[:] = 0.0
-        zero_t = np.zeros(3)
-        for k, rb in enumerate(robots):
-            back, down = _tether_forces(k, data.time)
-            w, x, y, z = data.qpos[rb.bq + 3:rb.bq + 7]
-            yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-            force = np.array([-back * np.cos(yaw), -back * np.sin(yaw), -down])
-            R = data.xmat[rb.torso_body].reshape(3, 3)
-            point = data.xpos[rb.torso_body] + R @ _tether_local
-            mujoco.mj_applyFT(model, data, force, zero_t, point,
-                              rb.torso_body, data.qfrc_applied)
+    # pile drag / tether now live in the engine (condition keys), so the
+    # benchmark condition tables get them too -- nothing to do here.
 
     def advance():
-        if args.pile_drag > 0.0:
-            _apply_pile_drag()
-        if _tether_on:
-            _apply_tether()
         return engine.step_control_period(model, data, robots)
 
     def control_period():

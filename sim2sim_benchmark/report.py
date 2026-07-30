@@ -297,7 +297,16 @@ def print_summary(episode_rows, title):
     print("For capability, strict% is the nested full-budget/completion verdict. "
           "The HTML report also exposes route-control, upright+ball, and CT on "
           "strict successes; ct|up below is the fail-fast-censored upright subset.")
-    print(f"{'condition':<18}{'n':>4}{'surv%':>14}{'strict%':>14}{'poss%':>7}"
+    # plastic_turf measures TIME TO FAILURE (every episode is meant to end in
+    # one), so its headline is mean task-survival seconds, not a survival RATE
+    timed = title == "plastic_turf"
+    if timed:
+        print("plastic_turf ends episodes on fall / ball lost / off route, so "
+              "task-surv (mean +- SEM seconds, median in brackets) is the headline; "
+              "surv% here is the FALL-only rate, i.e. how often the run ended "
+              "upright-but-taskless rather than on the floor.")
+    print(f"{'condition':<18}{'n':>4}" + (f"{'task-surv(s)':>18}" if timed else "")
+          + f"{'surv%':>14}{'strict%':>14}{'poss%':>7}"
           f"{'v(m/s)':>14}{'v/cmd':>7}{'r':>7}{'ct|up(m)':>14}{'bd90':>7}")
     for (group, axis, name) in sorted(by_condition, key=lambda k: (k[0], k[1])):
         rows = by_condition[(group, axis, name)]
@@ -323,7 +332,14 @@ def print_summary(episode_rows, title):
         # divides by the actual survivor count, which is what the SE must use
         cross_track, cross_track_se = _mean_pm([r["cross_track"] for r in alive])
         ball_dist_p90 = _pct([r["ball_dist"] for r in rows], 90)
-        print(f"{name:<18}{len(rows):>4}"
+        if timed:
+            dur = np.array([r["duration"] for r in rows], dtype=float)
+            dur_txt = (f"{dur.mean():>8.1f}+-{dur.std(ddof=1)/np.sqrt(len(dur)):<4.1f}"
+                       f"[{np.median(dur):>4.1f}]" if len(dur) > 1
+                       else f"{dur.mean():>12.1f}{'':>6}")
+        else:
+            dur_txt = ""
+        print(f"{name:<18}{len(rows):>4}{dur_txt}"
               f"{survival:>8.0f}+-{survival_se:<4.0f}{success_txt}"
               f"{possession:>7.0f}"
               f"{ach_speed:>8.2f}+-{ach_speed_se:<4.2f}{speed_ratio:>7.2f}{corr_txt}"

@@ -18,7 +18,8 @@ if "--videos" in sys.argv:
     os.environ.setdefault("MUJOCO_GL", "egl")
 
 from . import engine
-from .conditions import robustness_conditions, capability_conditions, load_conditions_json
+from .conditions import (robustness_conditions, capability_conditions,
+                         plastic_turf_conditions, load_conditions_json)
 from .runner import run_condition_table, record_condition_videos
 from .report import EpisodeStream, drop_conditions, report_csv
 from . import topup
@@ -33,6 +34,12 @@ def main():
     ap.add_argument("--capability", action="store_true",
                     help="straight-line max speed + corner-turn max curvature with fail-fast "
                          "control criteria; metrics = nested success rates + cross-track")
+    ap.add_argument("--plastic-turf", action="store_true",
+                    help="the 2026-07 outdoor deployment environment as ONE joint "
+                         "distribution (turf ball + pile drag + soft ground + firmware "
+                         "torque ceiling + mocap frame bias + safety tether + standby "
+                         "hand-off), at three severities; task-level termination, "
+                         "metric = task survival time")
     ap.add_argument("--conditions", default="",
                     help="run a custom JSON condition table instead of the built-in ones")
     ap.add_argument("--onnx", default=engine.DEFAULT_ONNX, help="deployment policy ONNX")
@@ -43,6 +50,13 @@ def main():
                          "(default: the env.yaml next to --onnx). When COMPARING policies "
                          "trained with different DR, pass the same --dr-from to every run "
                          "so all runs share one condition table")
+    ap.add_argument("--meshfoot", action="store_true",
+                    help="mesh foot collision (ankle_roll STL) instead of the 7 capsules per "
+                         "foot — required for --foot_mesh-trained checkpoints")
+    ap.add_argument("--hybridfoot", action="store_true",
+                    help="hybrid foot collision: capsules keep the floor contact, the "
+                         "ankle_roll STL carries the ball contact (the --foot_mesh "
+                         "--shin_mesh deploy geometry)")
     ap.add_argument("--robots", type=int, default=32)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--route-bank", type=int, default=12,
@@ -98,6 +112,18 @@ def main():
         if not 0 <= shard_i < shard_n:
             ap.error("--shard must be 'i/n' with 0 <= i < n")
 
+    # foot collision geometry: set BEFORE any world is built AND before the
+    # manifest fingerprint is taken (it hashes engine.SINGLE_MJCF, so a
+    # hybridfoot run cannot silently resume a capsule-foot dir)
+    if args.meshfoot and args.hybridfoot:
+        ap.error("--meshfoot and --hybridfoot are mutually exclusive")
+    if args.meshfoot:
+        engine.set_meshfoot(True)
+        print("[foot] collision: mesh (ankle_roll STL)")
+    if args.hybridfoot:
+        engine.set_hybridfoot(True)
+        print("[foot] collision: hybrid (capsules->floor, ankle_roll STL->ball)")
+
     # test ranges anchor on the DR the policy was actually trained with
     train = read_train_dr(args.dr_from or args.onnx)
     if args.dr_from and train is None:
@@ -125,8 +151,10 @@ def main():
         tables.append(("robustness", robustness_conditions(train)))
     if args.capability:
         tables.append(("capability", capability_conditions(train)))
+    if args.plastic_turf:
+        tables.append(("plastic_turf", plastic_turf_conditions(train)))
     if not tables:
-        ap.error("pick at least one of --robustness / --capability / --conditions")
+        ap.error("pick at least one of --robustness / --capability / --plastic-turf / --conditions")
 
     # --episode-s is a CAP, not just the fallback for unpinned conditions: a
     # condition that pins a longer budget (human_dribble and speed_tracking pin
@@ -138,8 +166,14 @@ def main():
     # default the gentlest corner_turn budgets (kappa 0.2 -> 15 s, 0.3 -> 13 s)
     # are also capped, which eats their turn_budget slack margin; a timeout
     # there can be budget-clipping, not lost control (--episode-s 15 restores).
+    # plastic_turf is EXEMPT: its metric is time-to-failure, not survival at a
+    # fixed budget, so clipping the budget censors the measurement itself (the
+    # validated runs show 20-45 s task survival — a 12 s cap would flatten the
+    # whole field to "survived"). Its own 60 s pin is the ceiling.
     capped = 0
     for _title, table in tables:
+        if _title == "plastic_turf":
+            continue
         for c in table:
             if c.get("episode_s") and float(c["episode_s"]) > args.episode_s:
                 c["episode_s"] = args.episode_s
@@ -256,12 +290,39 @@ def main():
                 n = drop_conditions(path, names)
                 if n:
                     print(f"[topup] dropped {n} episodes from {os.path.basename(path)}")
+    # A run that adds a NEW table to an existing dir (--plastic-turf into a dir
+    # that already holds robustness/capability) must not erase the other tables'
+    # fingerprints. save_manifest overwrites the file, so without this the next
+    # run over those tables compares against nothing -- and a later combined run
+    # would classify them "changed" and DROP their episodes. Tables this run did
+    # not touch are carried over verbatim; the ones it did keep the new hashes.
+    if old_manifest:
+        carried = [t for t in (old_manifest.get("tables") or {})
+                   if t not in new_manifest["tables"]]
+        for title in carried:
+            new_manifest["tables"][title] = old_manifest["tables"][title]
+        if carried:
+            print(f"[topup] carried over untouched tables: {', '.join(sorted(carried))}")
     topup.save_manifest(manifest_path, new_manifest)
     # provenance: the parsed training DR + the derived ranges this run tested with
     with open(os.path.join(args.out_dir, "train_dr.json"), "w") as f:
         json.dump({"train": train, "derived_dr": engine.DR,
                    "derived_sweep_ranges": engine.SWEEP_RANGES,
                    "onnx": args.onnx}, f, indent=2, default=list)
+    # The RESOLVED condition values, next to the episodes they produced. The
+    # manifest only carries fingerprints, so without this the report would have to
+    # re-derive the table from today's code to say what a run actually tested --
+    # which is exactly the thing that goes stale. Run-level knobs that are not
+    # condition keys ride along, because a reader cannot reconstruct them either.
+    for title, table in tables:
+        with open(os.path.join(args.out_dir, f"{title}.conditions.json"), "w") as f:
+            json.dump({"run_level": {"hybridfoot": bool(args.hybridfoot),
+                                     "meshfoot": bool(args.meshfoot),
+                                     "settle_range": list(settle_range) if settle_range else None,
+                                     "robots": args.robots,
+                                     "route_bank": args.route_bank,
+                                     "reps": args.reps},
+                       "conditions": table}, f, indent=1, default=list)
     for title, table in tables:
         # seed index from the condition NAME, not its position: inserting or
         # reordering an axis must not perturb any other condition's draws

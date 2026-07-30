@@ -49,6 +49,16 @@ def set_hybridfoot(on):
     global SINGLE_MJCF
     SINGLE_MJCF = HYBRIDFOOT_MJCF if on else _DEFAULT_SINGLE_MJCF
     _single_robot_xml.cache_clear()
+
+
+def set_walk_debug(on):
+    """Force the ball-free walk mode on/off, overriding the env.yaml auto-detect.
+    Must be called BEFORE build_world (the mode is logged there and decides the
+    reset-time ball parking)."""
+    global WALK_DEBUG
+    WALK_DEBUG = bool(on)
+
+
 # default policy/reset pair: the DR-trained v2 checkpoint committed under
 # checkpoints/, which was trained with standby-pose reset mixing -> standby reset
 DEFAULT_ONNX = os.path.join(REPO_DIR, "checkpoints", "g1_dribble_s3_human_dr_iter80000",
@@ -241,6 +251,17 @@ BALL_ROLL_FRIC = 0.0001
 # None means "that checkpoint did not randomize it" and the axis falls back to a
 # pure stress probe.
 OBS_NOISE = {}            # {obs term name: uniform half-width}, applied post-delay
+# Ball-free walk mode, mirroring the training preset (dribble_env_cfg:
+# apply_walk_debug_preset + DribbleRLEnv.WALK_DEBUG). It is a property of the
+# CHECKPOINT, not of a benchmark condition, so it is read from the env.yaml by
+# configure_train_dr and applies to every robot/condition in the process:
+#   - ball_pos_b / ball_lin_vel_b / ball_radius are literal zeros (noise off)
+#   - the ball is parked 10 m below its grid origin, weightless and non-colliding
+#   - the pure-pursuit anchor is the OBS BODY frame, not the ball, so the route
+#     commands the body along the same law the ball path uses
+# Getting this wrong does not error: a walk policy fed live ball obs just walks
+# badly, so the mode is logged loudly by build_world.
+WALK_DEBUG = False
 ACTUATOR_GAIN_RANGE = None    # kp multiplier (training: stiffness_distribution_params)
 ACTUATOR_DAMPING_RANGE = None # kd multiplier; None -> share ACTUATOR_GAIN_RANGE
 PAYLOAD_KG_RANGE = None       # added to torso_link mass
@@ -287,10 +308,11 @@ def configure_train_dr(train, sweep_scale=1.5):
     global BALL_DELAY_RANGE, ACT_DELAY_SUBSTEPS, ACT_DELAY_ZERO_PROB, BALL_DAMPING
     global OBS_NOISE, ACTUATOR_GAIN_RANGE, PAYLOAD_KG_RANGE, JOINT_OFFSET_RANGE
     global BASE_COM_RANGE, RESET_BALL_DIST_RANGE, RESET_BALL_BEARING_DEG
-    global JOINT_FRICTION_RANGE, ACTUATOR_DAMPING_RANGE
+    global JOINT_FRICTION_RANGE, ACTUATOR_DAMPING_RANGE, WALK_DEBUG
     if train is None:
         print("[train_dr] WARNING: no env.yaml — using hardcoded legacy DR ranges")
         return
+    WALK_DEBUG = bool(train.get("walk_debug"))
     # Ball task-start placement. An explicit value overrides; an explicit null
     # keeps the (always-active) class-default range. But a dump MISSING the keys
     # entirely predates the feature, so that checkpoint trained with the ball
@@ -503,6 +525,15 @@ DEFAULT_CONDITION = dict(
     # gravity source shares the miscalibrated mocap frame (IMU-derived gravity
     # would NOT tilt); default off until the real wiring is confirmed.
     obs_frame_rpy_bias_deg=None, obs_frame_bias_gravity=False,
+    # Turf pile drag: horizontal -c*v on any foot whose sole is inside the pile
+    # layer (N*s/m; 0 = off). Tether: a trailing cable at the torso back-plate,
+    # pulling opposite the heading (back) plus a downward load. A scalar pins the
+    # force; a (lo, hi) pair redraws a piecewise-constant level every
+    # U(*tether_resample_s) s -- the intermittent tug of a real safety rope, and
+    # what the s2r lineage trains against. These live here rather than in the
+    # pysim loop so the CONDITION TABLES (plastic_turf) can use them too.
+    pile_drag=0.0, pile_height=0.03,
+    tether_back_n=0.0, tether_down_n=0.0, tether_resample_s=(0.3, 1.0),
     # Motor realism. motor_curve: enable the linear torque-speed ceiling
     # tau_max(w) = peak * (1 - |w|/VEL_LIMIT) (the flat URDF-peak clip is
     # optimistic at swing speeds). motor_peak_scale: scale EFFORT_LIMIT for the
@@ -925,10 +956,76 @@ def build_world(n_robots, spacing, onnx_path, reset_path, seed, visual=True):
           f" | history {meta.get('actor_history_length', '1')}"
           f" | actor obs {meta.get('actor_observation_dim', '?')}"
           f" | latent {meta.get('latent_dim', '?')}")
+    if WALK_DEBUG:
+        print("[multi] MODE: walk_debug — ball parked/weightless/non-colliding, "
+              "ball obs are zero stubs, route anchors the OBS BODY frame. "
+              "Ball metrics (possession / foot-ball / ball-dist) are NaN by "
+              "construction and ball-side knobs are inert.")
     reset_state = parse_reset(reset_path)
     robots = [Robot(model, k, grid[k], session, meta, reset_state, seed)
               for k in range(n_robots)]
     return model, data, robots
+
+
+# Tether attachment in torso_link coords: the G1 back-plate handle centre
+# (world ~(-0.13, 0, 1.12) at stand). Applied via mj_applyFT so the induced
+# pitch torque -- the part that actually costs balance -- is included.
+TETHER_POINT = np.array([-0.126, 0.0, 0.316])
+PILE_DRAG_MAX_N = 60.0     # clamp: a teleporting foot must not launch the robot
+PILE_SOLE_OFFSET = 0.035   # ankle body origin -> sole
+
+
+def _apply_pile_drag(rb, data, period_dt):
+    """Turf pile: horizontal -c*v on any foot whose sole is inside the pile
+    layer. Foot velocity by finite difference; a reset teleport shows up as an
+    absurd velocity, so that tick is skipped."""
+    for bid in rb.foot_bodies:
+        pos = data.xpos[bid].copy()
+        vel = (pos - rb._pile_prev.get(bid, pos)) / period_dt
+        rb._pile_prev[bid] = pos
+        if pos[2] - PILE_SOLE_OFFSET < rb.pile_height and np.linalg.norm(vel) < 5.0:
+            F = -rb.pile_drag * vel
+            F[2] = 0.0
+            n = np.linalg.norm(F)
+            if n > PILE_DRAG_MAX_N:
+                F *= PILE_DRAG_MAX_N / n
+            data.xfrc_applied[bid, :3] = F
+        else:
+            data.xfrc_applied[bid, :3] = 0.0
+
+
+def _apply_tether(model, data, rb):
+    """Trailing cable at the back-plate handle: pull opposite the robot's
+    heading + a downward load. Ranged forces hold a piecewise-constant level
+    for U(*tether_resample_s) seconds (intermittent tugs, not white noise)."""
+    t = data.time
+    if rb._teth is None or t >= rb._teth["next_t"]:
+        u = rb.tether_rng.uniform
+        rb._teth = {"back": float(u(*rb.tether_back)) if rb.tether_back[0] != rb.tether_back[1] else rb.tether_back[0],
+                    "down": float(u(*rb.tether_down)) if rb.tether_down[0] != rb.tether_down[1] else rb.tether_down[0],
+                    "next_t": t + float(u(*rb.tether_resample_s))}
+    w, x, y, z = data.qpos[rb.bq + 3:rb.bq + 7]
+    yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    force = np.array([-rb._teth["back"] * np.cos(yaw),
+                      -rb._teth["back"] * np.sin(yaw), -rb._teth["down"]])
+    R = data.xmat[rb.torso_body].reshape(3, 3)
+    point = data.xpos[rb.torso_body] + R @ TETHER_POINT
+    mujoco.mj_applyFT(model, data, force, np.zeros(3), point,
+                      rb.torso_body, data.qfrc_applied)
+
+
+def apply_external_forces(model, data, robots, period_dt):
+    """Per-robot turf/tether wrenches for this control period. Called by
+    step_control_period, so every consumer (viewer, pysim --eval, the benchmark
+    condition tables) gets them from the CONDITION rather than from its own
+    loop."""
+    if any(rb.tether_on for rb in robots):
+        data.qfrc_applied[:] = 0.0        # accumulated across robots below
+    for rb in robots:
+        if rb.pile_drag > 0.0:
+            _apply_pile_drag(rb, data, period_dt)
+        if rb.tether_on:
+            _apply_tether(model, data, rb)
 
 
 def step_control_period(model, data, robots, standby_hold_s=0.0):
@@ -939,6 +1036,7 @@ def step_control_period(model, data, robots, standby_hold_s=0.0):
     hand-off probe) or a soft policy SETTLE (training settle_time_range_s). The
     standby_hold_s arg is retained for signature stability but no longer read --
     rb.hold_s / rb.settle_s carry it."""
+    apply_external_forces(model, data, robots, model.opt.timestep * DECIMATION)
     for rb in robots:
         warm = data.time - rb.ep_start
         rb.policy_step(data, hold=warm < rb.hold_s,
@@ -1138,6 +1236,9 @@ class Robot:
         self.obs_hist = None    # (hist_len, sf_dim) ring, row 0 = oldest; filled on first _obs
         self.latency = False    # set per-robot in main() from --latency
         self.rng = np.random.Generator(np.random.PCG64(1000 + seed + 17 * k))
+        # independent stream, derived WITHOUT drawing from self.rng: turning the
+        # tether on must not shift the DR / push / reset draws of every episode
+        self.tether_rng = np.random.Generator(np.random.PCG64(50000 + seed + 17 * k))
         nid = lambda t, nm: mujoco.mj_name2id(model, t, self.pfx + nm)
         self.qadr = np.array([model.jnt_qposadr[nid(mujoco.mjtObj.mjOBJ_JOINT, nm)] for nm in self.jnames])
         self.vadr = np.array([model.jnt_dofadr[nid(mujoco.mjtObj.mjOBJ_JOINT, nm)] for nm in self.jnames])
@@ -1239,6 +1340,12 @@ class Robot:
         self.ball_obs_bias = None              # world-frame ball-center estimate bias
         self.chest_bias_quat = None            # obs-frame calibration error quat
         self.bias_gravity = False              # bias also tilts the base quat
+        self.pile_drag = 0.0; self.pile_height = 0.03
+        self.tether_back = (0.0, 0.0); self.tether_down = (0.0, 0.0)
+        self.tether_resample_s = (0.3, 1.0)
+        self.tether_on = False
+        self._pile_prev = {}                   # foot body id -> last xpos
+        self._teth = None                      # {"back", "down", "next_t"}
         self.motor_curve = False               # torque-speed ceiling on
         self.motor_vel_scale = 1.0             # curve steepness (zero-torque speed scale)
         self.effort_limit = EFFORT_LIMIT       # per-episode peak (variant scale)
@@ -1509,7 +1616,12 @@ class Robot:
                               else np.asarray(bias, dtype=float))
         rpy = condition["obs_frame_rpy_bias_deg"]
         deg = condition["chest_yaw_bias_deg"]
-        if rpy is not None and any(float(v) for v in rpy):
+        if rpy is not None:
+            # each axis: scalar pins it, (lo, hi) draws a fresh miscalibration
+            # per episode (a mocap re-registration between runs, not a wobble)
+            rpy = [float(self.rng.uniform(float(v[0]), float(v[1])))
+                   if isinstance(v, (list, tuple)) else float(v) for v in rpy]
+        if rpy is not None and any(rpy):
             def _axq(angle_deg, ax):
                 q = np.zeros(4); half = 0.5 * np.deg2rad(float(angle_deg))
                 q[0] = np.cos(half); q[1 + ax] = np.sin(half)
@@ -1594,6 +1706,12 @@ class Robot:
             cb, sb = np.cos(bearing), np.sin(bearing)
             direction = np.array([fxy[0] * cb - fxy[1] * sb, fxy[0] * sb + fxy[1] * cb])
             bp[:2] = data.qpos[self.bq:self.bq + 2] + dist * direction
+        if WALK_DEBUG:
+            # Park it at the grid origin, 10 m down (training parks 10 m below the
+            # env origin). Overwritten AFTER the placement draws above so the rng
+            # stream is bit-identical to the dribble path.
+            bp = np.array([self.gx, self.gy, -10.0])
+            self._park_ball(model)
         data.qpos[self.ballq:self.ballq + 3] = bp
         data.qpos[self.ballq + 3:self.ballq + 7] = [1, 0, 0, 0]
         data.qvel[self.ballv:self.ballv + 6] = 0.0
@@ -1660,6 +1778,20 @@ class Robot:
         self.settle_s = (float(self.rng.uniform(*self.settle_range))
                          if (self.settle_range is not None and self.hold_s <= 0.0) else 0.0)
         self.warm_s = max(self.hold_s, self.settle_s)
+        # turf pile drag + trailing tether. Both are gated so a condition that
+        # leaves them off draws no random numbers and every other per-episode
+        # draw stays bit-identical to a pre-tether run.
+        self.pile_drag = float(condition["pile_drag"] or 0.0)
+        self.pile_height = float(condition["pile_height"])
+        self._pile_prev = {}
+        def _pair(v):
+            return ((float(v[0]), float(v[1])) if isinstance(v, (list, tuple))
+                    else (float(v), float(v)))
+        self.tether_back = _pair(condition["tether_back_n"])
+        self.tether_down = _pair(condition["tether_down_n"])
+        self.tether_resample_s = tuple(condition["tether_resample_s"])
+        self.tether_on = any(abs(v) > 0 for v in self.tether_back + self.tether_down)
+        self._teth = None
         # push schedule: velocity kicks every push_interval_s, random phase/direction
         self.push_dv = float(condition["push_dv"])
         self.ball_push_dv = float(condition["ball_push_dv"])
@@ -1671,7 +1803,8 @@ class Robot:
             self.next_ball_push_t = t + self.warm_s + self.rng.uniform(1.0, self.push_interval_s)
         bq = data.qpos[self.bq + 3:self.bq + 7].copy()
         fwd = np.zeros(3); mujoco.mju_rotVecQuat(fwd, np.array([1.0, 0, 0]), bq)
-        self.cmd = self.route.reset(bp[:2], fwd[:2], cmd_mode)
+        anchor_xy = self.obs_frame_xy(model, data) if WALK_DEBUG else bp[:2]
+        self.cmd = self.route.reset(anchor_xy, fwd[:2], cmd_mode)
         self.target = data.qpos[self.qadr].copy(); self.ep_start = t
         self.move_start = t + self.warm_s
         self.hold_target = self.target.copy()   # standby pose to PD-hold during the hold phase
@@ -1690,6 +1823,34 @@ class Robot:
         self.fail_reason = ""
         self.offroute_since = None; self.max_crosstrack = 0.0
         self.off_route_t = float("nan"); self.completed_t = float("nan")
+
+    def _park_ball(self, model):
+        """walk_debug: make this robot's ball weightless and non-colliding.
+
+        Gravity is cancelled per-body (body_gravcomp) rather than globally, and
+        BOTH contact routes have to go: contype/conaffinity kills the auto
+        contacts (shin, torso), while the explicit <pair>s ignore contype and are
+        killed by a large negative margin (a contact needs dist < margin). The
+        floor is an infinite half-space, so a ball parked below it without this
+        would be depenetrated straight back to the surface."""
+        model.body_gravcomp[self.ball_body] = 1.0
+        model.geom_contype[self.ball_geom] = 0
+        model.geom_conaffinity[self.ball_geom] = 0
+        for pid in self.foot_ball_pairs + self.floor_ball_pairs:
+            model.pair_margin[pid] = -1.0e3
+
+    def obs_frame_xy(self, model, data):
+        """World xy of the obs-frame origin (pelvis root, or chest + local offset).
+
+        Runs kinematics itself: reset() writes qpos directly and the caller's
+        mj_forward only lands after EVERY robot has reset, so data.xpos is stale
+        at the point the route needs its anchor. An 8 cm anchor error would sit
+        on top of a ~8 cm walk cross-track, i.e. it would dominate the metric."""
+        if self.chest_body is None:
+            return data.qpos[self.bq:self.bq + 2].copy()
+        mujoco.mj_kinematics(model, data)
+        fq = data.xquat[self.chest_body]
+        return (data.xpos[self.chest_body] + rot_vec(fq, self.chest_offset))[:2].copy()
 
     # bridge snapshot layout: bq 0:4 | pelvis 4:7 | bav 7:10 | ball_pos 10:13 |
     # ball_vel 13:16 | fq 16:20 | fpos 20:23  (fq/fpos = the ball/cmd anchor
@@ -1752,6 +1913,23 @@ class Robot:
                 snap[0:4] = bq2
         return snap
 
+    def _lagged_ball(self, ball_b_cur, ball_vb_cur):
+        """Synthetic per-policy-step ball-obs lag, on top of the bridge staleness."""
+        if not self.lat_active:
+            return ball_b_cur, ball_vb_cur
+        if self.ball_pos_hist is None:
+            K = self.ball_delay + 1
+            self.ball_pos_hist = np.tile(ball_b_cur, (K, 1))
+            self.ball_vel_hist = np.tile(ball_vb_cur, (K, 1))
+        else:
+            self.ball_pos_hist = np.roll(self.ball_pos_hist, 1, axis=0); self.ball_pos_hist[0] = ball_b_cur
+            self.ball_vel_hist = np.roll(self.ball_vel_hist, 1, axis=0); self.ball_vel_hist[0] = ball_vb_cur
+        d = (self.ball_delay if self.ball_delay_step_range is None
+             else int(self.obs_rng.integers(self.ball_delay_step_range[0],
+                                            self.ball_delay_step_range[1] + 1)))
+        # same per-env lag for pos & vel: the value from d steps ago
+        return self.ball_pos_hist[d], self.ball_vel_hist[d]
+
     def _obs(self, data):
         snap = self._snap if self._snap is not None else self._bridge_snapshot(data)
         bq = snap[0:4]; pelvis = snap[4:7]
@@ -1768,23 +1946,16 @@ class Robot:
         # are fresh (the CM read). ball_obs_delay_steps stacks its synthetic
         # per-policy-step lag on top of that staleness.
         fq = snap[16:20]; fpos = snap[20:23]
-        ball_b_cur = world_to_body(fq, snap[10:13] - fpos)
-        ball_vb_cur = world_to_body(fq, snap[13:16])
-        if self.lat_active:
-            if self.ball_pos_hist is None:
-                K = self.ball_delay + 1
-                self.ball_pos_hist = np.tile(ball_b_cur, (K, 1))
-                self.ball_vel_hist = np.tile(ball_vb_cur, (K, 1))
-            else:
-                self.ball_pos_hist = np.roll(self.ball_pos_hist, 1, axis=0); self.ball_pos_hist[0] = ball_b_cur
-                self.ball_vel_hist = np.roll(self.ball_vel_hist, 1, axis=0); self.ball_vel_hist[0] = ball_vb_cur
-            d = (self.ball_delay if self.ball_delay_step_range is None
-                 else int(self.obs_rng.integers(self.ball_delay_step_range[0],
-                                                self.ball_delay_step_range[1] + 1)))
-            ball_b = self.ball_pos_hist[d]        # value from d steps ago
-            ball_vb = self.ball_vel_hist[d]       # same per-env lag for pos & vel
+        if WALK_DEBUG:
+            # training's mdp.zero_vec stubs, with noise=None: LITERAL zeros, no
+            # ball read, no lag ring. The layout (3 + 3 + 1) is unchanged, which
+            # is what keeps the deploy ONNX contract identical.
+            ball_b = ball_vb = np.zeros(3)
+            self.ball_pos_hist = self.ball_vel_hist = None
         else:
-            ball_b, ball_vb = ball_b_cur, ball_vb_cur
+            ball_b_cur = world_to_body(fq, snap[10:13] - fpos)
+            ball_vb_cur = world_to_body(fq, snap[13:16])
+            ball_b, ball_vb = self._lagged_ball(ball_b_cur, ball_vb_cur)
         # match the C++ deployment obs terms exactly (SoftTouchDribbleObservation.cpp)
         term = {
             "base_ang_vel": bav,
@@ -1809,7 +1980,9 @@ class Robot:
         # value disagreeing with the actual ball.
         believed = (self.dr["radius"] if self.ball_radius_obs_m is None
                     else float(self.ball_radius_obs_m))
-        term["ball_radius"] = [believed - 0.10]   # v2: r - nominal 0.10 m
+        # v2: r - nominal 0.10 m; walk_debug stubs it to a literal 0 (zero_vec
+        # dim=1), NOT to the -0.10 a zero radius would encode
+        term["ball_radius"] = [0.0] if WALK_DEBUG else [believed - 0.10]
         # Observation noise, applied HERE: Isaac Lab's ObservationManager adds it
         # to the term output, i.e. AFTER the delay functions, so it must land on
         # the already-lagged ball terms and before history/concat. Uses a
@@ -1839,7 +2012,11 @@ class Robot:
         # and every commandTerm-derived obs term consume the SAME stale sample,
         # exactly like the C++ controller update
         self._snap = self._bridge_snapshot(data)
-        self.cmd = self.route.update(self._snap[10:12].copy())
+        # pure-pursuit anchor: the ball xy, or the OBS BODY frame xy in
+        # walk_debug (DribbleRLEnv._cmd_anchor_xy) -- same law either way, so
+        # cross-track becomes body cross-track and progress becomes body arclength
+        self.cmd = self.route.update((self._snap[20:22] if WALK_DEBUG
+                                      else self._snap[10:12]).copy())
         self._update_dots(data)
         if hold:
             # deploy standby hold: stiff PD toward the standby pose (no policy),
@@ -1864,15 +2041,18 @@ class Robot:
         self.cmd_speed_sum += self.cmd["target_speed"]
         if self.speed_pairs is not None:
             # actual speed both ways: projected on the commanded direction (the
-            # tracking signal) and the raw planar magnitude (for trace plots)
-            ball_vel = data.qvel[self.ballv:self.ballv + 2]
+            # tracking signal) and the raw planar magnitude (for trace plots).
+            # walk_debug tracks the BASE, which is what the route now commands.
+            vel = (data.qvel[self.bv:self.bv + 2] if WALK_DEBUG
+                   else data.qvel[self.ballv:self.ballv + 2])
             self.speed_pairs.append((self.cmd["target_speed"],
-                                     float(ball_vel @ self.cmd["target_dir"]),
-                                     float(np.hypot(*ball_vel))))
+                                     float(vel @ self.cmd["target_dir"]),
+                                     float(np.hypot(*vel))))
         self.track_fall_margin(data)
-        ball_dist = float(np.hypot(*(data.qpos[self.ballq:self.ballq + 2]
-                                     - data.qpos[self.bq:self.bq + 2])))
-        self.ball_dist_sum += ball_dist; self.ball_dist_count += 1
+        if not WALK_DEBUG:
+            ball_dist = float(np.hypot(*(data.qpos[self.ballq:self.ballq + 2]
+                                         - data.qpos[self.bq:self.bq + 2])))
+            self.ball_dist_sum += ball_dist; self.ball_dist_count += 1
         crosstrack = float(self.cmd["crosstrack"])
         self.max_crosstrack = max(self.max_crosstrack, crosstrack)
         # possession: sticky lost-ball flag at each LOST_BALL_DISTS threshold
@@ -1881,8 +2061,9 @@ class Robot:
         # survival and possession be read as separate failure modes.
         # Computed BEFORE the fail-fast block because the off-route gate needs
         # `first_touch`, which this is what arms.
-        foot_dist = self.foot_ball_dist(data)
-        self.foot_dist_sum += foot_dist; self.foot_dist_count += 1
+        foot_dist = self.foot_ball_dist(data) if not WALK_DEBUG else float("nan")
+        if not WALK_DEBUG:
+            self.foot_dist_sum += foot_dist; self.foot_dist_count += 1
         # first-acquisition gate (shared across thresholds), standing in for
         # training's `_first_touch_done`, armed by the TIGHTEST threshold =
         # "the ball was in the pocket at least once". WITHOUT it the metric is
@@ -1891,7 +2072,7 @@ class Robot:
         # touched anything, and the sticky flag fires on 100% of episodes
         # (measured 182/182 on the 2026-07-20 smoke run). "Lost" must mean
         # losing a ball you had.
-        if foot_dist <= LOST_BALL_DISTS[0]:
+        if not WALK_DEBUG and foot_dist <= LOST_BALL_DISTS[0]:
             self.first_touch = True
         if self.first_touch:
             for i, dist_thr in enumerate(LOST_BALL_DISTS):
@@ -1915,7 +2096,11 @@ class Robot:
         # OFFROUTE_GRACE_S of CONTINUOUS violation (same shape as the ball-lost
         # timer above); a dip back inside resets the clock.
         if not self.fail_reason:
-            if (self.offroute_fail_m is not None and self.first_touch
+            # walk_debug has no first touch to wait for -- the body IS on the
+            # route from step 0, so the gate would never arm and the criterion
+            # would silently never fire
+            armed = WALK_DEBUG or self.first_touch
+            if (self.offroute_fail_m is not None and armed
                     and crosstrack > self.offroute_fail_m):
                 if self.offroute_since is None:
                     self.offroute_since = data.time
@@ -1924,7 +2109,8 @@ class Robot:
                     self.off_route_t = data.time - self.move_start
             else:
                 self.offroute_since = None
-            if not self.fail_reason and self.ball_far_fail_m is not None \
+            if not self.fail_reason and not WALK_DEBUG \
+                    and self.ball_far_fail_m is not None \
                     and ball_dist > self.ball_far_fail_m:
                 self.fail_reason = "ball_far"
         actions, latent, *_ = self.sess.run(None, {"obs": self._obs(data)})
@@ -1980,7 +2166,7 @@ class Robot:
                 1.04 * self.rng.uniform(-1.0, 1.0),
                 1.56 * self.rng.uniform(-1.0, 1.0)])
             self.next_push_t = t + self.push_interval_s
-        if self.next_ball_push_t is not None and t >= self.next_ball_push_t:
+        if self.next_ball_push_t is not None and not WALK_DEBUG and t >= self.next_ball_push_t:
             # Training (dribble/mdp/events.py:push_ball_random_horizontal) draws a
             # uniform heading AND a magnitude U(0, max_speed). Using the max every
             # time -- what this did before -- doubles the mean kick, so a
@@ -2049,7 +2235,9 @@ class Robot:
         if self.route.arc_end_s is not None:
             completed = 1.0 if self.route.max_s >= self.route.arc_end_s + 0.5 else 0.0
         if self.offroute_fail_m is not None or self.ball_far_fail_m is not None:
-            kept_ball = not self.ball_lost[LOST_BALL_MAIN_IDX]
+            # no ball in walk_debug -> the possession constraint is vacuous, and
+            # success collapses to "stayed up and stayed on the route"
+            kept_ball = WALK_DEBUG or not self.ball_lost[LOST_BALL_MAIN_IDX]
             success_possession, success_route, success = capability_success_verdicts(
                 fell, kept_ball, fail_reason, completed)
         # Controllability. r alone does NOT measure it: correlation is invariant
@@ -2076,9 +2264,14 @@ class Robot:
                     # `ball_lost` mirrors the MAIN threshold (possession metric);
                     # the full grid is emitted as ball_lost_<thr> for post-hoc
                     # threshold choice (0.5 feeds train_survival, unchanged).
-                    ball_lost=1.0 if self.ball_lost[LOST_BALL_MAIN_IDX] else 0.0,
+                    # walk_debug: NaN, not 0. A 0 would read downstream as
+                    # "possession 100%", i.e. a measurement, when there was no
+                    # ball to keep.
+                    ball_lost=(nan if WALK_DEBUG else
+                               1.0 if self.ball_lost[LOST_BALL_MAIN_IDX] else 0.0),
                     ball_lost_t=self.ball_lost_t[LOST_BALL_MAIN_IDX],
-                    ball_lost_grid=[1.0 if f else 0.0 for f in self.ball_lost],
+                    ball_lost_grid=[nan if WALK_DEBUG else 1.0 if f else 0.0
+                                    for f in self.ball_lost],
                     foot_ball_dist=(self.foot_dist_sum / self.foot_dist_count
                                     if self.foot_dist_count else nan),
                     ball_dist=self.ball_dist_sum / self.ball_dist_count if self.ball_dist_count else nan,
@@ -2089,10 +2282,11 @@ class Robot:
                     max_cross_track=self.max_crosstrack,
                     terminal_cross_track=float(self.cmd["crosstrack"]) if self.ct_count else nan,
                     off_route_t=self.off_route_t, completed_t=self.completed_t,
-                    terminal_ball_dist=float(np.hypot(
+                    terminal_ball_dist=(nan if WALK_DEBUG else float(np.hypot(
                         *(data.qpos[self.ballq:self.ballq + 2]
-                          - data.qpos[self.bq:self.bq + 2]))),
-                    terminal_foot_ball_dist=self.foot_ball_dist(data),
+                          - data.qpos[self.bq:self.bq + 2])))),
+                    terminal_foot_ball_dist=(nan if WALK_DEBUG
+                                             else self.foot_ball_dist(data)),
                     speed_corr_r=speed_corr_r,
                     speed_slope=speed_slope, speed_bias=speed_bias,
                     speed_resid=speed_resid,
