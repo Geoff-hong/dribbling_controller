@@ -19,7 +19,7 @@ if "--videos" in sys.argv:
 
 from . import engine
 from .conditions import (robustness_conditions, capability_conditions,
-                         plastic_turf_conditions, load_conditions_json)
+                         field_trial_conditions, load_conditions_json)
 from .runner import run_condition_table, record_condition_videos
 from .report import EpisodeStream, drop_conditions, report_csv
 from . import topup
@@ -34,12 +34,12 @@ def main():
     ap.add_argument("--capability", action="store_true",
                     help="straight-line max speed + corner-turn max curvature with fail-fast "
                          "control criteria; metrics = nested success rates + cross-track")
-    ap.add_argument("--plastic-turf", action="store_true",
-                    help="the 2026-07 outdoor deployment environment as ONE joint "
-                         "distribution (turf ball + pile drag + soft ground + firmware "
-                         "torque ceiling + mocap frame bias + safety tether + standby "
-                         "hand-off), at three severities; task-level termination, "
-                         "metric = task survival time")
+    ap.add_argument("--field-trial", action="store_true",
+                    help="real-world SCENARIOS, every channel off-nominal at once. "
+                         "Today one: plastic turf + mocap (turf ball + pile drag + "
+                         "soft ground + EDU torque ceiling + mocap frame bias + "
+                         "safety tether + standby hand-off). Task-level termination "
+                         "(fall / ball lost / off route), metric = task survival time")
     ap.add_argument("--conditions", default="",
                     help="run a custom JSON condition table instead of the built-in ones")
     ap.add_argument("--onnx", default=engine.DEFAULT_ONNX, help="deployment policy ONNX")
@@ -151,10 +151,10 @@ def main():
         tables.append(("robustness", robustness_conditions(train)))
     if args.capability:
         tables.append(("capability", capability_conditions(train)))
-    if args.plastic_turf:
-        tables.append(("plastic_turf", plastic_turf_conditions(train)))
+    if args.field_trial:
+        tables.append(("field_trial", field_trial_conditions(train)))
     if not tables:
-        ap.error("pick at least one of --robustness / --capability / --plastic-turf / --conditions")
+        ap.error("pick at least one of --robustness / --capability / --field-trial / --conditions")
 
     # --episode-s is a CAP, not just the fallback for unpinned conditions: a
     # condition that pins a longer budget (human_dribble and speed_tracking pin
@@ -166,13 +166,13 @@ def main():
     # default the gentlest corner_turn budgets (kappa 0.2 -> 15 s, 0.3 -> 13 s)
     # are also capped, which eats their turn_budget slack margin; a timeout
     # there can be budget-clipping, not lost control (--episode-s 15 restores).
-    # plastic_turf is EXEMPT: its metric is time-to-failure, not survival at a
+    # field_trial is EXEMPT: its metric is time-to-failure, not survival at a
     # fixed budget, so clipping the budget censors the measurement itself (the
     # validated runs show 20-45 s task survival — a 12 s cap would flatten the
     # whole field to "survived"). Its own 60 s pin is the ceiling.
     capped = 0
     for _title, table in tables:
-        if _title == "plastic_turf":
+        if _title == "field_trial":
             continue
         for c in table:
             if c.get("episode_s") and float(c["episode_s"]) > args.episode_s:
@@ -290,7 +290,7 @@ def main():
                 n = drop_conditions(path, names)
                 if n:
                     print(f"[topup] dropped {n} episodes from {os.path.basename(path)}")
-    # A run that adds a NEW table to an existing dir (--plastic-turf into a dir
+    # A run that adds a NEW table to an existing dir (--field-trial into a dir
     # that already holds robustness/capability) must not erase the other tables'
     # fingerprints. save_manifest overwrites the file, so without this the next
     # run over those tables compares against nothing -- and a later combined run

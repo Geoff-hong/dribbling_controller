@@ -531,7 +531,7 @@ DEFAULT_CONDITION = dict(
     # force; a (lo, hi) pair redraws a piecewise-constant level every
     # U(*tether_resample_s) s -- the intermittent tug of a real safety rope, and
     # what the s2r lineage trains against. These live here rather than in the
-    # pysim loop so the CONDITION TABLES (plastic_turf) can use them too.
+    # pysim loop so the CONDITION TABLES (field_trial) can use them too.
     pile_drag=0.0, pile_height=0.03,
     tether_back_n=0.0, tether_down_n=0.0, tether_resample_s=(0.3, 1.0),
     # Motor realism. motor_curve: enable the linear torque-speed ceiling

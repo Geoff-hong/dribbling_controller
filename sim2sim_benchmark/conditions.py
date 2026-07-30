@@ -492,7 +492,7 @@ def capability_conditions(train=None):
 # standby. It is the only table whose point is the JOINT distribution.
 #
 # Sources: ball damping 1.63 + roll friction 0.0017 are the 2026-07-24 turf
-# free-roll decay fit (a = 0.120 + 0.465 v); bounce 0.6-0.65 the plastic-turf
+# free-roll decay fit (a = 0.120 + 0.465 v); bounce 0.6-0.65 the field-trial
 # restitution; ground tc 0.02 and pile drag the short-pile-on-hard-base
 # estimate (tc 0.04 measured indistinguishable, see round j); tether -1..2 N the
 # trailing safety rope; motor curve the G1 EDU firmware ceiling; the obs-frame
@@ -503,11 +503,16 @@ def capability_conditions(train=None):
 # score by abandoning the ball and staying upright -- the failure mode that made
 # fall-only survival rank wandering policies first.
 #
-# HISTORY. Until 2026-07-29 this table had three points (turf_mild / turf_harsh /
-# turf_max, probe rounds g / i / d). It is now the single field recipe. The
-# mild/max episodes already recorded on 2026-07-29 stay in plastic_turf.csv and
-# the report still renders them -- their parameters never changed, so they remain
-# a valid archived reference; they are simply no longer collected.
+# ONE SCENARIO PER REAL-WORLD SITUATION. This table is the umbrella; today it
+# holds `turf_mocap` (outdoor short-pile plastic turf, mocap ball tracking) and is
+# expected to grow -- a second surface or a different perception stack is a new
+# condition here plus one line in html_report.FIELD_SCENARIOS. Scenarios are only
+# ever compared BETWEEN checkpoints, never against each other, so they need share
+# neither thresholds nor a metric scale.
+#
+# HISTORY. Until 2026-07-29 turf_mocap was three severity variants (turf_mild /
+# turf_harsh / turf_max, probe rounds g / i / d). Only the recipe survives; the
+# other two and their episodes were dropped.
 #
 # PUSH MAGNITUDE, measured 2026-07-29 (turf_harsh_ablation_20260729, 48 episodes
 # per point, one channel reverted at a time). The recipe originally shoved at
@@ -527,11 +532,11 @@ def capability_conditions(train=None):
 # 0.65 s (2.6 sigma), against 19 s on the gentler point. Now pinned at the trained
 # 0.5/0.2 so the test measures dribbling and route control, which is what it is
 # for; raise it only with an ablation to say what the raise bought.
-PLASTIC_TURF_BALL = dict(ball_damping=1.63, ball_roll_fric=0.0017)
+TURF_MOCAP_BALL = dict(ball_damping=1.63, ball_roll_fric=0.0017)
 
 
-def plastic_turf_conditions(train=None):
-    """Joint real-deployment distribution ("plastic turf"), the field recipe.
+def field_trial_conditions(train=None):
+    """Real-world scenarios, one condition each. Today: plastic turf + mocap.
 
     Episodes end on fall, ball >1.5 m from the robot, ball >1.5 m off the route,
     or the 600 s budget; the headline metric is TASK survival time, read together
@@ -544,7 +549,7 @@ def plastic_turf_conditions(train=None):
                   reset_ball_random=True, reset_ball_bearing=0.0,
                   motor_curve=True, motor_vel_scale=0.8,
                   push_interval_s=4.0,
-                  **PLASTIC_TURF_BALL)
+                  **TURF_MOCAP_BALL)
     # The field recipe pins the MEASURED ball (mass/radius) but leaves friction on
     # the checkpoint's own training DR -- byte-for-byte what the pysim command
     # does, which fills only the channels its flags name.
@@ -554,10 +559,10 @@ def plastic_turf_conditions(train=None):
     # magnitude -- see the header ablation for why that is the trained 0.5/0.2 and
     # not the 2.0/1.0 it was first written with. --hybridfoot and --settle-s are
     # run-level, not condition keys, so the runbook has to carry them.
-    # Kept as `turf_harsh` rather than renamed: the name is what plastic_turf.csv
+    # Kept as `turf_mocap` rather than renamed: the name is what field_trial.csv
     # and the manifests already key on, and a rename would orphan both.
     return [
-        condition_row("turf_harsh", "plastic_turf", 1,
+        condition_row("turf_mocap", "field_trial", 1,
                       episode_s=600.0, ball_far_fail_m=1.5,
                       ball_bounce_dampratio=0.6, ground_solref_tc=0.02,
                       dr=field_dr,

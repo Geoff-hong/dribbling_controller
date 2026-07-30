@@ -297,11 +297,11 @@ def print_summary(episode_rows, title):
     print("For capability, strict% is the nested full-budget/completion verdict. "
           "The HTML report also exposes route-control, upright+ball, and CT on "
           "strict successes; ct|up below is the fail-fast-censored upright subset.")
-    # plastic_turf measures TIME TO FAILURE (every episode is meant to end in
+    # field_trial measures TIME TO FAILURE (every episode is meant to end in
     # one), so its headline is mean task-survival seconds, not a survival RATE
-    timed = title == "plastic_turf"
+    timed = title == "field_trial"
     if timed:
-        print("plastic_turf ends episodes on fall / ball lost / off route, so "
+        print("field_trial ends episodes on fall / ball lost / off route, so "
               "task-surv (mean +- SEM seconds, median in brackets) is the headline; "
               "surv% here is the FALL-only rate, i.e. how often the run ended "
               "upright-but-taskless rather than on the floor.")

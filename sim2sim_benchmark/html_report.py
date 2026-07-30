@@ -82,9 +82,11 @@ ROB_GROUP_LABEL = {
     "joint_friction": "leg+waist joint friction (N*m)",
     "dr_scale": "DR scale alpha",   # legacy CSVs only
 }
-# groups that belong to the capability sections, never the robustness grid
+# groups that belong to their own sections, never the robustness grid. field_trial
+# is in here as a guard: it is not a perturbation axis, so a scenario row reaching
+# order_rob_groups must not mint an empty robustness panel for it.
 CAP_GROUPS = {"baseline", "straight_speed", "corner_turn", "u_turn",
-              "human_dribble", "speed_tracking"}
+              "human_dribble", "speed_tracking", "field_trial"}
 CAP_METRICS = [("success", "strict completion success (%)", "up"),
                ("success_route", "route-control success (%)", "up"),
                ("success_possession", "upright + ball at termination (%)", "up"),
@@ -152,7 +154,7 @@ DIFF_METRICS = [
     ("ball_dist", "robot-ball distance (m)", lambda r: r["ball_dist"],
      stats.mean_stat, False, "down"),
     ("progress", "progress (m)", lambda r: r["progress"], stats.mean_stat, False, "up"),
-    # plastic_turf's headline: every episode is MEANT to end in a failure, so the
+    # field_trial's headline: every episode is MEANT to end in a failure, so the
     # question is how long the policy lasted, not whether it survived a fixed
     # budget. Meaningful on the other tables too, just less interesting there --
     # their budgets are short enough that most episodes hit the cap.
@@ -182,28 +184,32 @@ FULL_SCOPE, NOMINAL_SCOPE = "full", "nom"
 DIFF_ENDPOINT = "/_s2s/diff"        # --serve only; None on a static snapshot
 
 # Every per-episode table a run dir can hold, in the order collect_run and
-# pair_diffs walk them. plastic_turf joined 2026-07-29; a run predating it just
+# pair_diffs walk them. field_trial joined 2026-07-29; a run predating it just
 # yields [] for that slot, which every consumer already handles.
-EPISODE_TABLES = ("robustness.csv", "capability.csv", "plastic_turf.csv")
-TURF_GROUP = "plastic_turf"
-# (condition name, what it is). No comparability flag: there is one point, and the
-# thresholds are stated authoritatively by the parameter panel, not by a chip that
-# has to be kept in sync by hand.
-TURF_POINTS = [
-    ("turf_harsh", "the field recipe — EDU torque ceiling, ±7° frame error, "
-                   "heavy pile, trained-envelope pushes"),
+EPISODE_TABLES = ("robustness.csv", "capability.csv", "field_trial.csv")
+FIELD_GROUP = "field_trial"
+# THE SCENARIO REGISTRY. One entry per real-world situation the robot is expected
+# to work in; the section renders one ranked card per entry, each with its own bar
+# normalisation and its own parameter panel. To add a scenario: add its condition
+# to conditions.field_trial_conditions and its (name, label) here, in the order
+# you want the cards to read. Nothing else needs touching -- a scenario's numbers
+# are only ever compared BETWEEN checkpoints, never between scenarios, so they do
+# not have to share thresholds or even a metric scale.
+FIELD_SCENARIOS = [
+    ("turf_mocap", "plastic turf & mocap — outdoor short-pile turf, EDU torque "
+                   "ceiling, ±7° mocap frame error, trained-envelope pushes"),
 ]
 # Dropped 2026-07-29 along with their episodes (turf_mild = probe round g,
-# turf_max = round d). Named here only so a stale CSV cannot quietly resurrect
-# them through turf_series' unknown-condition fallback.
-TURF_RETIRED = ("turf_mild", "turf_max")
+# turf_max = round d, both variants of the turf_mocap scenario). Named here only
+# so a stale CSV cannot quietly resurrect them through scenario_series' fallback.
+FIELD_RETIRED = ("turf_mild", "turf_max")
 
 # What the field-trial parameter panel shows, grouped the way you reason about the
 # deployment: (category, [(condition key, label, unit)]). Read from the run's own
 # <title>.conditions.json, never re-derived from today's code -- a run's record of
 # what it tested has to survive the code moving on. `dr.*` and `run.*` reach into
 # the nested dr dict and the run-level block.
-TURF_PARAM_GROUPS = [
+SCENARIO_PARAM_GROUPS = [
     ("route & task", [
         ("route_mode", "route generator", ""),
         ("route_vmax", "commanded speed cap", "m/s"),
@@ -266,8 +272,8 @@ TURF_PARAM_GROUPS = [
 # The conditions the SUMMARY table quotes a CI for, i.e. what NOMINAL_SCOPE
 # computes. One bootstrap each, ~1.4 ms -- cheap enough to cover the field-trial
 # rows too, and without them those rows could only show a bare delta.
-HEADLINE_CONDS = (NOMINAL_COND,) + tuple(p[0] for p in TURF_POINTS)
-assert not set(TURF_RETIRED) & set(HEADLINE_CONDS)
+HEADLINE_CONDS = (NOMINAL_COND,) + tuple(p[0] for p in FIELD_SCENARIOS)
+assert not set(FIELD_RETIRED) & set(HEADLINE_CONDS)
 
 
 def _diff_rows(rows, extract):
@@ -863,21 +869,20 @@ def run_provenance(run_dir):
     return out
 
 
-def turf_series(turf_rows):
-    """plastic_turf rows -> one entry per severity, in severity order.
+def scenario_series(turf_rows):
+    """field_trial rows -> one entry per SCENARIO, in registry order.
 
-    Not group_series: the points are NAMED (their axis index is just an ordering)
-    and the page has to show which of them share a measurement scale, so the name
-    rides along with the stats."""
+    Not group_series: scenarios are NAMED (their axis index is just an ordering)
+    and the page keys everything off that name, so it rides along with the stats."""
     by_name = _by_condition(turf_rows)
     out = []
-    for name, label in TURF_POINTS:
+    for name, label in FIELD_SCENARIOS:
         rows = by_name.get(name)
         if not rows:
             continue
         out.append(dict(name=name, label=label,
                         x=float(rows[0]["axis"]), **condition_stats(rows)))
-    known = {p[0] for p in TURF_POINTS} | set(TURF_RETIRED)
+    known = {p[0] for p in FIELD_SCENARIOS} | set(FIELD_RETIRED)
     for name in sorted(set(by_name) - known):
         rows = by_name[name]
         out.append(dict(name=name, label=name,
@@ -885,23 +890,23 @@ def turf_series(turf_rows):
     return out
 
 
-def turf_params(run_dir):
-    """The plastic_turf condition values THIS run recorded, or None.
+def scenario_params(run_dir):
+    """The field_trial condition values THIS run recorded, or None.
 
     Reads the run's own dump rather than re-deriving from conditions.py: the point
     of the panel is what was tested, and code moves on."""
-    path = os.path.join(run_dir, "plastic_turf.conditions.json")
+    path = os.path.join(run_dir, "field_trial.conditions.json")
     try:
         with open(path) as f:
             blob = json.load(f)
     except (OSError, ValueError):
         return None
-    live = {p[0] for p in TURF_POINTS}
+    live = {p[0] for p in FIELD_SCENARIOS}
     cond = next((c for c in blob.get("conditions") or [] if c.get("name") in live), None)
     if cond is None:
         return None
     out = {}
-    for _group, items in TURF_PARAM_GROUPS:
+    for _group, items in SCENARIO_PARAM_GROUPS:
         for key, _label, _unit in items:
             if key.startswith("run."):
                 out[key] = (blob.get("run_level") or {}).get(key[4:])
@@ -938,7 +943,7 @@ def collect_run(run_dir, label, index, report_dir, rob_groups=None, rows=None):
                   data_time=datetime.datetime.fromtimestamp(max(mtimes)).strftime("%Y-%m-%d %H:%M")
                   if mtimes else None),
         nominal=condition_stats(nominal) if nominal else None,
-        turf=turf_series(turf), turf_params=turf_params(run_dir),
+        turf=scenario_series(turf), scenario_params=scenario_params(run_dir),
         robustness={g: group_series(rob, g) for g, _ in rob_groups},
         straight=straight, corner=corner, human=human, uturn=uturn,
         tracking=group_series(cap, "speed_tracking"),
@@ -1176,58 +1181,58 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   /* field trial: a ranked bar per run. A table beats a grouped bar chart here --
      the interesting read is the ORDER over checkpoints, and it stays legible at
      any run count instead of squeezing n bars into one axis. */
-  .turfcard { margin:10px 0 16px; }
-  .turfhead { display:flex; gap:8px; align-items:baseline; margin:0 0 3px;
+  .scencard { margin:10px 0 16px; }
+  .scenhead { display:flex; gap:8px; align-items:baseline; margin:0 0 3px;
               font-size:13.5px; font-weight:600; flex-wrap:wrap; }
-  .turfhead .turfscale { font-weight:400; font-size:11.5px; color:var(--muted); }
-  .turfrow { display:grid; grid-template-columns:250px 1fr 132px 116px 42px;
+  .scenhead .scenscale { font-weight:400; font-size:11.5px; color:var(--muted); }
+  .scenrow { display:grid; grid-template-columns:250px 1fr 132px 116px 42px;
              gap:10px; align-items:center; padding:2px 4px; border-radius:5px;
              font-size:12px; }
-  .turfrow:hover { background:var(--wash); }
-  .turfname { display:flex; gap:6px; align-items:center; white-space:nowrap;
+  .scenrow:hover { background:var(--wash); }
+  .scenname { display:flex; gap:6px; align-items:center; white-space:nowrap;
               overflow:hidden; text-overflow:ellipsis; }
-  .turfbarwrap { position:relative; height:16px; border-radius:3px;
+  .scenbarwrap { position:relative; height:16px; border-radius:3px;
                  background:color-mix(in srgb, var(--muted) 12%, transparent); }
-  .turfbar { position:absolute; left:0; top:0; bottom:0; border-radius:3px; }
+  .scenbar { position:absolute; left:0; top:0; bottom:0; border-radius:3px; }
   /* the whisker has to read ON TOP of a saturated bar, which a thin dark line
      does not -- the SE is the whole point here (whether the field recipe can
      separate checkpoints at all), so it gets a light rule with end caps */
-  .turferr { position:absolute; top:50%; height:2px; transform:translateY(-50%);
+  .scenerr { position:absolute; top:50%; height:2px; transform:translateY(-50%);
              background:var(--panel); box-shadow:0 0 0 .5px rgba(0,0,0,.35); }
-  .turferr::before, .turferr::after { content:""; position:absolute; top:-3px;
+  .scenerr::before, .scenerr::after { content:""; position:absolute; top:-3px;
              width:2px; height:8px; background:var(--panel);
              box-shadow:0 0 0 .5px rgba(0,0,0,.35); }
-  .turferr::before { left:0; }
-  .turferr::after { right:0; }
-  .turfval { text-align:right; font-variant-numeric:tabular-nums; }
-  .turfval .turfsd { color:var(--muted); }
+  .scenerr::before { left:0; }
+  .scenerr::after { right:0; }
+  .scenval { text-align:right; font-variant-numeric:tabular-nums; }
+  .scenval .scensd { color:var(--muted); }
   /* how the episodes ENDED, inline on the row. reasonChart is for a swept axis;
      with one axis value per card it drew a full-size plot per severity and
      buried the ranking it was meant to annotate. */
-  .turfmix { display:flex; height:11px; border-radius:2px; overflow:hidden;
+  .scenmix { display:flex; height:11px; border-radius:2px; overflow:hidden;
              background:color-mix(in srgb, var(--muted) 12%, transparent); }
-  .turfmix > span { display:block; }
-  .turfn { text-align:right; color:var(--muted); font-size:11px; }
-  .turfempty { color:var(--muted); font-size:12px; padding:4px; }
+  .scenmix > span { display:block; }
+  .scenn { text-align:right; color:var(--muted); font-size:11px; }
+  .scenempty { color:var(--muted); font-size:12px; padding:4px; }
   /* the parameter panel sits BELOW the ranking: you come here for the numbers,
      then ask what produced them */
-  .turfparams { margin-top:14px; }
-  .turfparams > summary { cursor:pointer; font-size:12.5px; color:var(--text2);
+  .scenparams { margin-top:14px; }
+  .scenparams > summary { cursor:pointer; font-size:12.5px; color:var(--text2);
                           padding:4px 2px; }
-  .turfparams > summary:hover { color:var(--fg); }
-  .turfpgrid { display:grid; grid-template-columns:repeat(auto-fit, minmax(310px, 1fr));
+  .scenparams > summary:hover { color:var(--fg); }
+  .scenpgrid { display:grid; grid-template-columns:repeat(auto-fit, minmax(310px, 1fr));
                gap:4px 26px; margin-top:6px; }
-  .turfpgroup { break-inside:avoid; }
-  .turfpgroup h5 { margin:8px 0 3px; font-size:11px; letter-spacing:.06em;
+  .scenpgroup { break-inside:avoid; }
+  .scenpgroup h5 { margin:8px 0 3px; font-size:11px; letter-spacing:.06em;
                    text-transform:uppercase; color:var(--accent); font-weight:650; }
-  .turfprow { display:grid; grid-template-columns:1fr auto; gap:12px;
+  .scenprow { display:grid; grid-template-columns:1fr auto; gap:12px;
               font-size:12px; padding:1.5px 0; align-items:baseline; }
-  .turfprow .turfpk { color:var(--text2); }
-  .turfprow .turfpv { font-variant-numeric:tabular-nums; text-align:right;
+  .scenprow .scenpk { color:var(--text2); }
+  .scenprow .scenpv { font-variant-numeric:tabular-nums; text-align:right;
                       white-space:nowrap; }
-  .turfprow .turfpu { color:var(--muted); font-size:11px; }
-  .turfprow.differ .turfpv { color:var(--dbad); font-weight:650; }
-  .turfprow.unset { opacity:.45; }
+  .scenprow .scenpu { color:var(--muted); font-size:11px; }
+  .scenprow.differ .scenpv { color:var(--dbad); font-weight:650; }
+  .scenprow.unset { opacity:.45; }
   .verdict { margin:2px 0 4px; font-size:13px; }
   .verdict .vgood { color:var(--dgood); font-weight:650; }
   .verdict .vbad { color:var(--dbad); font-weight:650; }
@@ -1342,7 +1347,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div class="note">1-8 toggle &middot; shift+digit solo &middot; 0 all &middot; click a name to solo</div>
     <h2>Sections</h2>
     <a class="navlink" href="#sec-summary">Summary</a>
-    <a class="navlink" href="#sec-turf">Field trial</a>
+    <a class="navlink" href="#sec-field">Field trial</a>
     <a class="navlink" href="#sec-signif">Significance</a>
     <a class="navlink" href="#sec-robustness">Robustness</a>
     <a class="navlink" href="#sec-corner">Corner turn</a>
@@ -1388,13 +1393,14 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         See <a href="#sec-signif">Significance</a> for every condition.</div>
       <div id="summary-host" style="overflow-x:auto"></div></section>
 
-    <section id="sec-turf"><h2><span class="eyebrow">deployment</span>Field trial &mdash; the joint real-world distribution</h2>
-      <div class="note">The one table where every channel is off-nominal AT ONCE,
-        because that is what the field is: turf underfoot, an imperfect ball, a
-        mocap frame a few degrees out, firmware torque limits, a safety rope and a
-        hand-off from standby. Every other section sweeps ONE channel off a clean
-        base and answers "what breaks it"; this one answers <b>"how long does it
-        last out there"</b>.
+    <section id="sec-field"><h2><span class="eyebrow">deployment</span>Field trial &mdash; real-world scenarios</h2>
+      <div class="note">One card per SCENARIO &mdash; a situation the robot is
+        expected to work in, with every channel off-nominal at once, because that is
+        what the field is. Every other section sweeps ONE channel off a clean base
+        and answers "what breaks it"; this one answers <b>"how long does it last out
+        there"</b>. Scenarios are ranked BETWEEN checkpoints, never against each
+        other, so each keeps its own thresholds and its own bar scale; the
+        parameters that produced each ranking are listed under it.
         Termination is TASK-level &mdash; fall, ball lost, or off route &mdash; so a
         policy cannot score by abandoning the ball and staying upright. The
         headline is therefore <b>mean task-survival seconds</b>, not a survival
@@ -1420,8 +1426,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         hardware has, while the robustness and capability sections above were
         recorded on the 7-capsule feet. A capsule-trained policy meeting mesh feet
         here is a sim2real finding, not a misconfiguration.</div>
-      <div class="legend" id="turf-legend"></div>
-      <div id="turf-host"></div></section>
+      <div class="legend" id="field-legend"></div>
+      <div id="field-host"></div></section>
 
     <section id="sec-signif"><h2><span class="eyebrow">statistics</span>Significant differences</h2>
       <div class="note">Where the selected runs actually differ. Each cell is one
@@ -1533,12 +1539,12 @@ const CAN_FETCH = !!DIFF_ENDPOINT
   && !(typeof location !== "undefined" && location.protocol === "file:");
 const NOMINAL_COND = __NOMINAL_COND__;
 const [FULL_SCOPE, NOM_SCOPE] = __SCOPES__;
-const TURF_PARAM_GROUPS = __TURF_PARAM_GROUPS__;
+const SCENARIO_PARAM_GROUPS = __TURF_PARAM_GROUPS__;
 // axis labels for the difference map: robustness groups come from the data-driven
 // ROB_GROUPS, capability groups are named here (they have their own sections)
 const ROB_LABEL = Object.assign(Object.fromEntries(ROB_GROUPS), {
   baseline: "nominal (unperturbed)",
-  plastic_turf: "field trial — deployment hypothesis",
+  field_trial: "field trial — real-world scenario",
   straight_speed: "straight, commanded speed (m/s)",
   corner_turn: "corner turn |\u03ba| (1/m)",
   u_turn: "u-turn |\u03ba| (1/m)",
@@ -1590,7 +1596,7 @@ function condDiff(baseIdx, cmpIdx, metric, cond) {
   return all ? all.find(e => e.cond === (cond || NOMINAL_COND)) || null : null;
 }
 
-function turfPoint(run, name) {
+function scenarioPoint(run, name) {
   return (run.turf || []).find(p => p.name === name) || null;
 }
 
@@ -2037,15 +2043,15 @@ const SGROUPS = [
   // The field trial LEADS the table on purpose: it is the one number that answers
   // "how does this checkpoint do in the real environment". Under the clean-route
   // rows it read as an afterthought.
-  ["field trial — joint real-world distribution", [
+  ["field trial — plastic turf & mocap", [
     ["task survival (s)", "up",
-     r => { const p = turfPoint(r, "turf_harsh"); return p && p.mean_duration; },
-     r => { const p = turfPoint(r, "turf_harsh");
+     r => { const p = scenarioPoint(r, "turf_mocap"); return p && p.mean_duration; },
+     r => { const p = scenarioPoint(r, "turf_mocap");
             return p && p.mean_duration != null
               ? `${fmtVal(p.mean_duration)} ±${fmtVal(p.mean_duration_se)}`
                 + (p.duration_p50 != null ? ` [${fmtVal(p.duration_p50)}]` : "")
               : null; },
-     "duration", "turf_harsh"],
+     "duration", "turf_mocap"],
   ]],
   ["nominal — unperturbed human routes", [
     ["survival (%)", "up", r => r.nominal && r.nominal.survival,
@@ -2441,26 +2447,26 @@ function robDomains(vis) {
 // ---- field trial -------------------------------------------------------------
 // One card per condition, runs ranked by mean task-survival. Bars normalise
 // WITHIN a card so a second point could never be compared to this one by length.
-function renderTurf() {
-  const host = document.getElementById("turf-host");
+function renderScenarios() {
+  const host = document.getElementById("field-host");
   host.textContent = "";
   const vis = visible();
   // the reason colours, NOT the run palette: the run colour is already on every
   // row's swatch, and the only unexplained colours in this section are the
   // outcome-mix segments
-  legendChips(document.getElementById("turf-legend"),
+  legendChips(document.getElementById("field-legend"),
               REASONS.map(([, label, cvar]) => ({cvar, label}))
                      .concat([{cvar: "var(--fg)", label: "whisker = ±1 SE"}]));
   const withTurf = vis.filter(({r}) => (r.turf || []).length);
   if (!withTurf.length) {
-    h("div", "turfempty", vis.length
-      ? "none of the selected runs has plastic_turf.csv — run the benchmark with "
-        + "--plastic-turf to fill it in"
+    h("div", "scenempty", vis.length
+      ? "none of the selected runs has field_trial.csv — run the benchmark with "
+        + "--field-trial to fill it in"
       : "select at least one experiment", host);
     return;
   }
-  // order comes from turf_series, which emits TURF_POINTS order -- the live point
-  // first, retired ones after. NOT sorted by axis index: turf_harsh's index is 1
+  // order comes from scenario_series, which emits FIELD_SCENARIOS order -- the live point
+  // first, retired ones after. NOT sorted by axis index: turf_mocap's index is 1
   // for historical reasons and sorting on it would bury the only live point.
   const points = [];
   for (const {r, i} of withTurf)
@@ -2473,46 +2479,46 @@ function renderTurf() {
       .map(({r, i}) => ({i, label: r.label, p: (r.turf || []).find(q => q.name === pt.name)}))
       .filter(o => o.p && o.p.mean_duration != null)
       .sort((a, b) => b.p.mean_duration - a.p.mean_duration);
-    const card = h("div", "turfcard", null, host);
-    const head = h("div", "turfhead", null, card);
+    const card = h("div", "scencard", null, host);
+    const head = h("div", "scenhead", null, card);
     h("span", null, pt.name, head);
     // no threshold chip here: the parameter panel below is the authority, and a
     // hand-written one went stale the moment the recipe changed
-    h("span", "turfscale", pt.label, head);
+    h("span", "scenscale", pt.label, head);
     if (!rows.length) {
-      h("div", "turfempty", "no episodes for this severity in the selected runs", card);
+      h("div", "scenempty", "no episodes for this severity in the selected runs", card);
       continue;
     }
     // normalise WITHIN the card: a shared axis across incomparable points is
     // exactly the misread the warning above is trying to prevent
     const peak = Math.max(...rows.map(o => o.p.mean_duration + (o.p.mean_duration_se || 0)));
     for (const {i, label, p} of rows) {
-      const row = h("div", "turfrow", null, card);
-      const nm = h("div", "turfname", null, row);
+      const row = h("div", "scenrow", null, card);
+      const nm = h("div", "scenname", null, row);
       const sw = h("span", "swatch", null, nm);
       sw.style.background = sv(i);
       h("span", null, label, nm);
-      const wrap = h("div", "turfbarwrap", null, row);
+      const wrap = h("div", "scenbarwrap", null, row);
       const frac = peak > 0 ? p.mean_duration / peak : 0;
-      const bar = h("div", "turfbar", null, wrap);
+      const bar = h("div", "scenbar", null, wrap);
       bar.style.width = `${(100 * frac).toFixed(1)}%`;
       bar.style.background = sv(i);
       bar.dataset.run = i;
       if (p.mean_duration_se) {
         const lo = Math.max(0, p.mean_duration - p.mean_duration_se) / peak;
         const hi = Math.min(1, (p.mean_duration + p.mean_duration_se) / peak);
-        const err = h("div", "turferr", null, wrap);
+        const err = h("div", "scenerr", null, wrap);
         err.style.left = `${(100 * lo).toFixed(1)}%`;
         err.style.width = `${(100 * (hi - lo)).toFixed(1)}%`;
       }
-      const val = h("div", "turfval", null, row);
+      const val = h("div", "scenval", null, row);
       h("span", null, `${fmtVal(p.mean_duration)} s`, val);
-      h("span", "turfsd", ` ±${fmtVal(p.mean_duration_se)}`
+      h("span", "scensd", ` ±${fmtVal(p.mean_duration_se)}`
         + (p.duration_p50 != null ? ` [${fmtVal(p.duration_p50)}]` : ""), val);
       // outcome mix, inline: WHY the episodes ended, right next to how long
       // they lasted. That pairing is the whole read -- 4 s of fell is a
       // different finding from 4 s of ball-lost.
-      const mix = h("div", "turfmix", null, row);
+      const mix = h("div", "scenmix", null, row);
       const tot = Object.values(p.reasons || {}).reduce((a, b) => a + b, 0);
       const share = [];
       for (const [key, lbl, cvar] of REASONS) {
@@ -2523,7 +2529,7 @@ function renderTurf() {
         share.push(`${lbl} ${Math.round(100 * cnt / tot)}%`);
       }
       mix.title = share.join(" · ") || "no outcomes recorded";
-      h("div", "turfn", `n=${p.n}`, row);
+      h("div", "scenn", `n=${p.n}`, row);
       row.title = `${label} — ${pt.name}\n`
         + `ended: ${share.join(", ")}\n`
         + `mean ${fmtVal(p.mean_duration)} ±${fmtVal(p.mean_duration_se)} s`
@@ -2533,41 +2539,41 @@ function renderTurf() {
         + (p.cross_track != null ? `\ncross-track ${fmtVal(p.cross_track)} m` : "");
     }
   }
-  renderTurfParams(host, withTurf);
+  renderScenarioParams(host, withTurf);
 }
 
 // What produced the numbers above. One value per row when every selected run
 // tested the same thing (the normal case); flagged red and listed per run when
 // they disagree, because then the ranking above is comparing two experiments.
-function renderTurfParams(host, withTurf) {
-  const have = withTurf.filter(({r}) => r.turf_params);
+function renderScenarioParams(host, withTurf) {
+  const have = withTurf.filter(({r}) => r.scenario_params);
   if (!have.length) {
-    h("div", "turfempty", "no recorded parameters for the selected runs — the "
-      + "run dirs predate plastic_turf.conditions.json; re-run the benchmark to "
+    h("div", "scenempty", "no recorded parameters for the selected runs — the "
+      + "run dirs predate field_trial.conditions.json; re-run the benchmark to "
       + "record what was tested", host);
     return;
   }
-  const det = h("details", "turfparams", null, host);
+  const det = h("details", "scenparams", null, host);
   const missing = withTurf.length - have.length;
   h("summary", null, `parameters actually tested (${have.length} run`
     + `${have.length > 1 ? "s" : ""}${missing ? `, ${missing} without a record` : ""})`,
     det);
-  const grid = h("div", "turfpgrid", null, det);
-  for (const [group, items] of TURF_PARAM_GROUPS) {
-    const box = h("div", "turfpgroup", null, grid);
+  const grid = h("div", "scenpgrid", null, det);
+  for (const [group, items] of SCENARIO_PARAM_GROUPS) {
+    const box = h("div", "scenpgroup", null, grid);
     h("h5", null, group, box);
     for (const [key, label, unit] of items) {
-      const vals = have.map(({r}) => JSON.stringify(r.turf_params[key] ?? null));
+      const vals = have.map(({r}) => JSON.stringify(r.scenario_params[key] ?? null));
       const uniq = [...new Set(vals)];
-      const row = h("div", "turfprow", null, box);
+      const row = h("div", "scenprow", null, box);
       if (uniq.length > 1) row.classList.add("differ");
       if (uniq.length === 1 && JSON.parse(uniq[0]) === null) row.classList.add("unset");
-      h("span", "turfpk", label, row);
-      const vd = h("span", "turfpv", null, row);
+      h("span", "scenpk", label, row);
+      const vd = h("span", "scenpv", null, row);
       h("span", null, uniq.length > 1 ? `${uniq.length} values` : fmtParam(JSON.parse(uniq[0])), vd);
-      if (unit) h("span", "turfpu", " " + unit, vd);
+      if (unit) h("span", "scenpu", " " + unit, vd);
       row.title = uniq.length > 1
-        ? have.map(({r}) => `${r.label}: ${fmtParam(r.turf_params[key] ?? null)}`).join("\n")
+        ? have.map(({r}) => `${r.label}: ${fmtParam(r.scenario_params[key] ?? null)}`).join("\n")
         : `${key} = ${fmtParam(JSON.parse(uniq[0]))}${unit ? " " + unit : ""}`;
     }
   }
@@ -3187,7 +3193,7 @@ function renderAll() {
   const dom = capDomains(visible());
   renderComparability();
   renderSummary();
-  renderTurf();
+  renderScenarios();
   renderSignificance();
   renderRobustness();
   renderTurns("corner-grid", "corner", "|κ| (1/m)", dom, "corner-legend");
@@ -3475,7 +3481,7 @@ def generate(args, live=False, quiet=False, memo=None):
     # alphabetically meant that if it happened to be missing a table, every inline
     # pair was missing it too -- which is exactly what happened to the field trial
     # the day it landed (the alphabetically-first checkpoint has no exported ONNX,
-    # so no plastic_turf.csv, so the arrival view showed zero field-trial rows).
+    # so no field_trial.csv, so the arrival view showed zero field-trial rows).
     anchor = max(range(len(runs)),
                  key=lambda i: (len(runs[i]["turf"]),
                                 runs[i]["info"]["n_rob"] + runs[i]["info"]["n_cap"],
@@ -3509,7 +3515,7 @@ def generate(args, live=False, quiet=False, memo=None):
         "__INLINE_ANCHOR__": js_embed(anchor),
         "__DIFF_ENDPOINT__": js_embed(DIFF_ENDPOINT if live else None),
         "__NOMINAL_COND__": js_embed(NOMINAL_COND),
-        "__TURF_PARAM_GROUPS__": js_embed(TURF_PARAM_GROUPS),
+        "__TURF_PARAM_GROUPS__": js_embed(SCENARIO_PARAM_GROUPS),
         "__SCOPES__": js_embed([FULL_SCOPE, NOMINAL_SCOPE]),
         "__REAL_WORLD__": js_embed(REAL_WORLD),
         "__ROB_METRICS__": js_embed(ROB_METRICS),
