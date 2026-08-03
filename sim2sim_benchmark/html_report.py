@@ -1124,10 +1124,16 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
   .filterrow label:has(input:checked) { border-color:var(--accent); background:var(--wash); }
   .filterrow input { margin:0; accent-color:var(--accent); }
 
+  #summary-host { overflow-x:auto; overscroll-behavior-x:contain;
+                  scrollbar-width:thin; scrollbar-color:var(--axis) transparent;
+                  padding-bottom:3px; }
   table.summary { border-collapse:separate; border-spacing:0; font-size:13px;
                   background:var(--panel); border:1px solid var(--border);
-                  border-radius:11px; overflow:hidden; box-shadow:var(--shadow); }
-  table.summary th, table.summary td { padding:6px 14px; text-align:right;
+                  border-radius:11px; overflow:hidden; box-shadow:var(--shadow);
+                  table-layout:fixed; width:100%; }
+  table.summary col.metric-col { width:190px; }
+  table.summary col.run-col { width:120px; }
+  table.summary th, table.summary td { padding:6px 10px; text-align:right;
                                        font-variant-numeric:tabular-nums;
                                        border-bottom:1px solid var(--border); }
   table.summary thead th { font-size:10.5px; font-weight:600; text-transform:uppercase;
@@ -1139,8 +1145,30 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
                                letter-spacing:.08em; color:var(--accent);
                                background:var(--rowhover); text-align:left;
                                padding:5px 14px 4px; }
+  table.summary thead .runth { min-width:0; max-width:100%; }
+  table.summary thead .runth > span:last-child { overflow:hidden;
+                                                 text-overflow:ellipsis;
+                                                 white-space:nowrap; }
+  .summary-primary { white-space:nowrap; }
+  .summary-cell-detail { display:none; color:var(--muted); font-size:10.5px;
+                         line-height:1.25; margin-top:2px; overflow-wrap:anywhere; }
+  tr.summary-detail-open .summary-cell-detail { display:block; }
+  .summary-metric-toggle { all:unset; box-sizing:border-box; width:100%; display:flex;
+                           align-items:center; gap:5px; cursor:pointer; border-radius:3px; }
+  .summary-metric-toggle:hover { color:var(--accent); }
+  .summary-metric-toggle:focus-visible { outline:2px solid var(--accent);
+                                         outline-offset:2px; }
+  .summary-metric-caret { flex:0 0 auto; color:var(--muted); font-size:14px;
+                          transform:rotate(0); transition:transform .16s ease; }
+  tr.summary-detail-open .summary-metric-caret { transform:rotate(90deg); }
   table.summary td.mname, table.summary th.mname { text-align:left;
                                                    font-variant-numeric:normal; }
+  table.summary td.mname, table.summary th.mname {
+    position:sticky; left:0; z-index:2; background:var(--panel);
+    box-shadow:1px 0 0 var(--border);
+  }
+  table.summary thead th.mname { z-index:3; background:var(--rowhover); }
+  table.summary tbody tr:hover td.mname { background:var(--panel); }
   table.summary td.mname .dir { color:var(--muted); font-size:11px; margin-left:5px; }
   table.summary .best { font-weight:650; }
   table.summary .best::before { content:"\25CF"; color:var(--accent); font-size:7px;
@@ -1374,7 +1402,11 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
     <div id="trainbox"></div>
 
     <section id="sec-summary"><h2><span class="eyebrow">overview</span>Summary</h2>
-      <div class="note">Headline numbers per run; <b>best of the selected runs</b> is underlined,
+      <div class="note">Headline numbers per run. Checkpoints keep a readable column
+        width and extend to the right; scroll the table horizontally for larger comparisons.
+        The metric column stays pinned. Click a metric name to reveal or fold its
+        &plusmn;SE, &Delta;, CI and n details.
+        <b>Best of the selected runs</b> is underlined,
         small &Delta; is vs the first selected run. Values carry &plusmn;1 SE; a &Delta; is
         <b>coloured only when its 95&nbsp;% bootstrap CI excludes zero</b> (shown in
         brackets) &mdash; grey means the gap is inside the noise. Continuous
@@ -1391,7 +1423,7 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
         threshold (0.8&nbsp;m) &mdash; a brief kick past the dribble pocket is
         not yet "lost".
         See <a href="#sec-signif">Significance</a> for every condition.</div>
-      <div id="summary-host" style="overflow-x:auto"></div></section>
+      <div id="summary-host"></div></section>
 
     <section id="sec-field"><h2><span class="eyebrow">deployment</span>Field trial &mdash; real-world scenarios</h2>
       <div class="note">One card per SCENARIO &mdash; a situation the robot is
@@ -2037,8 +2069,11 @@ function mergeLR(d) {
 const SGROUPS = [
   ["run data", [
     ["episodes (rob + cap + turf)", null, r => null,
-     r => `${r.info.n_rob} + ${r.info.n_cap}`
-          + (r.info.n_turf ? ` + ${r.info.n_turf}` : " + —")],
+     r => ({
+       primary: (r.info.n_rob || 0) + (r.info.n_cap || 0) + (r.info.n_turf || 0),
+       detail: `rob ${r.info.n_rob || 0} · cap ${r.info.n_cap || 0}`
+               + ` · turf ${r.info.n_turf || 0}`,
+     })],
   ]],
   // The field trial LEADS the table on purpose: it is the one number that answers
   // "how does this checkpoint do in the real environment". Under the clean-route
@@ -2099,6 +2134,28 @@ const SGROUPS = [
     ["human κ-cap @≥50% strict success (1/m)", "up", r => r.top.human_cap],
   ]],
 ];
+const summaryDetailRows = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem("s2s-summary-details"));
+    if (Array.isArray(saved)) return new Set(saved);
+  } catch (e) { /* a private/file context may deny storage */ }
+  return new Set();
+})();
+function toggleSummaryDetails(key) {
+  summaryDetailRows.has(key) ? summaryDetailRows.delete(key)
+                             : summaryDetailRows.add(key);
+  try {
+    localStorage.setItem("s2s-summary-details", JSON.stringify([...summaryDetailRows]));
+  } catch (e) { /* folding still works for this page load */ }
+  renderSummary();
+}
+function splitSummaryText(text) {
+  if (text && typeof text === "object")
+    return [String(text.primary), text.detail == null ? null : String(text.detail)];
+  const s = String(text);
+  const at = s.indexOf(" ±");
+  return at < 0 ? [s, null] : [s.slice(0, at), s.slice(at + 1)];
+}
 function betterOf(a, b, dir) {
   if (dir === "one") return Math.abs(a - 1) < Math.abs(b - 1);
   if (dir === "zero") return Math.abs(a) < Math.abs(b);
@@ -2116,10 +2173,18 @@ function renderSummary() {
     afterDiffs("summary", vis.slice(1).map(o => [vis[0].i, o.i]),
                DIFF_METRICS.map(m => m[0]), NOM_SCOPE, renderSummary);
   const tb = h("table", "summary", null, host);
+  // Preserve a readable checkpoint width. With 20+ runs the table becomes a
+  // horizontally scrollable comparison canvas instead of crushing every value
+  // into an unreadable sliver.
+  tb.style.minWidth = `${190 + 120 * vis.length}px`;
+  const cols = h("colgroup", null, null, tb);
+  h("col", "metric-col", null, cols);
+  for (const _ of vis) h("col", "run-col", null, cols);
   const hr = h("tr", null, null, h("thead", null, null, tb));
   h("th", "mname", "metric", hr);
   for (const {r, i} of vis) {
     const th = h("th", null, null, hr);
+    th.title = r.label;
     const wrap = h("span", "runth", null, th);
     const sw = h("span", "swatch", null, wrap);
     sw.style.background = sv(i);
@@ -2131,9 +2196,18 @@ function renderSummary() {
     const gtd = h("td", null, gLabel, gtr);
     gtd.colSpan = vis.length + 1;
     for (const [label, dir, get, fmt, dkey, dcond] of rows) {
-    const tr = h("tr", null, null, body);
-    const nm = h("td", "mname", label, tr);
-    if (dir) h("span", "dir", DIRTXT[dir], nm);
+    const detailKey = `${gLabel}|${label}`;
+    const detailOpen = summaryDetailRows.has(detailKey);
+    const tr = h("tr", detailOpen ? "summary-detail-open" : null, null, body);
+    const nm = h("td", "mname", null, tr);
+    const mt = h("button", "summary-metric-toggle", null, nm);
+    mt.type = "button";
+    mt.setAttribute("aria-expanded", String(detailOpen));
+    mt.setAttribute("aria-label", `${detailOpen ? "Fold" : "Reveal"} statistical details for ${label}`);
+    h("span", "summary-metric-caret", "›", mt).setAttribute("aria-hidden", "true");
+    h("span", null, label, mt);
+    if (dir) h("span", "dir", DIRTXT[dir], mt);
+    mt.addEventListener("click", () => toggleSummaryDetails(detailKey));
     const vals = vis.map(({r}) => get(r));
     let bestIdx = -1;
     if (dir && vis.length > 1) {
@@ -2150,8 +2224,11 @@ function renderSummary() {
     vis.forEach(({r}, k) => {
       const td = h("td", null, null, tr);
       const txt = fmt ? fmt(r) : null;
-      h("span", bestIdx === k ? "best" : null,
-        txt != null ? txt : fmtVal(vals[k]), td);
+      const [primary, secondary] = splitSummaryText(
+        txt != null ? txt : fmtVal(vals[k]));
+      h("span", "summary-primary" + (bestIdx === k ? " best" : ""),
+        primary, td);
+      const detail = h("span", "summary-cell-detail", secondary, td);
       if (dir && k > 0 && vals[k] != null && ref != null) {
         const dv = vals[k] - ref;
         // Colour ONLY when the 95% bootstrap CI on the difference excludes
@@ -2159,19 +2236,19 @@ function renderSummary() {
         // so painting every non-zero delta red/green (what this did before)
         // reports noise as regression. Metrics with no CI available stay neutral.
         const ci = dkey ? condDiff(vis[0].i, vis[k].i, dkey, dcond) : null;
-        if (Math.abs(dv) < 1e-9 && !ci) h("span", "delta", "±0", td);
+        if (Math.abs(dv) < 1e-9 && !ci) h("span", "delta", "±0", detail);
         else {
           const sig = ci ? ci.sig : null;
           const cls = sig === true
             ? (betterOf(vals[k], ref, dir) ? "dgood" : "dbad") : "dnull";
           const sp = h("span", "delta " + cls,
-                       (dv >= 0 ? "+" : "") + fmtVal(dv), td);
+                       (dv >= 0 ? "+" : "") + fmtVal(dv), detail);
           if (ci) {
             sp.title = `95% bootstrap CI on the difference: `
               + `[${fmtVal(ci.lo)}, ${fmtVal(ci.hi)}]`
               + (ci.paired ? ` — paired on route (n=${ci.n})` : ` — unpaired (n=${ci.n})`)
               + (sig ? "" : " — includes 0, not significant");
-            h("span", "ci", ` [${fmtVal(ci.lo)}, ${fmtVal(ci.hi)}]`, td);
+            h("span", "ci", ` [${fmtVal(ci.lo)}, ${fmtVal(ci.hi)}]`, detail);
           }
         }
       }
