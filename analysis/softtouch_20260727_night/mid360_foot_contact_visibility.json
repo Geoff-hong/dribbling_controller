@@ -1,0 +1,387 @@
+{
+  "method": {
+    "trusted_samples_with_synchronized_robot_tf": 23075,
+    "max_tf_sync_error_ms": 4.842996597290039,
+    "ball_radius_m": 0.1,
+    "contact_candidate_definition": "ball sphere within 15 mm of either exact foot STL",
+    "near_foot_definition": "ball sphere within 80 mm of either exact foot STL",
+    "occlusion_definition": "center rays are checked against the exact feet for all contact candidates and against all 12 leg-link meshes at the closest sample of each contact event"
+  },
+  "mount": {
+    "origin_torso_m": [
+      0.125,
+      0.0,
+      0.248
+    ],
+    "inverted": true,
+    "down_pitch_deg": 35.5
+  },
+  "contact_candidates": {
+    "samples": 1720,
+    "center_vertical_fov_coverage_percent": 95.23255813953489,
+    "full_ball_vertical_fov_coverage_percent": 90.93023255813954,
+    "sensor_range_m": {
+      "min": 0.8539368154390168,
+      "median": 0.9210255746022715,
+      "max": 1.0242127352006465
+    },
+    "ball_observation_xy_m": {
+      "x_min": -0.1309431391635883,
+      "x_median": 0.3076456277387186,
+      "x_max": 0.5449823742272937,
+      "abs_y_max": 0.2361258231642166
+    },
+    "vertical_margin_deg": {
+      "min": -16.958298921952537,
+      "q01": -13.829714711258642,
+      "median": 8.004830514775826
+    },
+    "candidate_events": 66,
+    "candidate_events_per_episode": {
+      "205524 / E01": 1,
+      "205524 / E02": 4,
+      "205524 / E03": 1,
+      "205524 / E04": 7,
+      "205524 / E05": 2,
+      "205524 / E06": 2,
+      "205524 / E07": 4,
+      "205524 / E08": 3,
+      "224829 / E01": 6,
+      "224829 / E02": 6,
+      "224829 / E03": 6,
+      "224829 / E04": 4,
+      "224829 / E05": 5,
+      "224829 / E06": 3,
+      "224829 / E07": 5,
+      "224829 / E08": 7
+    },
+    "center_ray_clear_of_both_feet_percent": 100.0,
+    "center_ray_intersects_a_foot_percent": 0.0
+  },
+  "contact_event_closest_samples": {
+    "samples": 66,
+    "center_vertical_fov_coverage_percent": 100.0,
+    "full_ball_vertical_fov_coverage_percent": 93.93939393939394,
+    "sensor_range_m": {
+      "min": 0.8610462998069177,
+      "median": 0.9335928065024238,
+      "max": 1.0200118795586255
+    },
+    "ball_observation_xy_m": {
+      "x_min": 0.09138073836971042,
+      "x_median": 0.3190114457746861,
+      "x_max": 0.5449823742272937,
+      "abs_y_max": 0.19691090643994805
+    },
+    "vertical_margin_deg": {
+      "min": -5.507355758506598,
+      "q01": -3.3474107988674957,
+      "median": 8.203211346146926
+    },
+    "center_ray_clear_of_both_feet_percent": 100.0,
+    "center_ray_intersects_a_foot_percent": 0.0,
+    "center_ray_clear_of_all_leg_meshes_percent": 68.18181818181817,
+    "center_ray_intersects_a_leg_mesh_percent": 31.818181818181817,
+    "first_occluding_link_counts": {
+      "left_hip_yaw_link": 1,
+      "right_hip_yaw_link": 18,
+      "right_knee_link": 2
+    }
+  },
+  "near_foot": {
+    "samples": 5930,
+    "center_vertical_fov_coverage_percent": 98.38111298482293,
+    "full_ball_vertical_fov_coverage_percent": 97.01517706576729,
+    "sensor_range_m": {
+      "min": 0.8526572645411002,
+      "median": 0.9315294626982028,
+      "max": 1.0609481309782325
+    },
+    "ball_observation_xy_m": {
+      "x_min": -0.1309431391635883,
+      "x_median": 0.3605672933453815,
+      "x_max": 0.6178573136241972,
+      "abs_y_max": 0.34970738866553797
+    },
+    "vertical_margin_deg": {
+      "min": -16.958298921952537,
+      "q01": -8.64618308513405,
+      "median": 11.176302392294808
+    }
+  },
+  "pitch_sweep": {
+    "all_samples": {
+      "best_full_ball_pitch_deg": 35.6,
+      "best_full_ball_coverage_percent": 97.4127843986999,
+      "center_coverage_at_that_pitch_percent": 98.7172264355363,
+      "coverage_by_pitch": {
+        "35.5_deg": {
+          "center_percent": 98.73022751895991,
+          "full_ball_percent": 97.40845070422534
+        },
+        "38.0_deg": {
+          "center_percent": 98.46153846153847,
+          "full_ball_percent": 96.77139761646804
+        },
+        "40.0_deg": {
+          "center_percent": 98.10617551462622,
+          "full_ball_percent": 96.13001083423619
+        },
+        "42.0_deg": {
+          "center_percent": 97.56013001083423,
+          "full_ball_percent": 95.16359696641386
+        },
+        "45.0_deg": {
+          "center_percent": 96.56771397616468,
+          "full_ball_percent": 93.23076923076923
+        }
+      }
+    },
+    "near_foot": {
+      "best_full_ball_pitch_deg": 53.15,
+      "best_full_ball_coverage_percent": 100.0,
+      "center_coverage_at_that_pitch_percent": 100.0,
+      "coverage_by_pitch": {
+        "35.5_deg": {
+          "center_percent": 98.38111298482293,
+          "full_ball_percent": 97.01517706576729
+        },
+        "38.0_deg": {
+          "center_percent": 98.97133220910625,
+          "full_ball_percent": 98.01011804384486
+        },
+        "40.0_deg": {
+          "center_percent": 99.24114671163575,
+          "full_ball_percent": 98.21247892074199
+        },
+        "42.0_deg": {
+          "center_percent": 99.49409780775717,
+          "full_ball_percent": 98.39797639123103
+        },
+        "45.0_deg": {
+          "center_percent": 99.83136593591905,
+          "full_ball_percent": 99.12310286677909
+        }
+      }
+    },
+    "contact_candidates": {
+      "best_full_ball_pitch_deg": 53.15,
+      "best_full_ball_coverage_percent": 100.0,
+      "center_coverage_at_that_pitch_percent": 100.0,
+      "coverage_by_pitch": {
+        "35.5_deg": {
+          "center_percent": 95.23255813953489,
+          "full_ball_percent": 90.93023255813954
+        },
+        "38.0_deg": {
+          "center_percent": 97.26744186046513,
+          "full_ball_percent": 93.95348837209302
+        },
+        "40.0_deg": {
+          "center_percent": 98.0813953488372,
+          "full_ball_percent": 94.65116279069767
+        },
+        "42.0_deg": {
+          "center_percent": 98.25581395348837,
+          "full_ball_percent": 95.2906976744186
+        },
+        "45.0_deg": {
+          "center_percent": 99.4186046511628,
+          "full_ball_percent": 97.79069767441861
+        }
+      }
+    },
+    "contact_event_closest_samples": {
+      "best_full_ball_pitch_deg": 41.1,
+      "best_full_ball_coverage_percent": 100.0,
+      "center_coverage_at_that_pitch_percent": 100.0,
+      "coverage_by_pitch": {
+        "35.5_deg": {
+          "center_percent": 100.0,
+          "full_ball_percent": 93.93939393939394
+        },
+        "38.0_deg": {
+          "center_percent": 100.0,
+          "full_ball_percent": 98.48484848484848
+        },
+        "40.0_deg": {
+          "center_percent": 100.0,
+          "full_ball_percent": 98.48484848484848
+        },
+        "42.0_deg": {
+          "center_percent": 100.0,
+          "full_ball_percent": 100.0
+        },
+        "45.0_deg": {
+          "center_percent": 100.0,
+          "full_ball_percent": 100.0
+        }
+      }
+    },
+    "contact_priority_compromise": {
+      "criterion": "maximize closest-contact-event full-ball coverage while retaining at least 97% coverage over all trusted samples",
+      "pitch_deg": 36.7,
+      "contact_event_full_ball_coverage_percent": 96.96969696969697,
+      "all_samples_full_ball_coverage_percent": 97.15276273022752,
+      "near_foot_full_ball_coverage_percent": 97.77403035413154
+    }
+  },
+  "forward_origin_sweep": {
+    "x_0.125_m": {
+      "origin_torso_m": [
+        0.125,
+        0.0,
+        0.248
+      ],
+      "forward_from_anchor_plane_mm": 121.0437,
+      "ahead_of_torso_shell_at_this_height_mm_approx": 53.199999999999996,
+      "contact_event_center_ray_clear_percent": 68.18181818181819,
+      "contact_event_center_ray_occluded_count": 21,
+      "first_occluding_link_counts": {
+        "left_hip_yaw_link": 1,
+        "right_hip_yaw_link": 18,
+        "right_knee_link": 2
+      },
+      "best_overall_pitch_deg": 35.6,
+      "best_overall_full_ball_coverage_percent": 97.4127843986999,
+      "contact_priority_pitch_with_all_coverage_at_least_97_deg": 36.7,
+      "contact_event_full_ball_coverage_percent": 96.96969696969697,
+      "near_foot_full_ball_coverage_percent": 97.77403035413154,
+      "all_samples_full_ball_coverage_percent": 97.15276273022752
+    },
+    "x_0.150_m": {
+      "origin_torso_m": [
+        0.15,
+        0.0,
+        0.248
+      ],
+      "forward_from_anchor_plane_mm": 146.0437,
+      "ahead_of_torso_shell_at_this_height_mm_approx": 78.19999999999999,
+      "contact_event_center_ray_clear_percent": 71.21212121212122,
+      "contact_event_center_ray_occluded_count": 19,
+      "first_occluding_link_counts": {
+        "left_hip_yaw_link": 1,
+        "right_hip_yaw_link": 16,
+        "right_knee_link": 2
+      },
+      "best_overall_pitch_deg": 36.65,
+      "best_overall_full_ball_coverage_percent": 97.16576381365114,
+      "contact_priority_pitch_with_all_coverage_at_least_97_deg": 37.0,
+      "contact_event_full_ball_coverage_percent": 93.93939393939394,
+      "near_foot_full_ball_coverage_percent": 96.98145025295109,
+      "all_samples_full_ball_coverage_percent": 97.11375947995666
+    },
+    "x_0.175_m": {
+      "origin_torso_m": [
+        0.175,
+        0.0,
+        0.248
+      ],
+      "forward_from_anchor_plane_mm": 171.0437,
+      "ahead_of_torso_shell_at_this_height_mm_approx": 103.19999999999999,
+      "contact_event_center_ray_clear_percent": 75.75757575757575,
+      "contact_event_center_ray_occluded_count": 16,
+      "first_occluding_link_counts": {
+        "right_hip_yaw_link": 15,
+        "right_knee_link": 1
+      },
+      "best_overall_pitch_deg": 37.4,
+      "best_overall_full_ball_coverage_percent": 96.85373781148428,
+      "contact_priority_pitch_with_all_coverage_at_least_97_deg": 37.4,
+      "contact_event_full_ball_coverage_percent": 90.9090909090909,
+      "near_foot_full_ball_coverage_percent": 95.48060708263068,
+      "all_samples_full_ball_coverage_percent": 96.85373781148428
+    },
+    "x_0.200_m": {
+      "origin_torso_m": [
+        0.2,
+        0.0,
+        0.248
+      ],
+      "forward_from_anchor_plane_mm": 196.0437,
+      "ahead_of_torso_shell_at_this_height_mm_approx": 128.20000000000002,
+      "contact_event_center_ray_clear_percent": 80.3030303030303,
+      "contact_event_center_ray_occluded_count": 13,
+      "first_occluding_link_counts": {
+        "right_hip_yaw_link": 13
+      },
+      "best_overall_pitch_deg": 39.6,
+      "best_overall_full_ball_coverage_percent": 96.53737811484291,
+      "contact_priority_pitch_with_all_coverage_at_least_97_deg": 39.6,
+      "contact_event_full_ball_coverage_percent": 92.42424242424242,
+      "near_foot_full_ball_coverage_percent": 96.44182124789208,
+      "all_samples_full_ball_coverage_percent": 96.53737811484291
+    },
+    "x_0.225_m": {
+      "origin_torso_m": [
+        0.225,
+        0.0,
+        0.248
+      ],
+      "forward_from_anchor_plane_mm": 221.0437,
+      "ahead_of_torso_shell_at_this_height_mm_approx": 153.2,
+      "contact_event_center_ray_clear_percent": 81.81818181818181,
+      "contact_event_center_ray_occluded_count": 12,
+      "first_occluding_link_counts": {
+        "right_hip_yaw_link": 10,
+        "right_knee_link": 2
+      },
+      "best_overall_pitch_deg": 40.35,
+      "best_overall_full_ball_coverage_percent": 96.26002166847238,
+      "contact_priority_pitch_with_all_coverage_at_least_97_deg": 40.35,
+      "contact_event_full_ball_coverage_percent": 90.9090909090909,
+      "near_foot_full_ball_coverage_percent": 95.29510961214164,
+      "all_samples_full_ball_coverage_percent": 96.26002166847238
+    },
+    "x_0.250_m": {
+      "origin_torso_m": [
+        0.25,
+        0.0,
+        0.248
+      ],
+      "forward_from_anchor_plane_mm": 246.0437,
+      "ahead_of_torso_shell_at_this_height_mm_approx": 178.2,
+      "contact_event_center_ray_clear_percent": 84.84848484848484,
+      "contact_event_center_ray_occluded_count": 10,
+      "first_occluding_link_counts": {
+        "right_hip_yaw_link": 7,
+        "right_knee_link": 3
+      },
+      "best_overall_pitch_deg": 42.75,
+      "best_overall_full_ball_coverage_percent": 96.03033586132177,
+      "contact_priority_pitch_with_all_coverage_at_least_97_deg": 42.75,
+      "contact_event_full_ball_coverage_percent": 92.42424242424242,
+      "near_foot_full_ball_coverage_percent": 96.49241146711636,
+      "all_samples_full_ball_coverage_percent": 96.03033586132177
+    }
+  },
+  "contact_event_ball_surface_visibility": {
+    "35.5_deg": {
+      "sampled_rays_per_ball_disk": [
+        37
+      ],
+      "events": 66,
+      "events_with_any_visible_sampled_ball_surface": 66,
+      "events_with_no_visible_sampled_ball_surface": 0,
+      "events_with_at_least_25pct_visible_disk_samples": 63,
+      "events_with_at_least_50pct_visible_disk_samples": 52,
+      "visible_disk_sample_fraction_percent": {
+        "min": 8.108108108108109,
+        "q10": 37.83783783783784,
+        "median": 75.67567567567568,
+        "max": 100.0
+      },
+      "inside_vertical_fov_disk_sample_fraction_percent": {
+        "min": 59.45945945945946,
+        "median": 100.0
+      },
+      "clear_of_leg_meshes_disk_sample_fraction_percent": {
+        "min": 8.108108108108109,
+        "q10": 39.189189189189186,
+        "median": 75.67567567567568
+      },
+      "interpretation": "37 deterministic rays sample each apparent ball disk. This is a geometry visibility estimate, not a guarantee that the non-repetitive MID-360 scan produces enough returns in one frame."
+    }
+  },
+  "interpretation": "Vertical-FOV coverage answers whether the ball lies inside the specified MID-360 view. A foot-center-ray intersection is a conservative warning, not proof that the entire ball is hidden."
+}

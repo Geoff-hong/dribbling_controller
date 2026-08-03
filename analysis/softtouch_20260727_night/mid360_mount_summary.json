@@ -1,0 +1,428 @@
+{
+  "trusted_samples": 23075,
+  "active_episode_count": 16,
+  "trusted_duration_sum_s": 102.51951718330383,
+  "filters": {
+    "active_policy_segments_only": true,
+    "post_ball_position_jump_excluded": true,
+    "ball_position_jump_threshold_m": 0.5,
+    "chest_ball_sync_limit_s": 0.03,
+    "robust_tail_fraction": 0.005
+  },
+  "coordinate_convention": {
+    "frame": "policy observation frame rigidly attached to torso_link",
+    "x": "forward",
+    "y": "left",
+    "z": "up"
+  },
+  "geometry_from_bag": {
+    "observation_body": "torso_link",
+    "observation_offset_body_m": [
+      0.077,
+      0.0,
+      0.148
+    ],
+    "mid360_parent_body": "torso_link",
+    "mid360_origin_body_m": [
+      0.0002835,
+      3e-05,
+      0.41618
+    ],
+    "mid360_origin_observation_m": [
+      -0.07671649999999999,
+      3e-05,
+      0.26818
+    ],
+    "mid360_rpy_body_rad": [
+      0.0,
+      3.101,
+      3.1415
+    ],
+    "mid360_is_inverted": true,
+    "current_forward_axis_down_pitch_deg": 2.3257877299317244
+  },
+  "trusted_ball_position_in_humanoid_frame_m": {
+    "forward_x": {
+      "min": -0.1309431391635883,
+      "q00_5": 0.06724656954354574,
+      "q01": 0.16316077560658326,
+      "q05": 0.2689003584013794,
+      "median": 0.4755525832984453,
+      "q95": 0.9081475783698337,
+      "q99": 1.2165926620141807,
+      "q99_5": 1.270002962066564,
+      "max": 1.3840362141080058
+    },
+    "left_y": {
+      "min": -1.2529707456550119,
+      "q00_5": -0.8016972730361345,
+      "q01": -0.6647024740785519,
+      "q05": -0.2983142001620521,
+      "median": 0.00874532654065846,
+      "q95": 0.27318913549683155,
+      "q99": 1.1389192614260206,
+      "q99_5": 1.39852639332501,
+      "max": 1.83166736170979
+    },
+    "up_z": {
+      "min": -1.1644194738323548,
+      "q00_5": -0.9747271220385665,
+      "q01": -0.9097973797327193,
+      "q05": -0.8619123463537504,
+      "median": -0.7532805794627391,
+      "q95": -0.600459521322013,
+      "q99": -0.4476762010982413,
+      "q99_5": -0.3688737399310956,
+      "max": -0.17957956534793706
+    }
+  },
+  "trusted_ball_position_from_mid360": {
+    "range_m": {
+      "min": 1.021248777946079,
+      "q00_5": 1.0696650264043082,
+      "q01": 1.0797397058952278,
+      "q05": 1.097319814033073,
+      "median": 1.1759291981318067,
+      "q95": 1.4335735574981017,
+      "q99": 1.7905447115821522,
+      "q99_5": 1.973676817750759,
+      "max": 2.154610073989885
+    },
+    "humanoid_azimuth_deg": {
+      "min": -109.17864939710186,
+      "q00_5": -59.53066475433599,
+      "q01": -41.85385004702378,
+      "q05": -26.741671761756834,
+      "median": 0.8707933237043611,
+      "q95": 23.904167429060283,
+      "q99": 53.60917433845047,
+      "q99_5": 71.8952026699978,
+      "max": 87.50356691378127
+    },
+    "angular_radius_deg_for_0_10m_ball": {
+      "min": 2.6601736507462164,
+      "q00_5": 2.904240559907222,
+      "q01": 3.201575084573949,
+      "q05": 3.999958484197703,
+      "median": 4.87827519856851,
+      "q95": 5.228683783381227,
+      "q99": 5.314059148310018,
+      "q99_5": 5.364255881244482,
+      "max": 5.619369012105866
+    }
+  },
+  "official_mid360_vertical_fov_deg": [
+    -7.0,
+    52.0
+  ],
+  "current_mount": {
+    "center_coverage_percent": 24.754062838569883,
+    "full_ball_coverage_percent": 13.781148429035753,
+    "elevation_deg": {
+      "min": 15.8693105534492,
+      "q00_5": 22.69785444944125,
+      "q01": 25.78859648863173,
+      "q05": 38.691168506328225,
+      "median": 58.28557238901671,
+      "q95": 68.93190067892746,
+      "q99": 73.22590929676626,
+      "q99_5": 75.76225437824334,
+      "max": 83.61535857640109
+    },
+    "vertical_margin_deg": {
+      "min": -36.63411150261116,
+      "q00_5": -28.735139345410214,
+      "q01": -26.308641692584487,
+      "q05": -22.00093132749916,
+      "median": -11.105557373862458,
+      "q95": 9.111458447084392,
+      "q99": 22.31095593756464,
+      "q99_5": 24.211851701283333,
+      "max": 26.261925283644345
+    },
+    "per_episode": [
+      {
+        "episode": "205524 / E01",
+        "center_coverage_percent": 78.10526315789474,
+        "full_ball_coverage_percent": 68.63157894736842,
+        "minimum_margin_deg": -19.295298651461497,
+        "q00_5_margin_deg": -19.266295095270063
+      },
+      {
+        "episode": "205524 / E02",
+        "center_coverage_percent": 14.563106796116504,
+        "full_ball_coverage_percent": 0.0,
+        "minimum_margin_deg": -25.791145755349397,
+        "q00_5_margin_deg": -25.522729312447566
+      },
+      {
+        "episode": "205524 / E03",
+        "center_coverage_percent": 50.75301204819277,
+        "full_ball_coverage_percent": 40.21084337349398,
+        "minimum_margin_deg": -20.385624514594916,
+        "q00_5_margin_deg": -20.354553565243865
+      },
+      {
+        "episode": "205524 / E04",
+        "center_coverage_percent": 30.446058091286304,
+        "full_ball_coverage_percent": 14.989626556016598,
+        "minimum_margin_deg": -23.983600127996752,
+        "q00_5_margin_deg": -23.20962874075805
+      },
+      {
+        "episode": "205524 / E05",
+        "center_coverage_percent": 38.686868686868685,
+        "full_ball_coverage_percent": 26.767676767676768,
+        "minimum_margin_deg": -28.158112423069785,
+        "q00_5_margin_deg": -27.973280777721698
+      },
+      {
+        "episode": "205524 / E06",
+        "center_coverage_percent": 13.257142857142856,
+        "full_ball_coverage_percent": 0.0,
+        "minimum_margin_deg": -22.837522892389515,
+        "q00_5_margin_deg": -22.789903412078427
+      },
+      {
+        "episode": "205524 / E07",
+        "center_coverage_percent": 30.946291560102303,
+        "full_ball_coverage_percent": 17.902813299232736,
+        "minimum_margin_deg": -23.132434579613513,
+        "q00_5_margin_deg": -23.077079965359086
+      },
+      {
+        "episode": "205524 / E08",
+        "center_coverage_percent": 52.137468566638724,
+        "full_ball_coverage_percent": 38.139145012573344,
+        "minimum_margin_deg": -16.586213241890825,
+        "q00_5_margin_deg": -16.219444297061603
+      },
+      {
+        "episode": "224829 / E01",
+        "center_coverage_percent": 18.128342245989305,
+        "full_ball_coverage_percent": 8.181818181818182,
+        "minimum_margin_deg": -29.23175570693959,
+        "q00_5_margin_deg": -27.779820056531324
+      },
+      {
+        "episode": "224829 / E02",
+        "center_coverage_percent": 2.4264705882352944,
+        "full_ball_coverage_percent": 0.0,
+        "minimum_margin_deg": -36.63411150261116,
+        "q00_5_margin_deg": -36.516384104715186
+      },
+      {
+        "episode": "224829 / E03",
+        "center_coverage_percent": 24.820659971305595,
+        "full_ball_coverage_percent": 14.01243424198948,
+        "minimum_margin_deg": -25.88352863585927,
+        "q00_5_margin_deg": -25.346705935023845
+      },
+      {
+        "episode": "224829 / E04",
+        "center_coverage_percent": 25.048418334409295,
+        "full_ball_coverage_percent": 9.619109102646869,
+        "minimum_margin_deg": -22.75673969307165,
+        "q00_5_margin_deg": -22.65457660901446
+      },
+      {
+        "episode": "224829 / E05",
+        "center_coverage_percent": 5.403930131004367,
+        "full_ball_coverage_percent": 0.0,
+        "minimum_margin_deg": -24.926688608905696,
+        "q00_5_margin_deg": -24.313245669797084
+      },
+      {
+        "episode": "224829 / E06",
+        "center_coverage_percent": 7.517619420516837,
+        "full_ball_coverage_percent": 0.0,
+        "minimum_margin_deg": -24.253888357774578,
+        "q00_5_margin_deg": -23.8584025838662
+      },
+      {
+        "episode": "224829 / E07",
+        "center_coverage_percent": 26.616746085772636,
+        "full_ball_coverage_percent": 12.321307011572499,
+        "minimum_margin_deg": -28.585358404587673,
+        "q00_5_margin_deg": -27.94936723241926
+      },
+      {
+        "episode": "224829 / E08",
+        "center_coverage_percent": 18.75,
+        "full_ball_coverage_percent": 11.448598130841122,
+        "minimum_margin_deg": -22.541566763712453,
+        "q00_5_margin_deg": -22.143006165752738
+      }
+    ]
+  },
+  "recommended_mount": {
+    "layout": "inverted, forward-facing",
+    "forward_axis_down_pitch_deg": 31.5,
+    "additional_down_pitch_from_logged_mount_deg": 29.174212270068274,
+    "center_coverage_percent": 99.58829902491874,
+    "full_ball_coverage_percent": 99.15059588299025,
+    "elevation_deg": {
+      "min": -11.845405770590563,
+      "q00_5": -2.4509431101588186,
+      "q01": 0.8387630400998707,
+      "q05": 11.24630581394522,
+      "median": 29.573218136484403,
+      "q95": 40.24517790265838,
+      "q99": 44.49879453405613,
+      "q99_5": 47.349648151577554,
+      "max": 60.263470540949235
+    },
+    "vertical_margin_deg": {
+      "min": -13.157484130117119,
+      "q00_5": -4.050253510249866,
+      "q01": 0.534884172713575,
+      "q05": 5.876567264742519,
+      "median": 16.093323949368358,
+      "q95": 23.97320593743672,
+      "q99": 24.699402817125954,
+      "q99_5": 24.827050869304646,
+      "max": 26.627160389543157
+    },
+    "per_episode": [
+      {
+        "episode": "205524 / E01",
+        "center_coverage_percent": 100.0,
+        "full_ball_coverage_percent": 99.68421052631578,
+        "minimum_margin_deg": -0.1390991955056835,
+        "q00_5_margin_deg": 0.07279043143461653
+      },
+      {
+        "episode": "205524 / E02",
+        "center_coverage_percent": 100.0,
+        "full_ball_coverage_percent": 100.0,
+        "minimum_margin_deg": 2.419161214997642,
+        "q00_5_margin_deg": 2.6664097853911692
+      },
+      {
+        "episode": "205524 / E03",
+        "center_coverage_percent": 100.0,
+        "full_ball_coverage_percent": 100.0,
+        "minimum_margin_deg": 0.21134331775344162,
+        "q00_5_margin_deg": 0.2781235813886547
+      },
+      {
+        "episode": "205524 / E04",
+        "center_coverage_percent": 100.0,
+        "full_ball_coverage_percent": 100.0,
+        "minimum_margin_deg": 5.183175895297886,
+        "q00_5_margin_deg": 5.654193053358706
+      },
+      {
+        "episode": "205524 / E05",
+        "center_coverage_percent": 100.0,
+        "full_ball_coverage_percent": 100.0,
+        "minimum_margin_deg": 0.8377001337458045,
+        "q00_5_margin_deg": 1.0581930523116378
+      },
+      {
+        "episode": "205524 / E06",
+        "center_coverage_percent": 100.0,
+        "full_ball_coverage_percent": 100.0,
+        "minimum_margin_deg": 3.996271732473338,
+        "q00_5_margin_deg": 4.12052210933983
+      },
+      {
+        "episode": "205524 / E07",
+        "center_coverage_percent": 100.0,
+        "full_ball_coverage_percent": 100.0,
+        "minimum_margin_deg": 4.592499675179157,
+        "q00_5_margin_deg": 4.7192160539365045
+      },
+      {
+        "episode": "205524 / E08",
+        "center_coverage_percent": 97.31768650461022,
+        "full_ball_coverage_percent": 96.06035205364627,
+        "minimum_margin_deg": -8.82142334215929,
+        "q00_5_margin_deg": -8.515219638149262
+      },
+      {
+        "episode": "224829 / E01",
+        "center_coverage_percent": 100.0,
+        "full_ball_coverage_percent": 99.94652406417113,
+        "minimum_margin_deg": -0.19752815212766262,
+        "q00_5_margin_deg": 1.3472544328489233
+      },
+      {
+        "episode": "224829 / E02",
+        "center_coverage_percent": 95.36764705882354,
+        "full_ball_coverage_percent": 91.47058823529412,
+        "minimum_margin_deg": -13.157484130117119,
+        "q00_5_margin_deg": -11.80045258428084
+      },
+      {
+        "episode": "224829 / E03",
+        "center_coverage_percent": 100.0,
+        "full_ball_coverage_percent": 98.75657580105212,
+        "minimum_margin_deg": -3.570060796874859,
+        "q00_5_margin_deg": -2.894033534009016
+      },
+      {
+        "episode": "224829 / E04",
+        "center_coverage_percent": 100.0,
+        "full_ball_coverage_percent": 100.0,
+        "minimum_margin_deg": 6.119927890986761,
+        "q00_5_margin_deg": 6.3903223592418055
+      },
+      {
+        "episode": "224829 / E05",
+        "center_coverage_percent": 100.0,
+        "full_ball_coverage_percent": 100.0,
+        "minimum_margin_deg": 4.112761598020705,
+        "q00_5_margin_deg": 4.76901460971383
+      },
+      {
+        "episode": "224829 / E06",
+        "center_coverage_percent": 100.0,
+        "full_ball_coverage_percent": 100.0,
+        "minimum_margin_deg": 4.701579822338056,
+        "q00_5_margin_deg": 5.051977365805789
+      },
+      {
+        "episode": "224829 / E07",
+        "center_coverage_percent": 100.0,
+        "full_ball_coverage_percent": 99.79577944179714,
+        "minimum_margin_deg": -0.14103299491976173,
+        "q00_5_margin_deg": 0.5957589124367836
+      },
+      {
+        "episode": "224829 / E08",
+        "center_coverage_percent": 100.0,
+        "full_ball_coverage_percent": 100.0,
+        "minimum_margin_deg": 5.720679509848991,
+        "q00_5_margin_deg": 6.272877972370258
+      }
+    ]
+  },
+  "data_quality": {
+    "episodes_with_ball_position_jump": [
+      {
+        "episode": "224829 / E02",
+        "jump_m": 1.4558113675213442
+      }
+    ],
+    "rejected_unsynchronized_samples": 26,
+    "detected_chest_position_jumps": 0,
+    "detected_chest_orientation_jumps": 0,
+    "policy_frame_validation": {
+      "paired_policy_ticks": 5127,
+      "nearest_mocap_time_delta_ms": {
+        "median": 1.3396739959716797,
+        "q99": 4.716649055480946
+      },
+      "ball_pos_b_reconstruction_error_m": {
+        "median_norm": 0.0023184815555410167,
+        "q95_norm": 0.009428745723361703,
+        "q95_abs_xyz": [
+          0.0061608127954385855,
+          0.006834049063600232,
+          0.0039920868635592854
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "frame": "torso_link",
+  "coordinate_convention": {
+    "x": "forward",
+    "y": "left",
+    "z": "up"
+  },
+  "upper_anchor_centers_m": {
+    "left": [
+      0.0039563,
+      0.10022,
+      0.24778
+    ],
+    "right": [
+      0.0039563,
+      -0.10022,
+      0.24778
+    ]
+  },
+  "proposed_mid360": {
+    "origin_m": [
+      0.125,
+      0.0,
+      0.248
+    ],
+    "orientation": "inverted",
+    "forward_axis_down_pitch_deg": 35.5,
+    "yaw_deg": 0.0,
+    "practical_pitch_range_deg": [
+      33.0,
+      37.25
+    ],
+    "schematic_housing_size_m": [
+      0.065,
+      0.065,
+      0.06
+    ]
+  },
+  "bracket": {
+    "crossbar_x_m": 0.09,
+    "origin_extension_from_anchor_x_plane_mm": 121.0437,
+    "origin_ahead_of_torso_shell_at_anchor_height_mm": 53.0
+  },
+  "trusted_data": {
+    "samples": 23075,
+    "active_episodes": 16,
+    "duration_s": 102.5195,
+    "center_coverage_percent": 98.7302,
+    "full_20cm_ball_coverage_percent": 97.4085,
+    "central_99_percent_range_m": [
+      0.868,
+      1.836
+    ],
+    "central_99_percent_azimuth_deg": [
+      -81.85,
+      76.63
+    ]
+  },
+  "official_mid360_fov_deg": {
+    "horizontal": 360.0,
+    "vertical": [
+      -7.0,
+      52.0
+    ]
+  },
+  "engineering_note": "The housing envelope is schematic. Verify optical-origin and fastener geometry against the official MID-360 CAD before manufacturing the bracket."
+}
