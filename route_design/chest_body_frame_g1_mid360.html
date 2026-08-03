@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>G1 upper-chest MID-360 mount</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #14171c; font-family: "Segoe UI", "Noto Sans CJK SC", sans-serif; }
+  #app { width: 100%; height: 100%; }
+  #panel {
+    position: absolute; top: 14px; left: 14px; color: #dbe2ea; background: rgba(20,24,30,.9);
+    border: 1px solid #303845; border-radius: 10px; padding: 12px 16px; font-size: 13px;
+    max-width: 470px; line-height: 1.55; z-index: 10;
+  }
+  #panel h1 { font-size: 15px; margin: 0 0 6px; color: #fff; }
+  #panel code { background: #262c36; padding: 1px 5px; border-radius: 4px; font-size: 12px; color: #9fd0ff; }
+  #panel .dim { color: #8b95a5; font-size: 12px; }
+  #panel .good { color: #70e69a; }
+  #panel .accent { color: #63c7ff; }
+  #panel .warn { color: #ffc66d; }
+  #panel label { display: inline-flex; align-items: center; gap: 5px; margin: 4px 12px 0 0; cursor: pointer; user-select: none; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .lbl { color: #fff; font-size: 12px; white-space: nowrap; text-shadow: 0 1px 3px #000, 0 0 6px #000; }
+  .lbl small { color: #b9c2cf; }
+  #err { position: absolute; top: 40%; width: 100%; text-align: center; color: #ff8080; font-size: 15px; z-index: 20; display: none; line-height: 2; }
+  #err code { background: #262c36; padding: 1px 6px; border-radius: 4px; }
+  #hint { position: absolute; right: 14px; bottom: 10px; color: #6b7482; font-size: 12px; z-index: 10; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="panel">
+  <h1>G1 upper-chest MID-360 mount</h1>
+  <div>
+    anchor line: <code>z=0.24778 m</code>, <code>y=±0.10022 m</code><br>
+    MID-360 origin: <code>(x,y,z)=(0.125,0,0.248) m</code><br>
+    mount: <span class="accent"><b>inverted, +X forward, 35.5° down</b></span>
+  </div>
+  <div class="dim" style="margin-top:6px">
+    The two orange points are the upper-chest/shoulder anchor centers.
+    The bracket extends 121 mm from their x-plane; the sensor origin sits
+    about 53 mm ahead of the torso shell at this height.<br>
+    Trusted-data result: <span class="good">98.7% ball-center</span> and
+    <span class="good">97.4% full 20 cm-ball</span> vertical-FOV coverage.
+    Practical adjustment range: <span class="warn">33°–37° down</span>.<br>
+    Orange bracket = placement concept; verify usable fasteners, shoulder
+    clearance, and the official MID-360 CAD before fabrication.
+  </div>
+  <div style="margin-top:8px">
+    <span class="swatch" style="background:#ff4d4d"></span>X (forward)
+    <span class="swatch" style="background:#43d675;margin-left:10px"></span>Y (left)
+    <span class="swatch" style="background:#4d8dff;margin-left:10px"></span>Z (up)
+  </div>
+  <div style="margin-top:6px">
+    <label><input type="checkbox" id="ck_mount" checked> mount + anchors</label>
+    <label><input type="checkbox" id="ck_fov" checked> vertical-FOV slice</label>
+    <label><input type="checkbox" id="ck_chest"> chest frame</label>
+    <label><input type="checkbox" id="ck_ball" checked> ball @ reset</label>
+  </div>
+</div>
+<div id="err"></div>
+<div id="hint">drag: orbit &nbsp;·&nbsp; wheel: zoom &nbsp;·&nbsp; right-drag: pan</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+    "three/examples/jsm/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+import URDFLoader from 'https://cdn.jsdelivr.net/npm/urdf-loader@0.12.4/src/URDFLoader.js';
+
+const err = document.getElementById('err');
+if (location.protocol === 'file:') {
+  err.style.display = 'block';
+  err.innerHTML = '<code>file://</code> cannot fetch the URDF/STL files.<br>' +
+    'Run <code>python3 -m http.server</code> from the repo root, then open<br>' +
+    '<code>http://localhost:8000/route_design/chest_body_frame_g1_mid360.html</code>';
+  throw new Error('needs http server');
+}
+
+// Resolve from this HTML file rather than from the HTTP server root.  This
+// works whether the server was started from SoftTouch_dribble-sim or from one
+// of its parent directories (for example ~/Desktop).
+const ASSET_ROOT = new URL(
+  '../source/multiagent_sim/multiagent_sim/assets',
+  window.location.href
+).href.replace(/\/$/, '');
+const BODY_FRAME_OFFSET = new THREE.Vector3(0.077, 0.0, 0.148);
+const IMU_IN_TORSO = new THREE.Vector3(-0.03959, -0.00224, 0.14792);
+const UPPER_ANCHOR_LEFT = new THREE.Vector3(0.0039563, 0.10022, 0.24778);
+const UPPER_ANCHOR_RIGHT = new THREE.Vector3(0.0039563, -0.10022, 0.24778);
+const BRACKET_RAIL_X = 0.090;
+const MID360_ORIGIN = new THREE.Vector3(0.125, 0.0, 0.248);
+const MID360_DOWN_PITCH_DEG = 35.5;
+const MID360_FOV_LOW_DEG = -7.0;
+const MID360_FOV_HIGH_DEG = 52.0;
+const PELVIS_Z = 0.76;
+const BALL_R = 0.10, BALL_FWD = 0.65;
+const INIT_POSE = [
+  [/^(left|right)_hip_pitch_joint$/, -0.312],
+  [/^(left|right)_knee_joint$/, 0.669],
+  [/^(left|right)_ankle_pitch_joint$/, -0.363],
+  [/^(left|right)_elbow_joint$/, 0.6],
+  [/^left_shoulder_roll_joint$/, 0.2],
+  [/^left_shoulder_pitch_joint$/, 0.2],
+  [/^right_shoulder_roll_joint$/, -0.2],
+  [/^right_shoulder_pitch_joint$/, 0.2],
+];
+
+const app = document.getElementById('app');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x14171c);
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.05, 100);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+app.appendChild(renderer.domElement);
+const labelRenderer = new CSS2DRenderer();
+labelRenderer.setSize(innerWidth, innerHeight);
+labelRenderer.domElement.style.cssText = 'position:absolute;top:0;pointer-events:none;';
+app.appendChild(labelRenderer.domElement);
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 1.1));
+const dl = new THREE.DirectionalLight(0xffffff, 1.6);
+dl.position.set(2, 3, 2);
+scene.add(dl);
+const dl2 = new THREE.DirectionalLight(0xffffff, 0.5);
+dl2.position.set(-2, 1, -2);
+scene.add(dl2);
+
+scene.add(new THREE.GridHelper(4, 20, 0x3a4250, 0x262c36));
+
+// z-up (URDF) -> y-up (three): everything URDF-space lives in this group
+const world = new THREE.Group();
+world.rotation.x = -Math.PI / 2;
+scene.add(world);
+
+function makeLabel(html, right = false) {
+  const el = document.createElement('div');
+  el.className = 'lbl';
+  el.innerHTML = html;
+  const o = new CSS2DObject(el);
+  o.center.set(right ? 1.06 : -0.06, 0.5);
+  return o;
+}
+function marker(radius, color) {
+  return new THREE.Mesh(
+    new THREE.SphereGeometry(radius, 20, 14),
+    new THREE.MeshBasicMaterial({ color })
+  );
+}
+function axesArrows(len, thick = 0.006) {
+  const g = new THREE.Group();
+  const dirs = [[1, 0, 0, 0xff4d4d], [0, 1, 0, 0x43d675], [0, 0, 1, 0x4d8dff]];
+  for (const [x, y, z, c] of dirs) {
+    const dir = new THREE.Vector3(x, y, z);
+    const mat = new THREE.MeshBasicMaterial({ color: c });
+    const cyl = new THREE.Mesh(new THREE.CylinderGeometry(thick, thick, len * 0.8, 10), mat);
+    cyl.position.copy(dir.clone().multiplyScalar(len * 0.4));
+    cyl.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(thick * 2.6, len * 0.2, 12), mat);
+    cone.position.copy(dir.clone().multiplyScalar(len * 0.9));
+    cone.quaternion.copy(cyl.quaternion);
+    g.add(cyl, cone);
+  }
+  return g;
+}
+
+function cylinderBetween(a, b, radius, color, opacity = 1.0) {
+  const delta = b.clone().sub(a);
+  const length = delta.length();
+  const material = new THREE.MeshStandardMaterial({
+    color,
+    metalness: 0.55,
+    roughness: 0.32,
+    transparent: opacity < 1,
+    opacity,
+  });
+  const mesh = new THREE.Mesh(
+    new THREE.CylinderGeometry(radius, radius, length, 16),
+    material
+  );
+  mesh.position.copy(a).add(b).multiplyScalar(0.5);
+  mesh.quaternion.setFromUnitVectors(
+    new THREE.Vector3(0, 1, 0),
+    delta.normalize()
+  );
+  return mesh;
+}
+
+function urdfQuaternion(roll, pitch, yaw) {
+  const qx = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(1, 0, 0), roll
+  );
+  const qy = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(0, 1, 0), pitch
+  );
+  const qz = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(0, 0, 1), yaw
+  );
+  return qz.multiply(qy).multiply(qx);
+}
+
+function fovSlice(radius, lowDeg, highDeg, color) {
+  const steps = 48;
+  const positions = [];
+  for (let i = 0; i < steps; ++i) {
+    const a0 = THREE.MathUtils.degToRad(
+      lowDeg + (highDeg - lowDeg) * i / steps
+    );
+    const a1 = THREE.MathUtils.degToRad(
+      lowDeg + (highDeg - lowDeg) * (i + 1) / steps
+    );
+    positions.push(
+      0, 0, 0,
+      radius * Math.cos(a0), 0, radius * Math.sin(a0),
+      radius * Math.cos(a1), 0, radius * Math.sin(a1)
+    );
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute(
+    'position',
+    new THREE.Float32BufferAttribute(positions, 3)
+  );
+  const group = new THREE.Group();
+  group.add(new THREE.Mesh(
+    geometry,
+    new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.13,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    })
+  ));
+  for (const angleDeg of [lowDeg, highDeg]) {
+    const angle = THREE.MathUtils.degToRad(angleDeg);
+    const points = [
+      new THREE.Vector3(),
+      new THREE.Vector3(
+        radius * Math.cos(angle),
+        0,
+        radius * Math.sin(angle)
+      ),
+    ];
+    group.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(points),
+      new THREE.LineBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0.9,
+      })
+    ));
+  }
+  return group;
+}
+
+function angleArc(radius, angleDeg, color) {
+  const points = [];
+  for (let i = 0; i <= 32; ++i) {
+    const angle = THREE.MathUtils.degToRad(angleDeg * i / 32);
+    points.push(new THREE.Vector3(
+      radius * Math.cos(angle),
+      0,
+      -radius * Math.sin(angle)
+    ));
+  }
+  return new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(points),
+    new THREE.LineBasicMaterial({ color, linewidth: 2 })
+  );
+}
+
+const manager = new THREE.LoadingManager();
+manager.onError = url => {
+  err.style.display = 'block';
+  err.innerHTML = 'failed to load: <code>' + url + '</code><br>' +
+    'Serve this page from <code>SoftTouch_dribble-sim</code> or one of its ' +
+    'parent directories; do not start the server inside <code>route_design</code>.';
+};
+const loader = new URDFLoader(manager);
+loader.packages = { unitree_description: ASSET_ROOT + '/unitree_description' };
+
+loader.load(ASSET_ROOT + '/unitree_description/urdf/g1/main.urdf', robot => {
+  robot.position.set(0, 0, PELVIS_Z);
+  for (const [name, joint] of Object.entries(robot.joints)) {
+    for (const [pat, val] of INIT_POSE) {
+      if (pat.test(name)) joint.setJointValue(val);
+    }
+  }
+  const torso = robot.links['torso_link'];
+  // STL meshes arrive async; recolor once every mesh has loaded
+  manager.onLoad = () => {
+    const grey = new THREE.MeshStandardMaterial({ color: 0x9aa0aa, metalness: 0.25, roughness: 0.55 });
+    const blue = new THREE.MeshStandardMaterial({ color: 0x5a8fd0, metalness: 0.25, roughness: 0.5 });
+    robot.traverse(o => { if (o.isMesh && !o.userData.anno) o.material = grey; });
+    // only torso_link's own visuals — its children also hold the arm/head subtree
+    for (const c of torso.children) {
+      if (c.isURDFVisual) c.traverse(o => { if (o.isMesh) o.material = blue; });
+    }
+  };
+  world.add(robot);
+
+  // chest body frame: attached to torso_link, so placement is exact by construction
+  const chest = new THREE.Group();
+  chest.position.copy(BODY_FRAME_OFFSET);
+  chest.add(axesArrows(0.26));
+  chest.add(marker(0.015, 0xffd91a));
+  chest.add(makeLabel('<b>chest body frame</b> <small>torso_link ⊕ (0.077, 0, 0.148)</small>'));
+  torso.add(chest);
+
+  const torsoDot = marker(0.010, 0xff9e1a);
+  torsoDot.add(makeLabel('torso_link origin'));
+  torso.add(torsoDot);
+
+  const imu = marker(0.010, 0xe05ae0);
+  imu.position.copy(IMU_IN_TORSO);
+  imu.add(makeLabel('imu_in_torso <small>z=0.14792</small>', true));
+  torso.add(imu);
+
+  // Upper-chest MID-360 concept: use the two shoulder-height anchor centers,
+  // bridge them with a stiff U-bracket, and place the LiDAR origin just ahead
+  // of the front shell on the torso centerline.
+  const mount = new THREE.Group();
+  const anchorMaterial = new THREE.MeshBasicMaterial({ color: 0xff9f1c });
+  for (const [point, side] of [
+    [UPPER_ANCHOR_LEFT, 'left'],
+    [UPPER_ANCHOR_RIGHT, 'right'],
+  ]) {
+    const anchor = new THREE.Mesh(
+      new THREE.SphereGeometry(0.014, 20, 14),
+      anchorMaterial
+    );
+    anchor.position.copy(point);
+    anchor.add(makeLabel(
+      `${side} upper anchor <small>z=${point.z.toFixed(5)}</small>`,
+      side === 'right'
+    ));
+    mount.add(anchor);
+    const railPoint = new THREE.Vector3(
+      BRACKET_RAIL_X, point.y, MID360_ORIGIN.z
+    );
+    mount.add(cylinderBetween(point, railPoint, 0.006, 0xff9f1c));
+  }
+  const railLeft = new THREE.Vector3(
+    BRACKET_RAIL_X, UPPER_ANCHOR_LEFT.y, MID360_ORIGIN.z
+  );
+  const railRight = new THREE.Vector3(
+    BRACKET_RAIL_X, UPPER_ANCHOR_RIGHT.y, MID360_ORIGIN.z
+  );
+  const railCenter = new THREE.Vector3(
+    BRACKET_RAIL_X, 0.0, MID360_ORIGIN.z
+  );
+  mount.add(cylinderBetween(railLeft, railRight, 0.006, 0xff9f1c));
+  mount.add(cylinderBetween(
+    railCenter, MID360_ORIGIN, 0.007, 0xff9f1c
+  ));
+
+  const sensorQuaternion = urdfQuaternion(
+    0.0,
+    Math.PI - THREE.MathUtils.degToRad(MID360_DOWN_PITCH_DEG),
+    Math.PI
+  );
+  const sensorPose = new THREE.Group();
+  sensorPose.position.copy(MID360_ORIGIN);
+  sensorPose.quaternion.copy(sensorQuaternion);
+  const sensorGeometry = new THREE.BoxGeometry(0.065, 0.065, 0.060);
+  const sensorBody = new THREE.Mesh(
+    sensorGeometry,
+    new THREE.MeshStandardMaterial({
+      color: 0x28b9e8,
+      metalness: 0.38,
+      roughness: 0.32,
+      transparent: true,
+      opacity: 0.88,
+    })
+  );
+  const sensorEdges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(sensorGeometry),
+    new THREE.LineBasicMaterial({ color: 0xd7f5ff })
+  );
+  sensorPose.add(sensorBody, sensorEdges, axesArrows(0.12, 0.003));
+  mount.add(sensorPose);
+
+  const sensorOriginDot = marker(0.010, 0xf7f7ff);
+  sensorOriginDot.position.copy(MID360_ORIGIN);
+  sensorOriginDot.add(makeLabel(
+    '<b>MID-360 origin</b> <small>(0.125, 0, 0.248) m</small>'
+  ));
+  mount.add(sensorOriginDot);
+
+  const torsoForwardEnd = MID360_ORIGIN.clone().add(
+    new THREE.Vector3(0.28, 0, 0)
+  );
+  const sensorForward = new THREE.Vector3(1, 0, 0)
+    .applyQuaternion(sensorQuaternion);
+  const sensorForwardEnd = MID360_ORIGIN.clone().add(
+    sensorForward.multiplyScalar(0.32)
+  );
+  mount.add(cylinderBetween(
+    MID360_ORIGIN, torsoForwardEnd, 0.0022, 0xb6bec9, 0.8
+  ));
+  mount.add(cylinderBetween(
+    MID360_ORIGIN, sensorForwardEnd, 0.0032, 0x63c7ff, 0.95
+  ));
+  const pitchArc = angleArc(0.19, MID360_DOWN_PITCH_DEG, 0xffd166);
+  pitchArc.position.copy(MID360_ORIGIN);
+  mount.add(pitchArc);
+  const angleLabel = makeLabel(
+    `<b>${MID360_DOWN_PITCH_DEG.toFixed(1)}° down</b> ` +
+    '<small>relative to torso +X</small>'
+  );
+  const halfAngle = THREE.MathUtils.degToRad(
+    MID360_DOWN_PITCH_DEG * 0.5
+  );
+  angleLabel.position.copy(MID360_ORIGIN).add(new THREE.Vector3(
+    0.22 * Math.cos(halfAngle),
+    0,
+    -0.22 * Math.sin(halfAngle)
+  ));
+  mount.add(angleLabel);
+
+  const extensionLabel = makeLabel(
+    '<b>121 mm forward</b> <small>from anchor x-plane</small>',
+    true
+  );
+  extensionLabel.position.set(
+    0.5 * (UPPER_ANCHOR_LEFT.x + MID360_ORIGIN.x),
+    -0.035,
+    MID360_ORIGIN.z + 0.025
+  );
+  mount.add(extensionLabel);
+  torso.add(mount);
+
+  const fov = new THREE.Group();
+  fov.position.copy(MID360_ORIGIN);
+  fov.quaternion.copy(sensorQuaternion);
+  fov.add(fovSlice(
+    1.70,
+    MID360_FOV_LOW_DEG,
+    MID360_FOV_HIGH_DEG,
+    0x27d3a2
+  ));
+  const fovLabel = makeLabel(
+    '<b>MID-360 vertical-FOV slice</b> ' +
+    '<small>native −7° … +52°</small>'
+  );
+  const fovLabelLocal = new THREE.Vector3(
+    0.92 * Math.cos(THREE.MathUtils.degToRad(22)),
+    0,
+    0.92 * Math.sin(THREE.MathUtils.degToRad(22))
+  );
+  fovLabel.position.copy(fovLabelLocal);
+  fov.add(fovLabel);
+  torso.add(fov);
+
+  const pelvisFrame = new THREE.Group();
+  pelvisFrame.add(axesArrows(0.15, 0.004));
+  pelvisFrame.add(marker(0.010, 0xb0b0b8));
+  pelvisFrame.add(makeLabel('pelvis (root frame)', true));
+  robot.links['pelvis'].add(pelvisFrame);
+
+  // ball at reset: chest-forward 0.65 m, resting on the ground (URDF z-up coords)
+  torso.updateWorldMatrix(true, false);
+  const chestUrdf = world.worldToLocal(torso.localToWorld(BODY_FRAME_OFFSET.clone()));
+  const ball = new THREE.Mesh(
+    new THREE.SphereGeometry(BALL_R, 32, 20),
+    new THREE.MeshStandardMaterial({ color: 0xe8e8e4, roughness: 0.4 })
+  );
+  ball.position.set(chestUrdf.x + BALL_FWD, chestUrdf.y, BALL_R);
+  ball.add(makeLabel('ball @ reset <small>0.65 m chest-forward, r=0.10</small>'));
+  world.add(ball);
+
+  for (const g of [chest, torsoDot, imu, pelvisFrame, mount, fov]) {
+    g.traverse(o => { o.userData.anno = true; });
+  }
+
+  const ck = id => document.getElementById(id);
+  chest.visible = false;
+  pelvisFrame.visible = false;
+  imu.visible = false;
+  torsoDot.visible = false;
+  ck('ck_mount').onchange = e => mount.visible = e.target.checked;
+  ck('ck_fov').onchange = e => fov.visible = e.target.checked;
+  ck('ck_chest').onchange = e => chest.visible = e.target.checked;
+  ck('ck_ball').onchange = e => ball.visible = e.target.checked;
+
+  // aim camera at the chest (three y-up coords)
+  const t = world.localToWorld(chestUrdf.clone());
+  controls.target.copy(t).add(new THREE.Vector3(0, 0.10, 0));
+  camera.position.set(t.x + 1.45, t.y + 0.48, t.z + 1.10);
+  controls.update();
+});
+
+const controls = new OrbitControls(camera, renderer.domElement);
+camera.position.set(1.5, 1.2, 1.8);
+controls.target.set(0, 0.8, 0);
+controls.update();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  labelRenderer.setSize(innerWidth, innerHeight);
+});
+renderer.setAnimationLoop(() => {
+  controls.update();
+  renderer.render(scene, camera);
+  labelRenderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
